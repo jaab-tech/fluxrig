@@ -22,3 +22,15 @@ vendor/
 
 # Logs
 *.log
+
+# Local Data
+data/
+# *.duckdb (Removed as it's now in ignored data/)
+
+
+# Python
+.venv/
+__pycache__/
+
+# Test Artifacts
+test/test_logs/

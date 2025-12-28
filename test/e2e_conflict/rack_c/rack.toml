@@ -1,0 +1,10 @@
+[logging]
+level = "debug"
+
+[rack]
+name = "" # Force empty to trigger Zero Config logic
+name_prefix = "probes-" # Arbitrary Prefix Test
+data_dir = "test/e2e_conflict/rack_c/data"
+
+[rack.bus]
+url = "nats://localhost:4223"

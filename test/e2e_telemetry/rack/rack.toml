@@ -1,0 +1,16 @@
+[rack]
+name = "rack-e2e-telemetry-01"
+data_dir = "test/e2e_telemetry/rack/data"
+
+[rack.bus]
+url = "nats://localhost:4225"
+
+[logging]
+level = "debug"
+log_type = "json"
+
+[telemetry]
+service_name = "flux-rack-e2e"
+export_type = "nats"
+export_interval = "100ms" # Very fast flush for test
+batch_size = 1

@@ -1,0 +1,11 @@
+[logging]
+level = "debug"
+
+[rack]
+name = "offline-rack"
+machine_id = 0
+data_dir = "test/e2e_offline/rack/data"
+heartbeat_interval = "2s"
+
+[rack.bus]
+url = "nats://localhost:4223"
