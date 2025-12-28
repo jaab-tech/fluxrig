@@ -1,0 +1,10 @@
+[logging]
+level = "debug"
+
+[rack]
+name = "rack-e2e-01"
+data_dir = "test/e2e_simple/rack/data"
+heartbeat_interval = "1s"
+
+[rack.bus]
+url = "nats://localhost:4223"

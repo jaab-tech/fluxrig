@@ -1,0 +1,115 @@
+package commands
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+func TestRacksList(t *testing.T) {
+	// Mock Server
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/racks" {
+			racks := []map[string]any{
+				{"machine_id": 1, "name": "rack-1", "status": "active"},
+			}
+			json.NewEncoder(w).Encode(racks) //nolint:errcheck
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer mockServer.Close()
+
+	// Execute Command
+	out, err := executeCommand(rootCmd, "admin", "racks", "list", "--api-url", mockServer.URL)
+	if err != nil {
+		t.Fatalf("Command failed: %v", err)
+	}
+
+	// Verify Output
+	if !strings.Contains(out, "rack-1") {
+		t.Errorf("Expected 'rack-1' in output, got: %s", out)
+	}
+}
+
+func TestRacksApprove(t *testing.T) {
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" && strings.Contains(r.URL.Path, "/approve") {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer mockServer.Close()
+
+	out, err := executeCommand(rootCmd, "admin", "racks", "approve", "1", "--name", "new-name", "--api-url", mockServer.URL)
+	if err != nil {
+		t.Fatalf("Approve failed: %v", err)
+	}
+
+	if !strings.Contains(out, "approved") {
+		t.Errorf("Expected 'approved' in output, got: %s", out)
+	}
+}
+
+func TestRacksSuspend(t *testing.T) {
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" && strings.Contains(r.URL.Path, "/suspend") {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer mockServer.Close()
+
+	out, err := executeCommand(rootCmd, "admin", "racks", "suspend", "1", "--api-url", mockServer.URL)
+	if err != nil {
+		t.Fatalf("Suspend failed: %v", err)
+	}
+
+	if !strings.Contains(out, "suspend") {
+		t.Errorf("Expected 'suspend' in output, got: %s", out)
+	}
+}
+
+func TestRacksActivate(t *testing.T) {
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" && strings.Contains(r.URL.Path, "/activate") {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer mockServer.Close()
+
+	out, err := executeCommand(rootCmd, "admin", "racks", "activate", "1", "--api-url", mockServer.URL)
+	if err != nil {
+		t.Fatalf("Activate failed: %v", err)
+	}
+
+	if !strings.Contains(out, "activated") {
+		t.Errorf("Expected 'activated' in output, got: %s", out)
+	}
+}
+
+func TestRacksRemove(t *testing.T) {
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "DELETE" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer mockServer.Close()
+
+	out, err := executeCommand(rootCmd, "admin", "racks", "remove", "1", "--api-url", mockServer.URL)
+	if err != nil {
+		t.Fatalf("Remove failed: %v", err)
+	}
+
+	if !strings.Contains(out, "removed") {
+		t.Errorf("Expected 'removed' in output, got: %s", out)
+	}
+}

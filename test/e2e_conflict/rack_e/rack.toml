@@ -1,0 +1,10 @@
+[logging]
+level = "debug"
+
+[rack]
+name = "" # Completely empty
+# name_prefix defaults to "node-"
+data_dir = "test/e2e_conflict/rack_e/data"
+
+[rack.bus]
+url = "nats://localhost:4223"

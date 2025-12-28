@@ -1,0 +1,11 @@
+[logging]
+level = "debug"
+
+[rack]
+# name = "rack-test-01" # Commented out to force Zero Config -> Pending
+name_prefix = "cli-test-" # Use prefix to easily identify
+data_dir = "test/e2e_cli/rack/data"
+heartbeat_interval = "2s"
+
+[rack.bus]
+url = "nats://localhost:4223"

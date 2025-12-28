@@ -1,0 +1,14 @@
+[logging]
+level = "debug"
+
+[api]
+port = 8090
+
+[snake]
+port = 4223
+url = "nats://localhost:4223"
+store_dir = "test/e2e_cli/mixer/data/js"
+
+[store]
+path = "test/e2e_cli/mixer/data/fluxrig_test.duckdb"
+cluster_key_path = "test/e2e_cli/mixer/data/cluster.key"

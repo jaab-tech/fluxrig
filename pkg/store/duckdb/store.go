@@ -1,0 +1,558 @@
+package duckdb
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"time"
+
+	_ "github.com/marcboeker/go-duckdb"
+)
+
+// Store manages the DuckDB connection.
+type Store struct {
+	db      *sql.DB
+	dataDir string // Directory containing the DB file and telemetry
+}
+
+// NewStore opens a DuckDB database file.
+func NewStore(path string) (*Store, error) {
+	// If path is empty, use in-memory
+	dsn := path
+	if dsn == "" {
+		dsn = ":memory:" // Standard in-memory
+	}
+
+	db, err := sql.Open("duckdb", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open duckdb: %w", err)
+	}
+
+	if err := db.Ping(); err != nil {
+		return nil, fmt.Errorf("failed to ping duckdb: %w", err)
+	}
+
+	// Derive dataDir from path
+	dataDir := "data"
+	if path != "" && path != ":memory:" {
+		dataDir = filepath.Dir(path)
+	}
+
+	return &Store{db: db, dataDir: dataDir}, nil
+}
+
+// Close closes the database connection.
+func (s *Store) Close() error {
+	return s.db.Close()
+}
+
+// DB returns the underlying sql.DB instance.
+func (s *Store) DB() *sql.DB {
+	return s.db
+}
+
+// InitializeSchema creates the foundational tables if they don't exist.
+func (s *Store) InitializeSchema(ctx context.Context) error {
+	query := `
+	CREATE TABLE IF NOT EXISTS registry (
+		entity_id UBIGINT PRIMARY KEY,    -- fluxEntityID
+		type_id USMALLINT,                -- 2=Mixer, 3=Rack, 8=Snake
+		machine_id USMALLINT,             -- Rack/Mixer ID
+		name TEXT,                        -- Unique Hostname
+		status TEXT DEFAULT 'offline',    -- active/pending/offline
+		version TEXT,
+		started_at TIMESTAMP,
+		last_seen TIMESTAMP,
+		stats JSON,
+		attributes JSON                   -- Unified Attributes (IP, Port, Secret, Stats, etc.)
+	);
+	
+	CREATE SEQUENCE IF NOT EXISTS seq_machine_id_server START 100;
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_registry_name ON registry (name);
+	`
+	_, err := s.db.ExecContext(ctx, query)
+	return err
+}
+
+// InitializeTelemetrySchema creates tables for embedded observability.
+func (s *Store) InitializeTelemetrySchema(ctx context.Context) error {
+	// 1. Logs
+	_, err := s.db.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS telemetry_logs (
+			timestamp TIMESTAMP,
+			entity_id UBIGINT,
+			entity_name TEXT,
+			trace_id TEXT,
+			span_id TEXT,
+			severity TEXT,
+			body TEXT,
+			attributes JSON
+		);
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create logs table: %w", err)
+	}
+
+	// 2. Spans (Traces)
+	_, err = s.db.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS telemetry_spans (
+			start_time TIMESTAMP,
+			end_time TIMESTAMP,
+			entity_id UBIGINT,
+			entity_name TEXT,
+			trace_id TEXT,
+			span_id TEXT,
+			parent_span_id TEXT,
+			name TEXT,
+			kind TEXT,
+			status_code TEXT,
+			status_message TEXT,
+			attributes JSON
+		);
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create spans table: %w", err)
+	}
+
+	// 3. Metrics (Simplified)
+	_, err = s.db.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS telemetry_metrics (
+			timestamp TIMESTAMP,
+			entity_id UBIGINT,
+			entity_name TEXT,
+			name TEXT,
+			description TEXT,
+			unit TEXT,
+			type TEXT,
+			value DOUBLE,
+			attributes JSON
+		);
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create metrics table: %w", err)
+	}
+
+	return nil
+}
+
+// Wipe drops all tables. internal use for testing.
+func (s *Store) Wipe(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, "DROP TABLE IF EXISTS registry; DROP SEQUENCE IF EXISTS seq_machine_id_server;")
+	return err
+}
+
+// FlushTelemetry exports the current buffer tables to Parquet files and clears them.
+func (s *Store) FlushTelemetry(ctx context.Context, dataDir string) error {
+	tables := map[string]string{
+		"telemetry_logs":    "logs",
+		"telemetry_spans":   "spans",
+		"telemetry_metrics": "metrics",
+	}
+	ts := time.Now().UTC()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	for table, dirName := range tables {
+		dir := filepath.Join(dataDir, dirName, ts.Format("2006/01/02/15"))
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("failed to create dir %s: %w", dir, err)
+		}
+
+		filename := fmt.Sprintf("%s_%d.parquet", dirName, ts.UnixNano())
+		path := filepath.Join(dir, filename)
+
+		var count int
+		row := tx.QueryRowContext(ctx, fmt.Sprintf("SELECT count(*) FROM %s", table))
+		if err := row.Scan(&count); err != nil {
+			return err
+		}
+
+		if count == 0 {
+			continue
+		}
+
+		//nolint:gosec
+		query := fmt.Sprintf("COPY (SELECT * FROM %s) TO '%s' (FORMAT 'parquet', COMPRESSION 'zstd')", table, path)
+		if _, err := tx.ExecContext(ctx, query); err != nil {
+			return fmt.Errorf("failed to export %s: %w", table, err)
+		}
+
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s", table)); err != nil {
+			return fmt.Errorf("failed to truncate %s: %w", table, err)
+		}
+	}
+
+	return tx.Commit()
+}
+
+// RegisterMixer upserts the Mixer's status in the registry.
+func (s *Store) RegisterMixer(ctx context.Context, mid uint16, name string, eid uint64, addr, version string) error {
+	now := time.Now()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, "DELETE FROM registry WHERE name = ? AND type_id = 2", name); err != nil {
+		return err
+	}
+
+	attrs := map[string]any{
+		"api_address": addr,
+	}
+	attrsJSON, _ := json.Marshal(attrs)
+
+	stats := map[string]any{
+		"goroutines": runtime.NumGoroutine(),
+		"cpu_cores":  runtime.NumCPU(),
+	}
+	statsJSON, _ := json.Marshal(stats)
+
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO registry (entity_id, type_id, machine_id, name, status, version, started_at, last_seen, stats, attributes)
+		VALUES (?, 2, ?, ?, 'active', ?, ?, ?, ?, ?)
+	`, eid, mid, name, version, now, now, string(statsJSON), string(attrsJSON))
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+// RegisterSnake upserts a Snake (Link) into the registry.
+func (s *Store) RegisterSnake(ctx context.Context, name string, eid uint64, version string, fromRack uint64, toMixer uint64, rackIP string, rackPort int, mixerIP string, mixerPort int, machineID uint16) error {
+	now := time.Now()
+	// No Tx needed? Use same DELETE+INSERT logic as Approve for consistency?
+	// But Snake registration is high frequency. It uses Transactions currently.
+	// Let's stick to Tx for now, assuming no PK collision on unrelated entities.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, "DELETE FROM registry WHERE entity_id = ? AND type_id = 8", eid); err != nil {
+		return err
+	}
+
+	attrs := map[string]any{
+		"rack":       fmt.Sprintf("%d", fromRack),
+		"mixer":      fmt.Sprintf("%d", toMixer),
+		"rack_ip":    rackIP,
+		"rack_port":  rackPort,
+		"mixer_ip":   mixerIP,
+		"mixer_port": mixerPort,
+	}
+	attrsJSON, _ := json.Marshal(attrs)
+	stats := map[string]any{}
+	statsJSON, _ := json.Marshal(stats)
+
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO registry (entity_id, type_id, machine_id, name, status, version, started_at, last_seen, stats, attributes)
+		VALUES (?, 8, ?, ?, 'active', ?, ?, ?, ?, ?)
+	`, eid, machineID, name, version, now, now, string(statsJSON), string(attrsJSON))
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+// UpdateSnakeStats updates the stats column for a given Snake.
+func (s *Store) UpdateSnakeStats(ctx context.Context, eid uint64, stats map[string]any) error {
+	statsJSON, err := json.Marshal(stats)
+	if err != nil {
+		return err
+	}
+	now := time.Now()
+
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE registry 
+		SET stats = ?, last_seen = ? 
+		WHERE entity_id = ? AND type_id = 8
+	`, string(statsJSON), now, eid)
+
+	if err != nil {
+		return err
+	}
+
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		return fmt.Errorf("snake not found: %d", eid)
+	}
+	return nil
+}
+
+// ClearSnakes removes all snake entities (used on startup).
+func (s *Store) ClearSnakes(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, "DELETE FROM registry WHERE type_id = 8")
+	return err
+}
+
+// RemoveSnake deletes a Snake from the registry.
+func (s *Store) RemoveSnake(ctx context.Context, eid uint64) error {
+	res, err := s.db.ExecContext(ctx, "DELETE FROM registry WHERE entity_id = ? AND type_id = 8", eid)
+	if err != nil {
+		return err
+	}
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		return fmt.Errorf("snake not found: %d", eid)
+	}
+	return nil
+}
+
+// GetEntityIDByName resolves an entity name to its ID.
+func (s *Store) GetEntityIDByName(ctx context.Context, name string) (uint64, error) {
+	var eid uint64
+	row := s.db.QueryRowContext(ctx, "SELECT entity_id FROM registry WHERE name = ?", name)
+	if err := row.Scan(&eid); err != nil {
+		return 0, err
+	}
+	return eid, nil
+}
+
+// TelemetryLog represents a log entry.
+type TelemetryLog struct {
+	Timestamp  time.Time      `json:"timestamp"`
+	EntityName string         `json:"entity_name"`
+	Severity   string         `json:"severity"`
+	Body       string         `json:"body"`
+	Attributes map[string]any `json:"attributes"`
+}
+
+// LogQuery defines filters for querying logs.
+type LogQuery struct {
+	Limit    int
+	Entity   string    // Optional: filter by entity name/pattern
+	MinLevel string    // Optional: minimum severity (ERROR, WARN, INFO, DEBUG)
+	Since    time.Time // Time filter (if zero, defaults to 24h ago)
+	Until    time.Time // Optional: end time (defaults to now)
+}
+
+// QueryLogsFiltered retrieves logs with comprehensive filtering.
+// Defaults to last 24 hours if no time filter specified.
+func (s *Store) QueryLogsFiltered(ctx context.Context, q LogQuery) ([]TelemetryLog, error) {
+	// Apply 24-hour default if no time filter
+	if q.Since.IsZero() {
+		q.Since = time.Now().Add(-24 * time.Hour)
+		slog.Info("Query logs defaulting to last 24 hours", "since", q.Since)
+	}
+
+	// Build WHERE conditions
+	var conditions []string
+	var args []interface{}
+
+	conditions = append(conditions, "timestamp >= ?")
+	args = append(args, q.Since)
+
+	if !q.Until.IsZero() {
+		conditions = append(conditions, "timestamp <= ?")
+		args = append(args, q.Until)
+	}
+	if q.Entity != "" {
+		conditions = append(conditions, "entity_name LIKE ?")
+		args = append(args, q.Entity)
+	}
+	if q.MinLevel != "" {
+		// Map severity to numeric for comparison
+		severityOrder := map[string]int{"DEBUG": 0, "INFO": 1, "WARN": 2, "ERROR": 3}
+		if minOrder, ok := severityOrder[q.MinLevel]; ok {
+			var levels []string
+			for level, order := range severityOrder {
+				if order >= minOrder {
+					levels = append(levels, "'"+level+"'")
+				}
+			}
+			conditions = append(conditions, "severity IN ("+strings.Join(levels, ",")+")")
+		}
+	}
+
+	whereClause := "WHERE " + strings.Join(conditions, " AND ")
+
+	query := ""
+	logsDir := filepath.Join(s.dataDir, "telemetry", "logs")
+	if hasParquetFiles(logsDir) {
+		// Query both active table AND parquet files
+		parquetPath := filepath.Join(logsDir, "**", "*.parquet")
+		//nolint:gosec // whereClause built from validated params
+		query = fmt.Sprintf(`
+			SELECT timestamp, entity_name, severity, body, attributes FROM (
+				SELECT timestamp, entity_name, severity, body, attributes FROM telemetry_logs
+				UNION ALL
+				SELECT timestamp, entity_name, severity, body, attributes FROM read_parquet('%s')
+			) %s ORDER BY timestamp DESC LIMIT ?`,
+			parquetPath, whereClause)
+	} else {
+		// Query only active table
+		//nolint:gosec // whereClause built from validated params
+		query = fmt.Sprintf(
+			"SELECT timestamp, entity_name, severity, body, attributes FROM telemetry_logs %s ORDER BY timestamp DESC LIMIT ?",
+			whereClause)
+	}
+
+	args = append(args, q.Limit)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var logs []TelemetryLog
+	for rows.Next() {
+		var l TelemetryLog
+		var attrAny any
+		if err := rows.Scan(&l.Timestamp, &l.EntityName, &l.Severity, &l.Body, &attrAny); err != nil {
+			return nil, err
+		}
+
+		// Handle Attributes unmarshaling (DuckDB can return JSON as map or []byte)
+		if m, ok := attrAny.(map[string]any); ok {
+			l.Attributes = m
+		} else if b, ok := attrAny.([]byte); ok && len(b) > 0 {
+			_ = json.Unmarshal(b, &l.Attributes)
+		} else if str, ok := attrAny.(string); ok && len(str) > 0 {
+			_ = json.Unmarshal([]byte(str), &l.Attributes)
+		}
+
+		logs = append(logs, l)
+	}
+	return logs, nil
+}
+
+// QueryLogs retrieves recent logs (backwards compatibility).
+func (s *Store) QueryLogs(ctx context.Context, limit int) ([]TelemetryLog, error) {
+	return s.QueryLogsFiltered(ctx, LogQuery{Limit: limit})
+}
+
+// TelemetryMetric represents a metric point.
+type TelemetryMetric struct {
+	Timestamp  time.Time      `json:"timestamp"`
+	EntityName string         `json:"entity_name"`
+	Name       string         `json:"name"`
+	Type       string         `json:"type"`
+	Value      float64        `json:"value"`
+	Attributes map[string]any `json:"attributes"`
+}
+
+// MetricQuery defines filters for querying metrics.
+type MetricQuery struct {
+	Limit  int
+	Entity string    // Optional: filter by entity name
+	Name   string    // Optional: filter by metric name
+	Since  time.Time // Time filter (if zero, defaults to 24h ago)
+	Until  time.Time // Optional: end time
+}
+
+// QueryMetricsFiltered retrieves metrics with comprehensive filtering.
+// Defaults to last 24 hours if no time filter specified.
+func (s *Store) QueryMetricsFiltered(ctx context.Context, q MetricQuery) ([]TelemetryMetric, error) {
+	// Apply 24-hour default if no time filter
+	if q.Since.IsZero() {
+		q.Since = time.Now().Add(-24 * time.Hour)
+		slog.Info("Query metrics defaulting to last 24 hours", "since", q.Since)
+	}
+
+	// Build WHERE conditions
+	var conditions []string
+	var args []interface{}
+
+	conditions = append(conditions, "timestamp >= ?")
+	args = append(args, q.Since)
+
+	if !q.Until.IsZero() {
+		conditions = append(conditions, "timestamp <= ?")
+		args = append(args, q.Until)
+	}
+	if q.Entity != "" {
+		conditions = append(conditions, "entity_name LIKE ?")
+		args = append(args, q.Entity)
+	}
+	if q.Name != "" {
+		conditions = append(conditions, "name LIKE ?")
+		args = append(args, q.Name)
+	}
+
+	whereClause := "WHERE " + strings.Join(conditions, " AND ")
+
+	query := ""
+	metricsDir := filepath.Join(s.dataDir, "metrics")
+	if hasParquetFiles(metricsDir) {
+		// Query both active table AND parquet files
+		parquetPath := filepath.Join(metricsDir, "**", "*.parquet")
+		//nolint:gosec // whereClause built from validated params
+		query = fmt.Sprintf(`
+			SELECT timestamp, entity_name, name, type, value, attributes FROM (
+				SELECT timestamp, entity_name, name, type, value, attributes FROM telemetry_metrics
+				UNION ALL
+				SELECT timestamp, entity_name, name, type, value, attributes FROM read_parquet('%s', hive_partitioning=true)
+			) %s ORDER BY timestamp DESC LIMIT ?`,
+			parquetPath, whereClause)
+	} else {
+		// Query only active table
+		//nolint:gosec // whereClause built from validated params
+		query = fmt.Sprintf(
+			"SELECT timestamp, entity_name, name, type, value, attributes FROM telemetry_metrics %s ORDER BY timestamp DESC LIMIT ?",
+			whereClause)
+	}
+
+	args = append(args, q.Limit)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var metrics []TelemetryMetric
+	for rows.Next() {
+		var m TelemetryMetric
+		var attrAny any
+		if err := rows.Scan(&m.Timestamp, &m.EntityName, &m.Name, &m.Type, &m.Value, &attrAny); err != nil {
+			return nil, err
+		}
+
+		// Handle Attributes unmarshaling (DuckDB can return JSON as map or []byte)
+		if attrs, ok := attrAny.(map[string]any); ok {
+			m.Attributes = attrs
+		} else if b, ok := attrAny.([]byte); ok && len(b) > 0 {
+			_ = json.Unmarshal(b, &m.Attributes)
+		} else if s, ok := attrAny.(string); ok && len(s) > 0 {
+			_ = json.Unmarshal([]byte(s), &m.Attributes)
+		}
+
+		metrics = append(metrics, m)
+	}
+	return metrics, nil
+}
+
+// QueryMetrics retrieves recent metrics (backwards compatibility).
+func (s *Store) QueryMetrics(ctx context.Context, limit int) ([]TelemetryMetric, error) {
+	return s.QueryMetricsFiltered(ctx, MetricQuery{Limit: limit})
+}
+
+// hasParquetFiles checks if there are any .parquet files in the given directory or subdirectories.
+func hasParquetFiles(dir string) bool {
+	found := false
+	_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil // ignore errors
+		}
+		if !info.IsDir() && strings.HasSuffix(info.Name(), ".parquet") {
+			found = true
+			return fmt.Errorf("found") // stop walking
+		}
+		return nil
+	})
+	return found
+}

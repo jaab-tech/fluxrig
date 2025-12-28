@@ -1,0 +1,10 @@
+[logging]
+level = "info"
+
+[rack]
+name = ""
+name_prefix = "node-"
+data_dir = "test/e2e_registry/rack/data"
+
+[rack.bus]
+url = "nats://localhost:4223"

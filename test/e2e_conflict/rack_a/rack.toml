@@ -1,0 +1,10 @@
+[logging]
+level = "debug"
+
+[rack]
+name = "rack-shared"
+data_dir = "test/e2e_conflict/rack_a/data"
+heartbeat_interval = "1s"
+
+[rack.bus]
+url = "nats://localhost:4223"

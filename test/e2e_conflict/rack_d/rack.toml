@@ -1,0 +1,10 @@
+[logging]
+level = "debug"
+
+[rack]
+name = ""
+name_prefix = "probes-"
+data_dir = "test/e2e_conflict/rack_d/data"
+
+[rack.bus]
+url = "nats://localhost:4223"

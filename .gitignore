@@ -1,0 +1,36 @@
+# Binaries
+bin/
+build/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test
+*.test
+*.out
+
+# Dependencies
+vendor/
+
+# OS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+
+# Logs
+*.log
+
+# Local Data
+data/
+# *.duckdb (Removed as it's now in ignored data/)
+
+
+# Python
+.venv/
+__pycache__/
+
+# Test Artifacts
+test/test_logs/

@@ -1,0 +1,47 @@
+package main
+
+import (
+	"database/sql"
+	"fmt"
+	"os"
+
+	_ "github.com/marcboeker/go-duckdb"
+)
+
+func main() {
+	if len(os.Args) < 2 {
+		fmt.Println("Usage: check_db <path>")
+		os.Exit(1)
+	}
+	path := os.Args[1]
+
+	// Open in READ_ONLY mode to avoid locking if possible,
+	// but DuckDB single-process write lock might block us if not WAL.
+	// We try standard open.
+	db, err := sql.Open("duckdb", path)
+	if err != nil {
+		fmt.Printf("Error opening DB: %v\n", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	rows, err := db.Query("SELECT machine_id, name, status FROM racks")
+	if err != nil {
+		fmt.Printf("Error querying: %v\n", err)
+		os.Exit(1)
+	}
+	defer rows.Close()
+
+	count := 0
+	for rows.Next() {
+		count++
+		var id int
+		var name, status string
+		if err := rows.Scan(&id, &name, &status); err != nil {
+			fmt.Printf("Error scanning: %v\n", err)
+			continue
+		}
+		fmt.Printf("ROW: %d %s %s\n", id, name, status)
+	}
+	fmt.Printf("Found %d rows\n", count)
+}
