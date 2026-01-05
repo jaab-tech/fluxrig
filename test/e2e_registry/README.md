@@ -16,6 +16,10 @@ Verify the FluxRig Registry capabilities, focusing on identity assignment, topol
 ./test/e2e_registry/run.sh
 ```
 
+## Workspaces
+Tests run in ephemeral `work_*` folders.
+The `work` symlink points to the latest execution for easy debugging.
+
 ## Success Criteria
 - Rack registers successfully.
 - DuckDB `registry` table contains exactly 1 Mixer, 1 Rack, 1 Snake.

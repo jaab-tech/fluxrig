@@ -16,7 +16,7 @@ func NewDualIDSpanProcessor() *DualIDSpanProcessor {
 }
 
 // OnStart is called when a span is started.
-// We extract the FluxID from the parent context and add it as an attribute.
+// Extract FluxID from parent context and add as attribute
 func (p *DualIDSpanProcessor) OnStart(ctx context.Context, s trace.ReadWriteSpan) {
 	// 1. Extract from Baggage (propagated from upstream or set locally)
 	fluxID := FluxIDFromContext(ctx)

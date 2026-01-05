@@ -18,6 +18,9 @@ type Rack struct {
 	// Statistics (Transient/Snapshot)
 	Stats map[string]any `json:"stats"`
 
+	// Configuration (Runtime)
+	Config map[string]any `json:"config"`
+
 	// Security
 	Secret string `json:"-"` // Internal only, do not expose in API
 }
@@ -28,7 +31,7 @@ type Registry interface {
 	// If name is empty or reserved prefix "node-", it is treated as ephemeral/pending.
 	// Returns the assigned MachineID and Name.
 	// Validates secret if provided. Generates new secret if new enrollment.
-	Register(ctx context.Context, name string, secret string, ip string, port int, version string) (*Rack, error)
+	Register(ctx context.Context, name string, secret string, ip string, port int, version string, config map[string]any, mixerID uint64) (*Rack, error)
 
 	// Approve adopts a pending Rack by assigning it a permanent name.
 	Approve(ctx context.Context, machineID uint16, newName string) (*Rack, error)
@@ -40,7 +43,7 @@ type Registry interface {
 	Get(ctx context.Context, machineID uint16) (*Rack, error)
 
 	// Heartbeat updates the last_seen timestamp and transient stats.
-	Heartbeat(ctx context.Context, machineID uint16, stats map[string]any) error
+	Heartbeat(ctx context.Context, machineID uint16, stats map[string]any, config map[string]any) error
 
 	// Remove deletes a rack from the registry.
 	Remove(ctx context.Context, machineID uint16) error

@@ -33,7 +33,7 @@ func TestRouter_Lifecycle(t *testing.T) {
 	}
 
 	// 3. Configure JetStream
-	err = r.ConfigureJetStream(snk.ClientURL(), "test-cluster", logger)
+	err = r.ConfigureJetStream(snk.ClientURL(), false, logger)
 	if err != nil {
 		t.Fatalf("Failed to configure JS: %v", err)
 	}

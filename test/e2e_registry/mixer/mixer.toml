@@ -1,5 +1,6 @@
 [logging]
 level = "info"
+filename = "logs/mixer.log"
 
 [api]
 port = 8093
@@ -7,11 +8,12 @@ port = 8093
 [snake]
 port = 4223
 url = "nats://localhost:4223"
-store_dir = "test/e2e_registry/mixer/data/js"
+# store_dir removed
 
 [store]
-path = "test/e2e_registry/mixer/data/fluxrig.duckdb"
-cluster_key_path = "test/e2e_registry/mixer/data/cluster.key"
+dir = "./data"
+database_file = "fluxrig.duckdb"
+cluster_key_file = "cluster.key"
 
 [observability]
 enabled = false # Registry test focuses on registry, not telemetry storage

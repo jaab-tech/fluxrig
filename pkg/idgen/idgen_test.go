@@ -63,3 +63,34 @@ func TestIDGenerator_EntityID(t *testing.T) {
 
 	fmt.Printf("Entity ID (Rack, M:55, Seq:1): %X\n", eid)
 }
+
+func TestIDGenerator_NextEntityID(t *testing.T) {
+	gen, _ := New(1)
+
+	// Default starts at 0, first call -> 1
+	id1 := gen.NextEntityID(EntityGear)
+	if (id1 & 0xFFFFFFFFFF) != 1 {
+		t.Errorf("Expected seq 1, got %d", id1&0xFFFFFFFFFF)
+	}
+
+	// Test SetSequence
+	gen.SetSequence(100)
+	id2 := gen.NextEntityID(EntityGear)
+	if (id2 & 0xFFFFFFFFFF) != 101 {
+		t.Errorf("Expected seq 101, got %d", id2&0xFFFFFFFFFF)
+	}
+}
+
+func TestRandomSuffix(t *testing.T) {
+	s1 := RandomSuffix(4)
+	if len(s1) != 4 {
+		t.Errorf("Expected len 4, got %d", len(s1))
+	}
+	s2 := RandomSuffix(8)
+	if len(s2) != 8 {
+		t.Errorf("Expected len 8, got %d", len(s2))
+	}
+	if s1 == s2 {
+		t.Error("RandomSuffix returned duplicate (unlikely)")
+	}
+}

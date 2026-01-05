@@ -1,10 +1,15 @@
 [logging]
 level = "debug"
+filename = "logs/rack.log"
+
+[store]
+dir = "./data"
+state_file = "state.flux"
 
 [rack]
-# name = "rack-test-01" # Commented out to force Zero Config -> Pending
-name_prefix = "cli-test-" # Use prefix to easily identify
-data_dir = "test/e2e_cli/rack/data"
+# name = "rack-test-01" # Commented out
+name_prefix = "cli-test-"
+# data_dir removed
 heartbeat_interval = "2s"
 
 [rack.bus]

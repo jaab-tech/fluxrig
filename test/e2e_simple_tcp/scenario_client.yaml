@@ -1,0 +1,26 @@
+meta:
+  name: "tcp_client_test"
+  version: "1.0.0"
+
+racks:
+  - name: "comp-node-01"
+    labels:
+      tier: "edge"
+
+gears:
+  - name: "gateway-client"
+    type: "simple_tcp"
+    deploy: "comp-node-01"
+    config:
+      mode: "client"
+      connect: "127.0.0.1:9002" # External Mock Server
+      reconnect_wait: "1s"
+      delimiter: "\n"
+      delimiter_append: true
+      tags:
+        role: "egress"
+
+wires:
+  # Loopback Echo: Traffic received from Server (gateway.out) is sent back to Server (gateway.in)
+  - from: "gateway-client.out"
+    to: "gateway-client.in"

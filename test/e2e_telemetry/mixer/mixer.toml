@@ -1,5 +1,6 @@
 [logging]
 level = "debug"
+filename = "logs/mixer.log"
 
 [api]
 port = 8092
@@ -7,16 +8,17 @@ port = 8092
 [snake]
 port = 4225
 url = "nats://localhost:4225"
-store_dir = "test/e2e_telemetry/mixer/data/js"
-stream_name = "flux"
-stream_subjects = ["fluxrig.>", "flux.telemetry.>"]
+# store_dir removed
+stream_name = "flux-telemetry"
+stream_subjects = ["flux.telemetry.>"]
 
 [store]
-path = "test/e2e_telemetry/mixer/data/fluxrig_test.duckdb"
-cluster_key_path = "test/e2e_telemetry/mixer/data/cluster.key"
+dir = "./data"
+database_file = "fluxrig_test.duckdb"
+cluster_key_file = "cluster.key"
 
 [observability]
 tier = "embedded"
 
 [observability.embedded]
-data_dir = "test/e2e_telemetry/mixer/data/telemetry"
+# data_dir removed (uses store.dir/telemetry)

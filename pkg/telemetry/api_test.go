@@ -68,7 +68,7 @@ func TestLog(t *testing.T) {
 
 	// This should not panic
 	t.Log("Calling Init...")
-	shutdown, err := telemetry.Init(ctx, cfg, mockBus)
+	shutdown, err := telemetry.Init(ctx, cfg, mockBus, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to init telemetry: %v", err)
 	}

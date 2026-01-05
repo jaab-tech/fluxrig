@@ -25,7 +25,7 @@ type MockRegistry struct {
 	UpdateStatusFunc func(ctx context.Context, machineID uint16, status string) error
 }
 
-func (m *MockRegistry) Register(ctx context.Context, name string, secret string, ip string, port int, version string) (*registry.Rack, error) {
+func (m *MockRegistry) Register(ctx context.Context, machineID string, entityType string, name string, port int, ip string, attrs map[string]any, fluxID uint64) (*registry.Rack, error) {
 	return nil, nil // Not used in API server tests yet
 }
 func (m *MockRegistry) Get(ctx context.Context, machineID uint16) (*registry.Rack, error) {
@@ -50,7 +50,7 @@ func (m *MockRegistry) Approve(ctx context.Context, machineID uint16, name strin
 	return nil, nil
 }
 
-func (m *MockRegistry) Heartbeat(ctx context.Context, machineID uint16, stats map[string]any) error {
+func (m *MockRegistry) Heartbeat(ctx context.Context, machineID uint16, stats map[string]any, attrs map[string]any) error {
 	m.CalledHeartbeat = true
 	return nil
 }
@@ -77,7 +77,7 @@ func (m *MockRegistry) QueryMetrics(ctx context.Context, query registry.MetricQu
 }
 
 func TestHandleHealth(t *testing.T) {
-	s := NewServer(&MockRegistry{}, nil, nil)
+	s := NewServer(&MockRegistry{}, nil, nil, nil, 12345, nil)
 	req := httptest.NewRequest("GET", "/api/v1/health", nil)
 	w := httptest.NewRecorder()
 
@@ -94,7 +94,7 @@ func TestHandleRacks_List(t *testing.T) {
 			return []*registry.Rack{{Name: "test-rack"}}, nil
 		},
 	}
-	s := NewServer(mockReg, nil, nil)
+	s := NewServer(mockReg, nil, nil, nil, 0, nil)
 
 	req := httptest.NewRequest("GET", "/api/v1/racks", nil)
 	w := httptest.NewRecorder()
@@ -115,7 +115,7 @@ func TestHandleRackAction(t *testing.T) {
 			return &registry.Rack{Name: name, Status: "active"}, nil
 		},
 	}
-	s := NewServer(mockReg, nil, nil)
+	s := NewServer(mockReg, nil, nil, nil, 0, nil)
 
 	// 1. Invalid Path (No ID)
 	req1 := httptest.NewRequest("POST", "/api/v1/racks/", nil) // Trailing slash stripped effectively?
@@ -166,7 +166,7 @@ func TestHandleRackAction_Extended(t *testing.T) {
 			return nil
 		},
 	}
-	s := NewServer(mockReg, nil, nil)
+	s := NewServer(mockReg, nil, nil, nil, 0, nil)
 
 	// DELETE
 	reqDel := httptest.NewRequest("DELETE", "/api/v1/racks/1", nil)
@@ -216,7 +216,7 @@ func TestHandleRackAction_WithSigner(t *testing.T) {
 			}, nil
 		},
 	}
-	s := NewServer(mockReg, nil, signer)
+	s := NewServer(mockReg, nil, signer, nil, 0, nil)
 
 	// Approve with Signer
 	body := `{"name": "signed-rack"}`
@@ -247,7 +247,7 @@ func (m *MockPublisher) Close() error { return nil }
 
 func TestHandleRacks_Post(t *testing.T) {
 	mockReg := &MockRegistry{}
-	s := NewServer(mockReg, nil, nil)
+	s := NewServer(mockReg, nil, nil, nil, 0, nil)
 
 	// POST (Method not allowed)
 	req := httptest.NewRequest("POST", "/api/v1/racks", nil)
@@ -264,7 +264,7 @@ func TestHandleRacks_ListError(t *testing.T) {
 			return nil, errors.New("db error")
 		},
 	}
-	s := NewServer(mockReg, nil, nil)
+	s := NewServer(mockReg, nil, nil, nil, 0, nil)
 
 	req := httptest.NewRequest("GET", "/api/v1/racks", nil)
 	w := httptest.NewRecorder()
@@ -289,7 +289,7 @@ func TestHandleRackAction_WithPublisher(t *testing.T) {
 			}, nil
 		},
 	}
-	s := NewServer(mockReg, mockPub, signer)
+	s := NewServer(mockReg, mockPub, signer, nil, 0, nil)
 
 	// Approve with Publisher
 	body := `{"name": "pub-test"}`
@@ -316,7 +316,7 @@ func TestHandleRackAction_SuspendWithPublisher(t *testing.T) {
 			return nil
 		},
 	}
-	s := NewServer(mockReg, mockPub, signer)
+	s := NewServer(mockReg, mockPub, signer, nil, 0, nil)
 
 	req := httptest.NewRequest("POST", "/api/v1/racks/1/suspend", nil)
 	w := httptest.NewRecorder()
@@ -341,7 +341,7 @@ func TestHandleRackAction_ActivateWithPublisher(t *testing.T) {
 			return nil
 		},
 	}
-	s := NewServer(mockReg, mockPub, signer)
+	s := NewServer(mockReg, mockPub, signer, nil, 0, nil)
 
 	req := httptest.NewRequest("POST", "/api/v1/racks/1/activate", nil)
 	w := httptest.NewRecorder()

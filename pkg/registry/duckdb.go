@@ -26,106 +26,56 @@ func NewDuckDBRegistry(s *duckdb.Store) *DuckDBRegistry {
 
 // Register handles Rack registration and re-registration.
 // Modified to accept version.
-func (r *DuckDBRegistry) Register(ctx context.Context, name string, secret string, ip string, port int, version string) (*Rack, error) {
-	// If name is empty, it's a new Zero Config node
-	// If name contains "pending-", it's pending adoption
+// Register handles Rack registration and re-registration.
+// Modified to accept version.
+func (r *DuckDBRegistry) Register(ctx context.Context, name string, secret string, ip string, port int, version string, config map[string]any, mixerID uint64) (*Rack, error) {
+	// ... (omitting comments for brevity in replacement chunk matching if needed, but keeping logic)
 	status := "active"
-	// isZeroConfig := false // DISABLED: No Auto-Rename
-
-	// Default prefix if name is totally empty
 	prefix := "node-"
-
-	// Name Resolution Strategy:
-	// ...
 
 	if name == "" {
 		name = fmt.Sprintf("%spending-%d", prefix, time.Now().UnixNano())
 		status = "pending"
-		// isZeroConfig = true
-	} else if idx := strings.Index(name, "pending-"); idx >= 0 {
-		// prefix = name[:idx]
-		status = "pending"
-		// isZeroConfig = true
-	} else if idx := strings.Index(name, "node-"); idx >= 0 {
-		status = "pending"
-		// isZeroConfig = true
-	} else if isZeroConfigPrefix(name) {
-		// Heuristic: Prefix match indicates unverified identity.
+	} else if strings.Contains(name, "pending-") || strings.Contains(name, "node-") || isZeroConfigPrefix(name) {
 		status = "pending"
 	}
 
-	// Strict Mode Policy:
-	// All dynamic/unverified enrollments default to 'pending' status until explicitly approved.
-	// This ensures security by preventing unauthorized Racks from becoming active automatically.
-
-	// Upsert logic:
-	// 1. Try to find by Name
 	existing, err := r.getByName(ctx, name)
 	if err == nil {
-		// SESSION SECURITY (TOFU)
-		// If the existing record has a secret, we MUST verify it.
-		// Exception: If new connection passes NO secret (e.g. fresh install trying to hijack), we reject.
-		if existing.Secret != "" {
-			if secret != existing.Secret {
-				return nil, ErrNameConflict // Auth Failed
-			}
+		if existing.Secret != "" && secret != existing.Secret {
+			return nil, ErrNameConflict
 		}
-
-		// Update IP, Port, and LastSeen
-		return r.updateSeen(ctx, existing.MachineID, ip, port)
+		// Update IP, Port, LastSeen, and Config
+		return r.updateSeen(ctx, existing.MachineID, ip, port, config)
 	}
 
-	// 2. Insert New
-	// Generate new MachineID from sequence
 	var id uint16
 	row := r.store.DB().QueryRowContext(ctx, "SELECT nextval('seq_machine_id_server')")
 	if err := row.Scan(&id); err != nil {
 		return nil, fmt.Errorf("failed to generate id: %w", err)
 	}
 
-	/*
-		// If zero config, append ID to prefix to make it unique e.g. "node-42"
-		if isZeroConfig {
-			// We use the extracted or default prefix
-			name = fmt.Sprintf("%s%d", prefix, id)
-		}
-	*/
-
-	// Generate Secret (32 bytes hex)
 	secretBytes := make([]byte, 32)
 	if _, err := rand.Read(secretBytes); err != nil {
 		return nil, fmt.Errorf("failed to generate secret: %w", err)
 	}
 	newSecret := hex.EncodeToString(secretBytes)
 
-	// Calculate EntityID (Type 3 = Rack)
-	// We need an idgen instance. Since sequence is 0 for the Rack itself (it's the container), we pass 0.
-	// Wait, internal idgen needs a machineID to init.
-	// But here we are *assigning* the MachineID.
-	// The EntityID is constructed as: [Type][MachineID][Seq=0]
-	// idgen package has NewEntityID(type, seq). We need to verify if we can construct it manually or use idgen.
-	// idgen.New(mid) -> then NewEntityID.
 	gen, _ := idgen.New(id)
 	entityID := gen.NewEntityID(idgen.EntityRack, 0)
-
 	now := time.Now()
-	// Initialize empty stats map
 	stats := map[string]any{}
 
-	// Insert into registry (Type 3 = Rack)
-	// Pack attributes (exclude stats, they are separate now)
-	attrs := map[string]any{
-		"secret": newSecret, // FIX: Use generated secret, not input arg
-	}
+	attrs := map[string]any{"secret": newSecret}
 	attrsJSON, _ := json.Marshal(attrs)
 	statsJSON, _ := json.Marshal(stats)
+	configJSON, _ := json.Marshal(config)
 
 	_, err = r.store.DB().ExecContext(ctx,
-		"INSERT INTO registry (entity_id, type_id, machine_id, name, status, version, started_at, last_seen, stats, attributes) VALUES (?, 3, ?, ?, ?, ?, ?, ?, ?, ?)",
-		entityID, id, name, status, version, now, now, string(statsJSON), string(attrsJSON),
+		"INSERT INTO registry (entity_id, type_id, machine_id, mixer_id, name, status, version, started_at, last_seen, stats, config, attributes) VALUES (?, 4, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		entityID, id, mixerID, name, status, version, now, now, string(statsJSON), string(configJSON), string(attrsJSON),
 	)
 	if err != nil {
-		// Handle race condition on Name uniqueness
 		return nil, err
 	}
 
@@ -138,6 +88,7 @@ func (r *DuckDBRegistry) Register(ctx context.Context, name string, secret strin
 		FirstSeen: now,
 		LastSeen:  now,
 		Stats:     stats,
+		Config:    config,
 		Secret:    newSecret,
 	}, nil
 }
@@ -156,16 +107,20 @@ func (r *DuckDBRegistry) Approve(ctx context.Context, machineID uint16, newName 
 		return nil, err
 	}
 
+	// Carry over existing Stats/Config or let Get handle it.
+	// Synchronize configuration using the provided rack object.
 	attrs := map[string]any{
 		"secret": rack.Secret,
 	}
 	attrsJSON, _ := json.Marshal(attrs)
 	statsJSON, _ := json.Marshal(rack.Stats)
+	configJSON, _ := json.Marshal(rack.Config)
 	now := time.Now()
 
-	// 1. Get EntityID
+	// 1. Get EntityID and MixerID
 	var entityID uint64
-	err = r.store.DB().QueryRowContext(ctx, "SELECT entity_id FROM registry WHERE machine_id = ? AND type_id = 3", machineID).Scan(&entityID)
+	var mixerID uint64
+	err = r.store.DB().QueryRowContext(ctx, "SELECT entity_id, mixer_id FROM registry WHERE machine_id = ? AND type_id = 4", machineID).Scan(&entityID, &mixerID)
 	if err != nil {
 		return nil, err
 	}
@@ -178,8 +133,8 @@ func (r *DuckDBRegistry) Approve(ctx context.Context, machineID uint16, newName 
 
 	// 3. Insert (Auto-Commit)
 	_, err = r.store.DB().ExecContext(ctx,
-		"INSERT INTO registry (entity_id, type_id, machine_id, name, status, version, started_at, last_seen, stats, attributes) VALUES (?, 3, ?, ?, 'active', ?, ?, ?, ?, ?)",
-		entityID, machineID, newName, "0.0.0", rack.FirstSeen, now, string(statsJSON), string(attrsJSON),
+		"INSERT INTO registry (entity_id, type_id, machine_id, mixer_id, name, status, version, started_at, last_seen, stats, config, attributes) VALUES (?, 4, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)",
+		entityID, machineID, mixerID, newName, "0.0.0", rack.FirstSeen, now, string(statsJSON), string(configJSON), string(attrsJSON),
 	)
 	if err != nil {
 		return nil, err
@@ -188,7 +143,7 @@ func (r *DuckDBRegistry) Approve(ctx context.Context, machineID uint16, newName 
 	return r.Get(ctx, machineID)
 }
 
-func (r *DuckDBRegistry) Heartbeat(ctx context.Context, machineID uint16, stats map[string]any) error {
+func (r *DuckDBRegistry) Heartbeat(ctx context.Context, machineID uint16, stats map[string]any, config map[string]any) error {
 
 	// Heartbeat updates stats column directly.
 	// We fetch current stats first to merge? Or just patch?
@@ -199,7 +154,6 @@ func (r *DuckDBRegistry) Heartbeat(ctx context.Context, machineID uint16, stats 
 	}
 
 	// Merge new stats into existing stats
-	// If rack.Stats is nil, init it.
 	if rack.Stats == nil {
 		rack.Stats = make(map[string]any)
 	}
@@ -207,12 +161,18 @@ func (r *DuckDBRegistry) Heartbeat(ctx context.Context, machineID uint16, stats 
 		rack.Stats[k] = v
 	}
 
-	// Re-pack stats
+	// Update config if provided
+	if config != nil {
+		rack.Config = config
+	}
+
+	// Re-pack
 	statsJSON, _ := json.Marshal(rack.Stats)
+	configJSON, _ := json.Marshal(rack.Config)
 
 	res, err := r.store.DB().ExecContext(ctx,
-		"UPDATE registry SET last_seen = ?, stats = ? WHERE machine_id = ? AND type_id = 3",
-		time.Now(), string(statsJSON), machineID,
+		"UPDATE registry SET last_seen = ?, stats = ?, config = ? WHERE machine_id = ? AND type_id = 4",
+		time.Now(), string(statsJSON), string(configJSON), machineID,
 	)
 	if err != nil {
 		return err
@@ -226,7 +186,7 @@ func (r *DuckDBRegistry) Heartbeat(ctx context.Context, machineID uint16, stats 
 }
 
 func (r *DuckDBRegistry) Remove(ctx context.Context, machineID uint16) error {
-	res, err := r.store.DB().ExecContext(ctx, "DELETE FROM registry WHERE machine_id = ? AND type_id = 3", machineID)
+	res, err := r.store.DB().ExecContext(ctx, "DELETE FROM registry WHERE machine_id = ? AND type_id = 4", machineID)
 	if err != nil {
 		return err
 	}
@@ -238,7 +198,7 @@ func (r *DuckDBRegistry) Remove(ctx context.Context, machineID uint16) error {
 }
 
 func (r *DuckDBRegistry) UpdateStatus(ctx context.Context, machineID uint16, status string) error {
-	res, err := r.store.DB().ExecContext(ctx, "UPDATE registry SET status = ?, last_seen = ? WHERE machine_id = ? AND type_id = 3", status, time.Now(), machineID)
+	res, err := r.store.DB().ExecContext(ctx, "UPDATE registry SET status = ?, last_seen = ? WHERE machine_id = ? AND type_id = 4", status, time.Now(), machineID)
 	if err != nil {
 		return err
 	}
@@ -251,7 +211,7 @@ func (r *DuckDBRegistry) UpdateStatus(ctx context.Context, machineID uint16, sta
 
 func (r *DuckDBRegistry) List(ctx context.Context, statusFilter string) ([]*Rack, error) {
 	racks := []*Rack{} // Initialize to empty slice to ensure JSON [] instead of null
-	query := "SELECT machine_id, name, status, version, started_at, last_seen, stats, attributes FROM registry WHERE type_id = 3"
+	query := "SELECT machine_id, name, status, version, started_at, last_seen, stats, config, attributes FROM registry WHERE type_id = 4"
 	args := []any{}
 
 	if statusFilter != "" {
@@ -271,11 +231,12 @@ func (r *DuckDBRegistry) List(ctx context.Context, statusFilter string) ([]*Rack
 		var i Rack
 		var attributesAny any
 		var statsAny any
+		var configAny any
 		var version sql.NullString
 		// DuckDB's JSON type may scan as string or []byte depending on the driver version.
 		// We scan into interface{} and handle type assertion below.
 
-		if err := rows.Scan(&i.MachineID, &i.Name, &i.Status, &version, &i.FirstSeen, &i.LastSeen, &statsAny, &attributesAny); err != nil {
+		if err := rows.Scan(&i.MachineID, &i.Name, &i.Status, &version, &i.FirstSeen, &i.LastSeen, &statsAny, &configAny, &attributesAny); err != nil {
 			return nil, err
 		}
 
@@ -311,18 +272,30 @@ func (r *DuckDBRegistry) List(ctx context.Context, statusFilter string) ([]*Rack
 		}
 		i.Stats = stats
 
+		// Handle Config unmarshaling
+		var regConfig map[string]any
+		if m, ok := configAny.(map[string]any); ok {
+			regConfig = m
+		} else if b, ok := configAny.([]byte); ok {
+			_ = json.Unmarshal(b, &regConfig)
+		} else if s, ok := configAny.(string); ok {
+			_ = json.Unmarshal([]byte(s), &regConfig)
+		}
+		i.Config = regConfig
+
 		racks = append(racks, &i)
 	}
 	return racks, nil
 }
 
 func (r *DuckDBRegistry) Get(ctx context.Context, id uint16) (*Rack, error) {
-	row := r.store.DB().QueryRowContext(ctx, "SELECT machine_id, name, status, version, started_at, last_seen, stats, attributes FROM registry WHERE machine_id = ? AND type_id = 3", id)
+	row := r.store.DB().QueryRowContext(ctx, "SELECT machine_id, name, status, version, started_at, last_seen, stats, config, attributes FROM registry WHERE machine_id = ? AND type_id = 4", id)
 	var i Rack
 	var attributesAny any
 	var statsAny any
+	var configAny any
 	var version sql.NullString
-	if err := row.Scan(&i.MachineID, &i.Name, &i.Status, &version, &i.FirstSeen, &i.LastSeen, &statsAny, &attributesAny); err != nil {
+	if err := row.Scan(&i.MachineID, &i.Name, &i.Status, &version, &i.FirstSeen, &i.LastSeen, &statsAny, &configAny, &attributesAny); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -361,18 +334,30 @@ func (r *DuckDBRegistry) Get(ctx context.Context, id uint16) (*Rack, error) {
 	}
 	i.Stats = stats
 
+	// Handle Config unmarshaling
+	var regConfig map[string]any
+	if m, ok := configAny.(map[string]any); ok {
+		regConfig = m
+	} else if b, ok := configAny.([]byte); ok {
+		_ = json.Unmarshal(b, &regConfig)
+	} else if s, ok := configAny.(string); ok {
+		_ = json.Unmarshal([]byte(s), &regConfig)
+	}
+	i.Config = regConfig
+
 	return &i, nil
 }
 
 // Helpers
 
 func (r *DuckDBRegistry) getByName(ctx context.Context, name string) (*Rack, error) {
-	row := r.store.DB().QueryRowContext(ctx, "SELECT machine_id, name, status, version, started_at, last_seen, stats, attributes FROM registry WHERE name = ? AND type_id = 3", name)
+	row := r.store.DB().QueryRowContext(ctx, "SELECT machine_id, name, status, version, started_at, last_seen, stats, config, attributes FROM registry WHERE name = ? AND type_id = 4", name)
 	var i Rack
 	var attributesAny any
 	var statsAny any
+	var configAny any
 	var version sql.NullString
-	if err := row.Scan(&i.MachineID, &i.Name, &i.Status, &version, &i.FirstSeen, &i.LastSeen, &statsAny, &attributesAny); err != nil {
+	if err := row.Scan(&i.MachineID, &i.Name, &i.Status, &version, &i.FirstSeen, &i.LastSeen, &statsAny, &configAny, &attributesAny); err != nil {
 		return nil, err
 	}
 	// Handle Attributes unmarshaling
@@ -407,10 +392,21 @@ func (r *DuckDBRegistry) getByName(ctx context.Context, name string) (*Rack, err
 	}
 	i.Stats = stats
 
+	// Handle Config unmarshaling
+	var regConfig map[string]any
+	if m, ok := configAny.(map[string]any); ok {
+		regConfig = m
+	} else if b, ok := configAny.([]byte); ok {
+		_ = json.Unmarshal(b, &regConfig)
+	} else if s, ok := configAny.(string); ok {
+		_ = json.Unmarshal([]byte(s), &regConfig)
+	}
+	i.Config = regConfig
+
 	return &i, nil
 }
 
-func (r *DuckDBRegistry) updateSeen(ctx context.Context, id uint16, ip string, port int) (*Rack, error) {
+func (r *DuckDBRegistry) updateSeen(ctx context.Context, id uint16, ip string, port int, config map[string]any) (*Rack, error) {
 	// Need to fetch, update attr, save.
 	rack, err := r.Get(ctx, id)
 	if err != nil {
@@ -423,8 +419,10 @@ func (r *DuckDBRegistry) updateSeen(ctx context.Context, id uint16, ip string, p
 	}
 	attrsJSON, _ := json.Marshal(attrs)
 
+	configJSON, _ := json.Marshal(config)
+
 	now := time.Now()
-	_, err = r.store.DB().ExecContext(ctx, "UPDATE registry SET last_seen = ?, attributes = ? WHERE machine_id = ? AND type_id = 3", now, string(attrsJSON), id)
+	_, err = r.store.DB().ExecContext(ctx, "UPDATE registry SET last_seen = ?, config = ?, attributes = ? WHERE machine_id = ? AND type_id = 4", now, string(configJSON), string(attrsJSON), id)
 	if err != nil {
 		return nil, err
 	}

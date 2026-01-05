@@ -25,7 +25,7 @@ jobs:
 
       - name: Run tests
         run: |
-          go test -race -coverprofile=coverage.out $(go list ./... | grep -v '/test/helpers' | grep -v 'cmd/fluxrig$' | grep -v 'cmd/fluxrig-mixer$')
+          go test -race -coverprofile=coverage.out $(go list ./... | grep -v '/test/utils' | grep -v 'cmd/fluxrig$' | grep -v 'cmd/fluxrig-mixer$')
           go tool cover -func=coverage.out | grep total | awk '{print "Total Coverage: " $3}'
 
       - name: Build binaries

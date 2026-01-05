@@ -12,11 +12,16 @@ import (
 // MixerConfig defines the startup configuration for the Mixer.
 type MixerConfig struct {
 	Logging       LoggingConfig       `koanf:"logging"`
+	Store         StoreConfig         `koanf:"store"`
 	Mixer         MixerSettings       `koanf:"mixer"`
 	API           ApiConfig           `koanf:"api"`
 	Snake         SnakeConfig         `koanf:"snake"`
-	Store         StoreConfig         `koanf:"store"`
 	Observability ObservabilityConfig `koanf:"observability"`
+	Enrollment    EnrollmentConfig    `koanf:"enrollment"`
+}
+
+type EnrollmentConfig struct {
+	PushDelay string `koanf:"push_delay"` // e.g. "1s"
 }
 
 type ObservabilityConfig struct {
@@ -26,12 +31,13 @@ type ObservabilityConfig struct {
 }
 
 type EmbeddedConfig struct {
-	DataDir       string `koanf:"data_dir"`
 	FlushInterval string `koanf:"flush_interval"`
+	// DataDir removed (Uses Store.Dir/telemetry)
 }
 
 type MixerSettings struct {
-	MachineID uint16 `koanf:"machine_id"` // e.g. 1 (Reserved 1-99 for Mixers)
+	MachineID uint16 `koanf:"machine_id"`
+	MixerName string `koanf:"mixer_name"`
 }
 
 type ApiConfig struct {
@@ -39,18 +45,16 @@ type ApiConfig struct {
 }
 
 type SnakeConfig struct {
-	Port          int      `koanf:"port"`            // e.g. 4222
-	URL           string   `koanf:"url"`             // e.g. "nats://localhost:4222"
-	ClusterName   string   `koanf:"cluster_name"`    // e.g. "flux"
-	StoreDir      string   `koanf:"store_dir"`       // e.g. "./data/js"
-	StreamName    string   `koanf:"stream_name"`     // e.g. "flux"
-	StartSubjects []string `koanf:"stream_subjects"` // e.g. ["fluxrig.>"]
+	Port        int    `koanf:"port"`
+	URL         string `koanf:"url"`
+	ClusterName string `koanf:"cluster_name"`
+	// StoreDir removed (Uses Store.Dir/nats)
+	StreamName    string   `koanf:"stream_name"`
+	StartSubjects []string `koanf:"stream_subjects"`
+	Durable       bool     `koanf:"durable"`
 }
 
-type StoreConfig struct {
-	Path           string `koanf:"path"`             // e.g. "data/fluxrig.duckdb"
-	ClusterKeyPath string `koanf:"cluster_key_path"` // e.g. "data/cluster.key"
-}
+// StoreConfig is defined in rack.go (shared package config)
 
 // LoadMixer reads configuration from a TOML file and Environment Variables.
 // Priority: Env > File > Defaults
@@ -59,19 +63,31 @@ func LoadMixer(path string) (*MixerConfig, error) {
 
 	// 1. Defaults
 	_ = k.Set("logging.level", "info")
-	_ = k.Set("mixer.machine_id", 1) // Default to 1 (First Mixer)
+	_ = k.Set("logging.filename", "mixer.log")
+	_ = k.Set("logging.max_size_mb", 100)
+	_ = k.Set("logging.max_backups", 7)
+	_ = k.Set("logging.compress", true)
+
+	// Defaults: Store
+	_ = k.Set("store.dir", "./data")
+	_ = k.Set("store.wal_max_size_mb", 500)
+	_ = k.Set("store.database_file", "fluxrig.duckdb")
+	_ = k.Set("store.cluster_key_file", "cluster.key")
+
+	_ = k.Set("mixer.machine_id", 1)
 	_ = k.Set("api.port", 8090)
 	_ = k.Set("snake.port", 4222)
 	_ = k.Set("snake.url", "nats://localhost:4222")
 	_ = k.Set("snake.cluster_name", "flux")
-	_ = k.Set("snake.store_dir", "data/js")
-	_ = k.Set("snake.stream_name", "flux")
-	_ = k.Set("snake.stream_subjects", []string{"fluxrig.>", "flux.telemetry.>"})
-	_ = k.Set("store.path", "data/fluxrig.duckdb")
-	_ = k.Set("store.cluster_key_path", "data/cluster.key")
+	// snake.store_dir removed
+	_ = k.Set("snake.stream_name", "")
+	_ = k.Set("snake.stream_subjects", []string{})
+	_ = k.Set("snake.durable", false)
+
 	_ = k.Set("observability.tier", "embedded")
-	_ = k.Set("observability.embedded.data_dir", "./data/telemetry")
+	// observability.embedded.data_dir removed
 	_ = k.Set("observability.embedded.flush_interval", "5s")
+	_ = k.Set("enrollment.push_delay", "1s")
 
 	// 2. File (if provided)
 	if path != "" {

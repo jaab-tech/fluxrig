@@ -1,25 +1,41 @@
 # Offline Mode E2E Test
 
-**Objective:**
-Verifies the Rack's ability to operate in Offline Mode using a cached passport.
-1.  **Online Phase:** Starts Mixer and Rack to acquire a passport (`state.flux`).
-2.  **Stop Phase:** Kills Mixer and Rack.
-3.  **Offline Phase:** Starts *only* the Rack.
-4.  **Verification:** Checks if the Rack:
-    - Loads the cached passport.
-    - Detects offline mode (Mixer unreachable).
-    - Continues running without crashing.
+## Objective
+Verify the Rack's ability to operate in Offline Mode using a cached passport when the Mixer is unreachable.
 
-**Objective ID:** 16 (Offline Mode)
+## Verifications
 
-**Files:**
-- `run.sh`: Main execution script.
-- `mixer.toml`: Mixer configuration.
-- `rack.toml`: Rack configuration.
-- `data/`: Persisted state (`state.flux`, keys).
-- `logs/`: Execution logs for both phases.
+### Phase 1: Online Enrollment
+- Start Mixer and Rack.
+- Rack acquires and saves a Passport (`state.flux`).
+- Rack sends heartbeats (online activity).
 
-**Usage:**
+### Phase 2: Offline Startup
+- Stop Mixer and Rack completely.
+- Restart Rack **only** (Mixer is dead).
+- Rack detects offline mode and continues running.
+
+## Expected Results
+- ✅ Passport acquired during online phase.
+- ✅ Heartbeats sent during online phase.
+- ✅ Rack loads cached passport on restart.
+- ✅ Rack detects "Offline Mode".
+- ✅ Rack process stays alive (doesn't crash).
+
+## Usage
 ```bash
 ./test/e2e_offline/run.sh
 ```
+
+## Workspaces
+Tests run in ephemeral `work_*` folders.
+The `work` symlink points to the latest execution for easy debugging.
+
+## Files
+| File | Description |
+|------|-------------|
+| `run.sh` | Main execution script |
+| `mixer/mixer.toml` | Mixer configuration |
+| `rack/rack.toml` | Rack configuration |
+| `work/*/data/` | Persisted state (`state.flux`, keys) |
+| `work/*/logs/` | Execution logs |

@@ -20,6 +20,10 @@ type Bus interface {
 	// It returns a subscription object (to allow Unsubscribe) and an error.
 	Subscribe(subject string, handler Handler) (Subscription, error)
 
+	// SubscribeDurable listens for messages using a persistent consumer (durableName).
+	// This ensures messages are not lost/duplicated across restarts.
+	SubscribeDurable(subject, durableName string, handler Handler) (Subscription, error)
+
 	// Close cleans up the connection.
 	Close()
 }

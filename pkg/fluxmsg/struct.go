@@ -27,7 +27,7 @@ type FluxMsg struct {
 // Hop represents a single processing step in recent history
 type Hop struct {
 	GearID uint64 `msgpack:"g"`
-	PortID string `msgpack:"p"`
+	PortID uint64 `msgpack:"p"`
 	TsNano int64  `msgpack:"t"`
 }
 

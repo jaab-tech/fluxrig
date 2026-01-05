@@ -1,38 +1,45 @@
 # Conflict & Identity E2E Test
 
-**Objective:**
-Verify the Registry's Identity Management rules, specifically concerning Name Uniqueness, Active Session Protection, and Zero-Config Auto-Scaling.
+## Objective
+Verify the Registry's Identity Management rules: Name Uniqueness, Active Session Protection, Session Recovery, and Zero-Config Auto-Scaling.
 
-**Objective ID:** 15 (Conflict Handling)
+## Verifications
 
-## Scenarios
+### Scenario 1: Active Conflict (Security)
+- Start Rack A with name `rack-shared` → Registers successfully.
+- Start Rack B with same name (no secret) → Rejected (hijack attempt).
 
-### 1. Active Conflict (Protection)
-**Goal**: Verify that a second Rack cannot claim the identity of an **Active** Rack.
-1.  Start **Rack A** (`name="rack-shared"`).
-2.  Wait for Rack A to Register and send Heartbeat.
-3.  Start **Rack B** (`name="rack-shared"`, diff data dir) immediately.
-4.  **Expectation**: Rack B fails to register (Mixer returns 409 Conflict).
+### Scenario 2: Session Recovery
+- Kill Rack A.
+- Restart Rack A with cached passport → Recovers session.
 
-### 2. Session Recovery (Identity Reclaim)
-**Goal**: Verify that a Rack can reclaim its identity after a crash/restart.
-1.  Kill **Rack A**.
-2.  Wait for Session Timeout (simulate or force inactive status). (Or simply start B, but B must succeed if A is dead? No, protection is based on LastSeen).
-    *   *Test Adjustment*: We might need to manually expire the session in DB or wait 30s. For speed, we might assume "Active" means < 5s heartbeat?
-    *   *Refined Rule*: If Rack A is dead (process gone), it stops heartbeating. If we wait > 30s, B initiates Recovery.
-3.  Start **Rack B** (`name="rack-shared"`).
-4.  **Expectation**: Rack B successfully registers and receives the **Same MachineID** as Rack A.
+### Scenario 3: Zero-Config (Cattle)
+- Start Rack C with `prefix="probes-"` → Assigned name like `probes-XXXX`.
+- Start Rack D with same prefix → Gets unique ID.
 
-### 3. Zero-Config (Anonymous)
-**Goal**: Verify that Racks without names are treated as "Cattle" (Auto-Scale).
-1.  Start **Rack C** (No Name / Empty).
-2.  **Expectation**: Rack C registers successfully.
-3.  **Check**: Rack C Name is `node-<ID>` (e.g., `node-2`).
-4.  Start **Rack D** (No Name).
-5.  **Expectation**: Rack D registers successfully.
-6.  **Check**: Rack D Name is `node-<ID+1>` (e.g., `node-3`). IDs are unique.
+### Scenario 4: Default Zero-Config
+- Start Rack E with no prefix → Assigned name like `node-XXXX`.
+
+## Expected Results
+- ✅ Rack A registers successfully.
+- ✅ Rack B is rejected (no passport issued).
+- ✅ Rack A recovers session from cached passport.
+- ✅ Rack C and D get unique auto-generated names.
+- ✅ Rack E gets default `node-` prefix.
+
+## Usage
+```bash
+./test/e2e_conflict/run.sh
+```
+
+## Workspaces
+Tests run in ephemeral `work_*` folders.
+The `work` symlink points to the latest execution for easy debugging.
 
 ## Files
-- `run.sh`: Main execution script.
-- `mixer.toml`: Mixer config.
-- `logs/`: Output logs.
+| File | Description |
+|------|-------------|
+| `run.sh` | Main execution script |
+| `mixer/mixer.toml` | Mixer configuration |
+| `rack_*/rack.toml` | Rack configurations (A-E) |
+| `work/*/logs/` | Execution logs |

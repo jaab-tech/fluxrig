@@ -9,22 +9,28 @@ import (
 const (
 	SubjectAgentHello     = "fluxrig.agent.hello"
 	SubjectAgentHeartbeat = "fluxrig.agent.heartbeat"
+	// SubjectScenarioUpdate is published by Mixer to push scenarios to specific racks
+	// Topic pattern: fluxrig.rack.{rack_name}.scenario
+	SubjectScenarioPrefix = "fluxrig.rack."
+	SubjectScenarioSuffix = ".scenario"
 )
 
 // HelloPayload is sent by the Rack Agent on startup.
 type HelloPayload struct {
-	Name      string `msgpack:"name"`
-	MachineID uint16 `msgpack:"machine_id"`
-	Secret    string `msgpack:"secret"` // Bearer Token (Optional on first connect)
-	IP        string `msgpack:"ip"`
-	Port      int    `msgpack:"port"`
-	Version   string `msgpack:"version"`
+	Name      string         `msgpack:"name"`
+	MachineID uint16         `msgpack:"machine_id"`
+	Secret    string         `msgpack:"secret"` // Bearer Token (Optional on first connect)
+	IP        string         `msgpack:"ip"`
+	Port      int            `msgpack:"port"`
+	Version   string         `msgpack:"version"`
+	Config    map[string]any `msgpack:"config"`
 }
 
 // HeartbeatPayload is sent periodically by the Rack.
 type HeartbeatPayload struct {
 	MachineID uint16         `msgpack:"machine_id"`
 	Stats     map[string]any `msgpack:"stats"`
+	Config    map[string]any `msgpack:"config"`
 }
 
 // ToData converts the struct to a map[string]any for FluxMsg.Data.
@@ -117,4 +123,27 @@ func fromMap(m map[string]any, v any) error {
 		return fmt.Errorf("failed to parse payload: %w", err)
 	}
 	return nil
+}
+
+// ScenarioPayload is sent by the Mixer to push scenario updates to Racks.
+type ScenarioPayload struct {
+	Version   string `msgpack:"version"`    // Scenario version
+	Name      string `msgpack:"name"`       // Scenario name
+	RackName  string `msgpack:"rack_name"`  // Target rack name
+	MachineID uint16 `msgpack:"machine_id"` // Target machine ID
+	Scenario  []byte `msgpack:"scenario"`   // YAML-encoded scenario (projected for this rack)
+	Timestamp int64  `msgpack:"timestamp"`  // Unix timestamp
+}
+
+func (s *ScenarioPayload) ToData() (map[string]any, error) {
+	return toMap(s)
+}
+
+// ParseScenarioPayload extracts ScenarioPayload from FluxMsg.Data
+func ParseScenarioPayload(data map[string]any) (*ScenarioPayload, error) {
+	var s ScenarioPayload
+	if err := fromMap(data, &s); err != nil {
+		return nil, err
+	}
+	return &s, nil
 }

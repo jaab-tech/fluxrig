@@ -30,7 +30,7 @@ func NewRouter(logger watermill.LoggerAdapter) (*RouterWrapper, error) {
 // ConfigureJetStream sets up NATS JetStream Publisher and Subscriber.
 // url: NATS URL (e.g. "nats://localhost:4222")
 
-func (r *RouterWrapper) ConfigureJetStream(url string, streamName string, logger watermill.LoggerAdapter) error {
+func (r *RouterWrapper) ConfigureJetStream(url string, durable bool, logger watermill.LoggerAdapter) error {
 	// 1. Manually Ensure Stream Exists using Legacy Context
 	nc, err := nats.Connect(url)
 	if err != nil {
@@ -49,16 +49,37 @@ func (r *RouterWrapper) ConfigureJetStream(url string, streamName string, logger
 	_ = ctx
 
 	// Check if stream exists
-	_, err = js.StreamInfo(streamName)
-	if err == nil {
-		// Stream exists, we trust Snake/Config provisioned it correctly
-	} else {
-		// Create stream
+	// A. Business Stream (WorkQueue or Limits, Durable)
+	businessStream := "flux-msg"
+	_, err = js.StreamInfo(businessStream)
+	if err != nil {
 		_, err = js.AddStream(&nats.StreamConfig{
-			Name:      streamName,
-			Subjects:  []string{"fluxrig.>", "flux.telemetry.>"},
+			Name: businessStream,
+			// fluxrig.>: Control Plane (Heartbeats, Enrollment) - Required until Phase 4 Refactor
+			// flux.msg.>: Data Plane (Business Transactions) - New Standard
+			Subjects: []string{"fluxrig.>", "flux.msg.>", "flux.gear.>"},
+			// Use LimitsPolicy to allow multiple consumers (e.g., Processor + Auditor).
+			// WorkQueue policy would delete the message after *any* ack, preventing audit.
 			Retention: nats.LimitsPolicy,
 			Storage:   nats.FileStorage,
+			MaxAge:    24 * 30 * time.Hour, // 30 Days durability
+		})
+		if err != nil {
+			return err
+		}
+	}
+
+	// B. Telemetry Stream (Limits, Short-lived)
+	telemetryStream := "flux-telemetry"
+	_, err = js.StreamInfo(telemetryStream)
+	if err != nil {
+		_, err = js.AddStream(&nats.StreamConfig{
+			Name:      telemetryStream,
+			Subjects:  []string{"flux.telemetry.>"},
+			Retention: nats.LimitsPolicy,
+			Storage:   nats.FileStorage,
+			MaxAge:    24 * time.Hour, // 24 Hours retention
+			MaxMsgs:   100000,         // Cap number of logs
 		})
 		if err != nil {
 			return err
@@ -66,8 +87,9 @@ func (r *RouterWrapper) ConfigureJetStream(url string, streamName string, logger
 	}
 
 	// Log confirmation
-	logger.Info("JetStream Stream Verified", watermill.LogFields{
-		"stream": streamName,
+	logger.Info("JetStream Streams Verified", watermill.LogFields{
+		"business_stream":  businessStream,
+		"telemetry_stream": telemetryStream,
 	})
 
 	// 2. Configure Watermill
@@ -78,18 +100,31 @@ func (r *RouterWrapper) ConfigureJetStream(url string, streamName string, logger
 		nats.MaxReconnects(-1),
 	}
 
-	jsConfig := wnats.JetStreamConfig{
-		Disabled:      false,
-		AutoProvision: false, // We handled it manually above
-		SubscribeOptions: []nats.SubOpt{
+	subscribeOpts := []nats.SubOpt{}
+	if durable {
+		// [PROD] Durable Mode: Resumes from last acked message. Zero data loss.
+		logger.Info("NATS Consumer Mode: DURABLE (DeliverAll)", nil)
+		subscribeOpts = append(subscribeOpts,
 			nats.DeliverAll(),
-			// nats.BindStream("flux"), // Let NATS resolve via subject to avoid "duplicate stream name" error
-		},
-		PublishOptions: []nats.PubOpt{
+			nats.Durable("flux-router"), // Shared Durable Name
+		)
+	} else {
+		// [DEV] Ephemeral Mode: Only new messages. History lost on restart.
+		logger.Info("NATS Consumer Mode: EPHEMERAL (DeliverNew)", nil)
+		subscribeOpts = append(subscribeOpts,
+			nats.DeliverNew(),
+		)
+	}
+
+	jsConfig := wnats.JetStreamConfig{
+		Disabled:         false,
+		AutoProvision:    false, // Handled manually above
+		SubscribeOptions: subscribeOpts,
+		PublishOptions:   []nats.PubOpt{
 			// Sync publish by default for durability
 		},
 		AckAsync: false,
-		// DurablePrefix: "", // EPHEMERAL MODE: Disabled to avoid dot-naming issues in Consumers for now.
+		// DurablePrefix: "", // Handled via nats.Durable option above if needed
 	}
 
 	// Publisher (Writes to Watermill wires -> NATS Streams)

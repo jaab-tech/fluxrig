@@ -1,33 +1,34 @@
 #!/bin/bash
 set -u
 
+BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT_DIR="$(cd "${BASE_DIR}/../.." && pwd)"
+
+source "${BASE_DIR}/../utils/e2e_utils.sh"
+
+setup_workspace "registry" "$BASE_DIR"
+
+banner "Registry E2E Test"
+
 # Config
-TEST_DIR="test/e2e_registry"
-MIXER_DIR="$TEST_DIR/mixer"
-RACK_DIR="$TEST_DIR/rack"
-
-MIXER_CONFIG="$MIXER_DIR/mixer.toml"
-RACK_CONFIG="$RACK_DIR/rack.toml"
+MIXER_CONFIG="$BASE_DIR/mixer/mixer.toml"
+RACK_CONFIG="$BASE_DIR/rack/rack.toml"
 BASE_URL="http://127.0.0.1:8093"
-API_URL="$BASE_URL/api/v1" # Use different port to avoid conflict with telemetry test if parallel
+API_URL="$BASE_URL/api/v1"
 
-MIXER_LOG="$MIXER_DIR/logs/mixer.log"
-RACK_LOG="$RACK_DIR/logs/rack.log"
+MIXER_LOG="$WORK_DIR/mixer/mixer.stdout"
+RACK_LOG="$WORK_DIR/rack/rack.stdout"
 
 DB_CLI="duckdb"
-FLUX_BIN="bin/fluxrig"
+FLUX_BIN="${ROOT_DIR}/bin/fluxrig"
 
 MIXER_PID=""
 RACK_PID=""
 
-echo "========================================================"
-echo "🧪 Starting Registry E2E Test"
-echo "========================================================"
-
 # Trap for cleanup
 cleanup() {
     echo ""
-    echo "🧹 Cleanup..."
+    log_info "Cleanup..."
     if [ -n "$MIXER_PID" ]; then
         kill $MIXER_PID 2>/dev/null || true
         wait $MIXER_PID 2>/dev/null || true
@@ -39,11 +40,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# 1. Clean
+# 1. Clean (Handled by setup_workspace for dirs)
 pkill -f "bin/fluxrig" || true
-rm -rf $MIXER_DIR/data $MIXER_DIR/logs $RACK_DIR/data $RACK_DIR/logs
-mkdir -p $MIXER_DIR/data $MIXER_DIR/logs
-mkdir -p $RACK_DIR/data $RACK_DIR/logs
+# ensure ports are free
+lsof -ti :8093 | xargs kill -9 2>/dev/null || true
+lsof -ti :4222 | xargs kill -9 2>/dev/null || true
 
 # 2. Build Check
 if [ ! -f "bin/fluxrig-mixer" ]; then
@@ -53,14 +54,17 @@ fi
 
 # 3. Keys
 echo "🔐 Generating Keys..."
-./bin/fluxrig keys gen-cluster -o $MIXER_DIR/data/cluster.key > /dev/null
+"${ROOT_DIR}/bin/fluxrig" keys gen-cluster -o "$WORK_DIR/mixer/data/cluster.key" > /dev/null
 
 # 4. Config Prep (Ensure ports don't conflict with telemetry test defaults)
 # Using persistent config files in mixer/mixer.toml and rack/rack.toml
 # 5. Start Mixer
 echo "🚀 Starting Mixer (Port 8093)..."
-./bin/fluxrig-mixer -c $MIXER_DIR/mixer.toml > "$MIXER_LOG" 2>&1 &
+cp "${BASE_DIR}/mixer/mixer.toml" "${WORK_DIR}/mixer/mixer.toml"
+cd "${WORK_DIR}/mixer"
+"${ROOT_DIR}/bin/fluxrig-mixer" -c "mixer.toml" > "mixer.stdout" 2>&1 &
 MIXER_PID=$!
+cd "${BASE_DIR}"
 
 # Wait for Mixer
 echo "⏳ Waiting for Mixer..."
@@ -80,19 +84,22 @@ done
 
 # 6. Start Rack
 echo "🔌 Starting Rack..."
-./bin/fluxrig rack -c $RACK_DIR/rack.toml > "$RACK_LOG" 2>&1 &
+cp "${BASE_DIR}/rack/rack.toml" "${WORK_DIR}/rack/rack.toml"
+cd "${WORK_DIR}/rack"
+"${ROOT_DIR}/bin/fluxrig" rack -c "rack.toml" > "rack.stdout" 2>&1 &
 RACK_PID=$!
+cd "${BASE_DIR}"
 
 # 7. Wait for Registration
 echo "⏳ Waiting for Rack Registration..."
 FOUND=0
 for ((i=1;i<=30;i++)); do
-    curl -s "$API_URL/racks" > "$MIXER_DIR/logs/api_racks.json"
+    curl -s "$API_URL/racks" > "$WORK_DIR/mixer/logs/api_racks.json"
     # Match default hostname or IP if name not set? 
     # Rack auto-generates name if not provided? Or stays pending?
     # Default behavior: Pending with machine-id name?
     # Let's check api output.
-    if grep -q "machine_id" "$MIXER_DIR/logs/api_racks.json"; then
+    if grep -q "machine_id" "$WORK_DIR/mixer/logs/api_racks.json"; then
         echo "✅ Rack Registered (Found structure)!"
         FOUND=1
         break
@@ -136,18 +143,15 @@ wait $MIXER_PID 2>/dev/null || true
 MIXER_PID=""
 
 # 8. Registry Verification using DuckDB
-MIXER_DB="$MIXER_DIR/data/fluxrig.duckdb" # Default name if not overridden? Wait, mixer uses default.
-# The telemetry test set data_dir.
-# Default DB name is fluxrig.duckdb?
-# Let's check NewStore default. "fluxrig.duckdb".
-MIXER_DB="$MIXER_DIR/data/fluxrig.duckdb"
+# 8. Registry Verification using DuckDB
+MIXER_DB="$WORK_DIR/mixer/data/fluxrig.duckdb"
 
 echo "🔍 Verifying Registry Content..."
 
 # Use DuckDB CLI
 MIXER_COUNT=$($DB_CLI -noheader -csv "$MIXER_DB" "SELECT count(*) FROM registry WHERE type_id=2")
-SNAKE_COUNT=$($DB_CLI -noheader -csv "$MIXER_DB" "SELECT count(*) FROM registry WHERE type_id=8")
-RACK_COUNT=$($DB_CLI -noheader -csv "$MIXER_DB" "SELECT count(*) FROM registry WHERE type_id=3")
+SNAKE_COUNT=$($DB_CLI -noheader -csv "$MIXER_DB" "SELECT count(*) FROM registry WHERE type_id=9")
+RACK_COUNT=$($DB_CLI -noheader -csv "$MIXER_DB" "SELECT count(*) FROM registry WHERE type_id=4")
 
 echo "   Found $MIXER_COUNT Mixers"
 echo "   Found $SNAKE_COUNT Snakes"
@@ -170,7 +174,7 @@ echo "✅ Registry Counts Verified."
 
 echo "🔍 Verifying Attributes for Rack..."
 # Check if Rack attributes contain IP/Port/Secret
-RACK_ROW=$($DB_CLI -noheader -csv "$MIXER_DB" "SELECT stats, attributes, version FROM registry WHERE type_id=3 LIMIT 1")
+RACK_ROW=$($DB_CLI -noheader -csv "$MIXER_DB" "SELECT stats, attributes, version FROM registry WHERE type_id=4 LIMIT 1")
 echo "   Rack Row: $RACK_ROW"
 if [[ "$RACK_ROW" != *"last_seen"* ]]; then # stats usually has last_seen?
     # Wait, query is SELECT stats...
@@ -178,15 +182,15 @@ if [[ "$RACK_ROW" != *"last_seen"* ]]; then # stats usually has last_seen?
     :
 fi
 # Version check
-if [[ "$RACK_ROW" == *"0.1.0-alpha"* ]]; then
-     echo "✅ Rack Version Verified: 0.1.0-alpha"
+if [[ "$RACK_ROW" == *"0.2.0-dev"* ]]; then
+     echo "✅ Rack Version Verified: 0.2.0-dev"
 else
      echo "❌ Rack Version Check Failed. Row: $RACK_ROW"
      exit 1
 fi
 
 echo "🔍 Verifying Snake Topology..."
-SNAKE_ROW=$($DB_CLI -noheader -csv "$MIXER_DB" "SELECT attributes FROM registry WHERE type_id=8 LIMIT 1")
+SNAKE_ROW=$($DB_CLI -noheader -csv "$MIXER_DB" "SELECT attributes FROM registry WHERE type_id=9 LIMIT 1")
 if [[ "$SNAKE_ROW" != *"mixer"* ]]; then
      echo "❌ Snake Attributes missing 'mixer' topology!"
      exit 1
@@ -213,7 +217,7 @@ if [[ "$SNAKE_ROW" != *"mixer_port"* ]]; then
 fi
 
 # Check Snake MachineID
-SNAKE_MID=$($DB_CLI -noheader -csv "$MIXER_DB" "SELECT machine_id FROM registry WHERE type_id=8 LIMIT 1")
+SNAKE_MID=$($DB_CLI -noheader -csv "$MIXER_DB" "SELECT machine_id FROM registry WHERE type_id=9 LIMIT 1")
 if [ "$SNAKE_MID" -ne 1 ]; then
     echo "❌ Snake MachineID mismatch. Expected 1, got $SNAKE_MID"
     exit 1
@@ -230,8 +234,10 @@ echo "========================================================"
 # --- ADOPTION FLOW ---
 echo ""
 echo "🔄 Restarting Mixer for Adoption Flow..."
-./bin/fluxrig-mixer -c $MIXER_DIR/mixer.toml > "$MIXER_LOG" 2>&1 &
+cd "${WORK_DIR}/mixer"
+"${ROOT_DIR}/bin/fluxrig-mixer" -c "mixer.toml" > "mixer.stdout" 2>&1 &
 MIXER_PID=$!
+cd "${BASE_DIR}"
 
 # Wait for Mixer
 echo "⏳ Waiting for Mixer..."
@@ -275,8 +281,10 @@ kill $RACK_PID
 wait $RACK_PID 2>/dev/null || true
 
 # Start Rack again
-./bin/fluxrig rack -c $RACK_DIR/rack.toml > "$RACK_LOG.2" 2>&1 &
+cd "${WORK_DIR}/rack"
+"${ROOT_DIR}/bin/fluxrig" rack -c "rack.toml" > "rack.stdout.2" 2>&1 &
 RACK_PID=$!
+cd "${BASE_DIR}"
 
 echo "⏳ Waiting for Rack to connect..."
 sleep 5

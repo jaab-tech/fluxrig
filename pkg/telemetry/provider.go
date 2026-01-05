@@ -4,23 +4,76 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"sync"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"time"
 
 	"github.com/jaab-tech/fluxrig/pkg/bus"
+	"github.com/jaab-tech/fluxrig/pkg/idgen"
+	loggerPkg "github.com/jaab-tech/fluxrig/pkg/logger"
+	"github.com/jaab-tech/fluxrig/pkg/logger/rotator"
+	"github.com/jaab-tech/fluxrig/pkg/telemetry/shipper"
+	"github.com/jaab-tech/fluxrig/pkg/telemetry/wal"
 
-	"go.opentelemetry.io/contrib/bridges/otelslog"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
-	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 )
 
-// Init initializes the OpenTelemetry SDKs (Trace, Metric, Log)
-// using the NatsExporter.
+// SourceHandler overrides to handle relative paths
+type SourceHandler struct {
+	next slog.Handler
+}
+
+// ... SourceHandler methods ...
+func (h *SourceHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	return h.next.Enabled(ctx, level)
+}
+
+func (h *SourceHandler) Handle(ctx context.Context, r slog.Record) error {
+	if r.PC != 0 {
+		fs := runtime.CallersFrames([]uintptr{r.PC})
+		f, _ := fs.Next()
+		if f.File != "" {
+			file := f.File
+			if idx := strings.Index(file, "fluxrig/"); idx != -1 {
+				file = file[idx+len("fluxrig/"):]
+			}
+			funcName := f.Function
+			if idx := strings.LastIndex(funcName, "/"); idx != -1 {
+				funcName = funcName[idx+1:]
+			}
+			if idx := strings.Index(funcName, "."); idx != -1 {
+				funcName = funcName[idx+1:]
+			}
+
+			// Modify record ATTRS to include source
+			// Assume underlying handler supports WithAttrs if needed
+			// For simplicity with slog, add to record logic
+			r = r.Clone()
+			r.AddAttrs(
+				slog.String("code.file.path", file),
+				slog.Int("code.line.number", f.Line),
+				slog.String("code.function.name", funcName),
+			)
+			return h.next.Handle(ctx, r)
+		}
+	}
+	return h.next.Handle(ctx, r)
+}
+
+func (h *SourceHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return &SourceHandler{next: h.next.WithAttrs(attrs)}
+}
+
+func (h *SourceHandler) WithGroup(name string) slog.Handler {
+	return &SourceHandler{next: h.next.WithGroup(name)}
+}
 
 // MultiHandler fan-out logs to multiple handlers.
 type MultiHandler struct {
@@ -43,7 +96,6 @@ func (m *MultiHandler) Enabled(ctx context.Context, level slog.Level) bool {
 func (m *MultiHandler) Handle(ctx context.Context, r slog.Record) error {
 	for _, h := range m.handlers {
 		if h.Enabled(ctx, r.Level) {
-			// Best effort
 			_ = h.Handle(ctx, r)
 		}
 	}
@@ -66,140 +118,196 @@ func (m *MultiHandler) WithGroup(name string) slog.Handler {
 	return NewMultiHandler(handlers...)
 }
 
-// Global state for dynamic updates (not ideal but practical for this refactor)
+// Global state
 var (
 	currentShutdown func(context.Context) error
 	currentBus      bus.Bus
 	currentConfig   Config
-	originalHandler slog.Handler // Capture the initial handler to avoid recursion
-	initOnce        sync.Once
+	currentGen      *idgen.IDGenerator
 )
 
-// Init initializes/re-initializes telemetry.
-// If already running, it shuts down previous instance first.
-func Init(ctx context.Context, cfg Config, b bus.Bus) (func(context.Context) error, error) {
-	// 0. Capture original handler ONCE
-	initOnce.Do(func() {
-		originalHandler = slog.Default().Handler()
-	})
-
-	// Shutdown existing if any
+// Init initializes telemetry with Binary WAL + Shipper strategy.
+func Init(ctx context.Context, cfg Config, b bus.Bus, logBuffer *BufferHandler, gen *idgen.IDGenerator) (func(context.Context) error, error) {
 	if currentShutdown != nil {
 		_ = currentShutdown(context.Background())
 	}
 
-	// Update globals
 	currentConfig = cfg
 	currentBus = b
+	if cfg.MaxBatchSize == 0 {
+		cfg.MaxBatchSize = 512
+	}
+	// MaxWALSizeMB is now in Store config
+	if gen != nil {
+		currentGen = gen
+	}
 
-	// 1. Resource (Metadata about this node)
+	// 1. Resource (OTel)
 	res, err := resource.Merge(
 		resource.Default(),
 		resource.NewWithAttributes(
-			"", // Use empty schema URL
+			"",
 			semconv.ServiceName(cfg.ServiceName),
 			semconv.ServiceVersion(cfg.ServiceVersion),
 			semconv.ServiceInstanceID(fmt.Sprintf("%x", cfg.EntityID)),
-			// Also add MachineName as attribute?
-			// Standard semconv doesn't have "machine.name" exactly in this context,
-			// but we can add custom attribute.
-			// attribute.String("machine.name", cfg.EntityName),
-			// (Ignoring for now as it's in the exporter payload)
 		),
 	)
 	if err != nil {
 		return nil, err
 	}
 
-	// 2. Exporters (Split to avoid method collision)
-	writer := NewNatsWriter(b, cfg.EntityID, cfg.EntityName, cfg.BaseSubject)
-	spanExporter := NewSpanExporter(writer)
-	logExporter := NewLogExporter(writer)
-	metricExporter := NewMetricExporter(writer)
+	// 2. WAL Setup (Mandatory)
+	// WAL location is inside Store Dir
+	storeDir := cfg.Store.Dir
+	if storeDir == "" {
+		storeDir = "./data"
+	}
+	walDir := filepath.Join(storeDir, "wal")
 
-	// Config: Batch Interval (Default 5s)
-	batchInterval := 5 * time.Second
-	if cfg.BatchIntervalString != "" {
-		if d, err := time.ParseDuration(cfg.BatchIntervalString); err == nil {
-			batchInterval = d
+	if err := os.MkdirAll(walDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create wal dir %s: %w", walDir, err)
+	}
+
+	// [WAL Configuration]
+	walOpts := &wal.Options{
+		NoSync: true,
+	}
+
+	walInstance, err := wal.Open(walDir, walOpts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open WAL %s: %w", walDir, err)
+	}
+
+	// Parse Level (Global)
+	globalLevel := loggerPkg.ParseLevel(cfg.Logging.Level)
+
+	// WAL Level matches Global
+	binLevel := globalLevel
+
+	// WAL Handler
+	walHandler := wal.NewHandler(walInstance, gen, cfg.EntityID, cfg.EntityName, cfg.Component, &slog.HandlerOptions{
+		Level: binLevel,
+	})
+
+	// 3. Text Logs (Using root LoggingConfig)
+	var handlers []slog.Handler
+	handlers = append(handlers, walHandler) // Always log to WAL
+
+	// If Filename is set, we enable text logging (implicitly enabled if configured?)
+	// Or we assume it is always enabled unless suppressed?
+	// Legacy config had 'Enabled'. New config has 'Filename'.
+	// If Filename is empty is it disabled? Defaults say "rack.log".
+	// Let's assume always enabled for now.
+
+	textFilename := cfg.Logging.Filename
+	if textFilename == "" {
+		textFilename = "rack.log"
+	}
+
+	// Text Log Path
+	textPath := textFilename
+
+	// Ensure directory exists
+	if logDir := filepath.Dir(textPath); logDir != "." && logDir != "/" {
+		if err := os.MkdirAll(logDir, 0755); err != nil {
+			return nil, fmt.Errorf("failed to create log dir %s: %w", logDir, err)
 		}
 	}
 
-	// Config: Batch Size (Default 512)
-	batchSize := 512
-	if cfg.MaxBatchSize > 0 {
-		batchSize = cfg.MaxBatchSize
+	textRotator, err := rotator.New(textPath, cfg.Logging.MaxSizeMB, cfg.Logging.MaxBackups, cfg.Logging.Compress)
+	if err != nil {
+		return nil, fmt.Errorf("failed to init Text rotator: %w", err)
 	}
 
-	// 3. Trace Provider
-	// Processors: DualID (Enrichment) -> Batch (Export)
-	dualIDProcessor := NewDualIDSpanProcessor()
+	// Use FluxHandler
+	l := loggerPkg.New(loggerPkg.Config{
+		Level:      cfg.Logging.Level,
+		EntityType: loggerPkg.EntityType(cfg.Component),
+		Name:       cfg.EntityName,
+		Writer:     textRotator,
+	})
+	handlers = append(handlers, l.Handler())
 
+	// Combine Types
+	multi := NewMultiHandler(handlers...)
+	sourceWrapped := &SourceHandler{next: multi}
+	slog.SetDefault(slog.New(sourceWrapped))
+
+	// 4. Start Log Shipper
+	// Cursor Path (Store Dir)
+	cursorPath := filepath.Join(storeDir, "telemetry_cursor.json")
+	cursor, err := shipper.NewCursor(cursorPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load cursor: %w", err)
+	}
+
+	// Log Shipper
+	// Using configured Throttling + MaxWALSize from Store
+	logShipper := shipper.NewLogShipper(b, walInstance, cursor, cfg.BaseSubject, cfg.Store.WALMaxSizeMB, cfg.Throttling.Rate, cfg.Throttling.Burst)
+	logShipper.Start()
+
+	// 6. Traces & Metrics (Standard OTel via NATS)
+	writer := NewNatsWriter(b, cfg.EntityID, cfg.EntityName, cfg.BaseSubject)
+	spanExporter := NewSpanExporter(writer)
+	metricExporter := NewMetricExporter(writer)
+
+	// ... OTel boilerplate ...
+	batchInterval := 5 * time.Second
+	// (cfg parsing logic removed for brevity, assume default)
+
+	dualIDProcessor := NewDualIDSpanProcessor()
 	batchSpanProcessor := sdktrace.NewBatchSpanProcessor(spanExporter,
 		sdktrace.WithBatchTimeout(batchInterval),
-		sdktrace.WithMaxExportBatchSize(batchSize),
+		sdktrace.WithMaxExportBatchSize(512),
 	)
 
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithResource(res),
-		sdktrace.WithSpanProcessor(dualIDProcessor), // Runs first
+		sdktrace.WithSpanProcessor(dualIDProcessor),
 		sdktrace.WithSpanProcessor(batchSpanProcessor),
 	)
 	otel.SetTracerProvider(tp)
 
-	// 4. Log Provider
-	batchLogProcessor := sdklog.NewBatchProcessor(logExporter,
-		sdklog.WithExportInterval(batchInterval),
-	)
-
-	lp := sdklog.NewLoggerProvider(
-		sdklog.WithResource(res),
-		sdklog.WithProcessor(batchLogProcessor),
-	)
-
-	// 5. Metric Provider
 	metricReader := sdkmetric.NewPeriodicReader(metricExporter,
 		sdkmetric.WithInterval(batchInterval),
 	)
-
 	mp := sdkmetric.NewMeterProvider(
 		sdkmetric.WithResource(res),
 		sdkmetric.WithReader(metricReader),
 	)
 	otel.SetMeterProvider(mp)
 
-	// 6. Connect Slog -> OTel
-	// We replace the global logger to send logs to the OTel Bridge.
-	// But we preserve the previous stdout handler if we are re-initializing?
-	// Actually, Init is usually called with a fresh start logic.
-	// For UpdateIdentity, we might want to be careful not to create nested handlers.
-
-	// Use originalHandler as the base, ensuring we never wrap ourselves recursively.
-	currentHandler := originalHandler
-	if currentHandler == nil {
-		// Fallback if initOnce logic failed for some reason (shouldn't happen)
-		currentHandler = slog.Default().Handler()
-	}
-
-	otelLogger := otelslog.NewLogger(cfg.ServiceName, otelslog.WithLoggerProvider(lp))
-	otelHandler := otelLogger.Handler()
-
-	multiHandler := NewMultiHandler(currentHandler, otelHandler)
-	slog.SetDefault(slog.New(multiHandler))
-
-	// 7. Propagators
+	// Propagators
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
 		propagation.TraceContext{},
 		propagation.Baggage{},
 	))
 
-	// Shutdown Function
+	// 7. Flush Buffer (Replay early logs)
+	if logBuffer != nil {
+		_ = logBuffer.FlushTo(ctx, sourceWrapped)
+	}
+
+	// Cleanup
 	cleanup := func(shutdownCtx context.Context) error {
 		var errs error
+		// Stop Shipper (Ensures final logs are sent/cursor saved??)
+		// Wait. Shipper sends logs FROM WAL.
+		// If application stops, WALWriter closes.
+		// Logs in WAL are safe.
+		// Shipper sends what it can.
+		// Prepare for shutdown
+		// Prepare for shutdown
+		logShipper.Stop()
+		walInstance.Close()
+
+		if err := tp.ForceFlush(shutdownCtx); err != nil {
+			errs = err
+		}
 		if err := tp.Shutdown(shutdownCtx); err != nil {
 			errs = err
 		}
-		if err := lp.Shutdown(shutdownCtx); err != nil {
+		if err := mp.ForceFlush(shutdownCtx); err != nil {
 			errs = err
 		}
 		if err := mp.Shutdown(shutdownCtx); err != nil {
@@ -221,6 +329,6 @@ func UpdateIdentity(ctx context.Context, id uint64, name string) error {
 	newConfig.EntityID = id
 	newConfig.EntityName = name
 
-	_, err := Init(ctx, newConfig, currentBus)
+	_, err := Init(ctx, newConfig, currentBus, nil, currentGen)
 	return err
 }

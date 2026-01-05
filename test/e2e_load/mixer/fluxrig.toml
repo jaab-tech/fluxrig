@@ -1,0 +1,28 @@
+[logging]
+level = "trace"
+filename = "logs/mixer.log"
+
+[store]
+dir = "./data"
+wal_max_size_mb = 500
+database_file = "fluxrig.duckdb"
+cluster_key_file = "cluster.key"
+
+[mixer]
+machine_id = 99
+mixer_name = "load-mixer"
+
+[api]
+port = 9115
+
+[snake]
+port = 4225
+url = "nats://127.0.0.1:4225"
+cluster_name = "load-cluster"
+
+[observability]
+enabled = true
+tier = "embedded"
+
+[observability.embedded]
+flush_interval = "1s"

@@ -122,7 +122,7 @@ var keysInspectCmd = &cobra.Command{
 			fmt.Printf("  Name:      %s\n", state.Name)
 			fmt.Printf("  Status:    %s\n", state.Status)
 			fmt.Printf("  Secret:    %s\n", maskSecret(state.Secret))
-			fmt.Printf("  ClusterKey:%x\n", state.ClusterPublic[:8]) // Show prefix
+			fmt.Printf("  MixerKey:%x\n", state.MixerPublic[:8]) // Show prefix
 			fmt.Printf("--------------------------------------------------\n")
 		}
 

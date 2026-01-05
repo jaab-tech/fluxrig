@@ -7,6 +7,7 @@ import (
 
 	"github.com/jaab-tech/fluxrig/pkg/config"
 	loggerPkg "github.com/jaab-tech/fluxrig/pkg/logger"
+	"github.com/jaab-tech/fluxrig/pkg/telemetry"
 	"github.com/spf13/cobra"
 )
 
@@ -21,10 +22,10 @@ var rackCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// 1. Setup Logging (Basic for startup)
 		logger = loggerPkg.New(loggerPkg.Config{
-			Level:     "info",
-			Component: loggerPkg.TypeRack,
-			Name:      "fluxrig-rack-init",
-			Writer:    os.Stdout,
+			Level:      "info",
+			EntityType: loggerPkg.TypeRack,
+			Name:       "fluxrig-rack-init",
+			Writer:     os.Stdout,
 		})
 		// logger.Info("Starting FluxRig Rack...") // Removed to avoid double print with main logger
 
@@ -38,18 +39,21 @@ var rackCmd = &cobra.Command{
 
 		// 3. Setup Standard Logger
 		logger = loggerPkg.New(loggerPkg.Config{
-			Level:     cfg.Logging.Level,
-			Component: loggerPkg.TypeRack,
-			Name:      cfg.Rack.Name,
-			Writer:    os.Stdout, // CLI always to stdout, tests capture via redirection
+			Level:      cfg.Logging.Level,
+			EntityType: loggerPkg.TypeRack,
+			Name:       cfg.Rack.Name,
+			Writer:     os.Stdout, // CLI always to stdout, tests capture via redirection
 		})
-		slog.SetDefault(logger)
+		// Buffer pre-telemetry logs for 1-to-1 parity
+		bufHandler := telemetry.NewBufferHandler(logger.Handler())
+		bufLogger := slog.New(bufHandler)
+		slog.SetDefault(bufLogger)
 
-		logger.Info("Starting FluxRig Rack...", "version", "v0.1.0-alpha")
+		bufLogger.Info("Starting FluxRig Rack...", "version", "v0.1.0-alpha")
 
 		// 3. Connect to Bus & Start Agent
-		if err := RunAgent(cfg, logger); err != nil {
-			logger.Error("Agent failed", "error", err)
+		if err := RunAgent(cfg, bufLogger, bufHandler); err != nil {
+			bufLogger.Error("Agent failed", "error", err)
 			os.Exit(1)
 		}
 
