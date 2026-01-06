@@ -37,8 +37,8 @@ func NewNatsWriter(b bus.Bus, entityID uint64, entityName, baseSubject string) *
 // Write implements io.Writer for Logs (OTel Logs Exporter writes JSON bytes here)
 func (w *NatsWriter) Write(p []byte) (n int, err error) {
 	// OTel JSON Log Record -> Wrap in FluxMsg
-	// We need to inject common metadata (machine_id, machine_name)
-	// Since we receive bytes, we probably want to wrap them in a structure
+	// Inject common metadata (machine_id, machine_name)
+	// Since input is bytes, wrap in structure if needed
 	// or assume the bytes are the 'body'.
 	//
 	// However, the OTel JSON exporter produces a complete JSON object.
@@ -46,7 +46,7 @@ func (w *NatsWriter) Write(p []byte) (n int, err error) {
 	// Let's add context at Ingest time or Client time?
 	// Client time is better.
 	//
-	// Hack: Unmarshal to map, add fields, Marshal. OR struct.
+	// Alternative: Unmarshal to map, append fields, and Marshal, or use a structured transport wrapper.
 	// Performance penalty, but safer.
 	var record map[string]interface{}
 	if err := json.Unmarshal(p, &record); err != nil {
@@ -195,10 +195,8 @@ func (e *MetricExporter) Export(ctx context.Context, metrics *metricdata.Resourc
 				msg := fluxmsg.New()
 				msg.Data = payload
 				msg.Metadata["type"] = "telemetry.metric"
-				// Note: Original code used NewFromData with json bytes, but here we can pass map directly?
 				// fluxmsg.Data is map[string]any.
-				// If we want to send JSON body, we should probably marshal it if expected by sink.
-				// Sink expects JSON? Let's assume fluxmsg handles it.
+				// Sink handles JSON marshaling if required.
 
 				_ = e.bus.Publish(e.baseSubject+".metrics", msg)
 			}

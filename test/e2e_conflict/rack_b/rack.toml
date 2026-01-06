@@ -1,9 +1,14 @@
 [logging]
 level = "debug"
+filename = "logs/rack.log"
+
+[store]
+dir = "./data"
+state_file = "state.flux"
 
 [rack]
 name = "rack-shared"
-data_dir = "test/e2e_conflict/rack_b/data"
+# data_dir removed
 heartbeat_interval = "1s"
 
 [rack.bus]

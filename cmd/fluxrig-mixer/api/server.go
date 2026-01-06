@@ -1,12 +1,16 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/ThreeDotsLabs/watermill"
@@ -17,16 +21,22 @@ import (
 	"github.com/jaab-tech/fluxrig/pkg/pki"
 	"github.com/jaab-tech/fluxrig/pkg/version"
 	"github.com/vmihailenco/msgpack/v5"
+
+	"github.com/jaab-tech/fluxrig/pkg/config"
+	"github.com/jaab-tech/fluxrig/pkg/controller"
 )
 
 type Server struct {
-	reg    registry.Registry
-	pub    message.Publisher
-	signer *pki.ClusterKey
+	reg          registry.Registry
+	pub          message.Publisher
+	signer       *pki.ClusterKey
+	scenarioCtrl *controller.ScenarioController
+	mixerID      uint64
+	cfg          *config.MixerConfig
 }
 
-func NewServer(reg registry.Registry, pub message.Publisher, signer *pki.ClusterKey) *Server {
-	return &Server{reg: reg, pub: pub, signer: signer}
+func NewServer(reg registry.Registry, pub message.Publisher, signer *pki.ClusterKey, sc *controller.ScenarioController, mixerID uint64, cfg *config.MixerConfig) *Server {
+	return &Server{reg: reg, pub: pub, signer: signer, scenarioCtrl: sc, mixerID: mixerID, cfg: cfg}
 }
 
 func (s *Server) Start(addr string) error {
@@ -35,19 +45,40 @@ func (s *Server) Start(addr string) error {
 	// Middleware: CORS/Recovery/Logging logic can be added here
 
 	mux.HandleFunc("/api/v1/health", s.handleHealth)
+	mux.HandleFunc("/api/v1/config", s.handleConfig)
 	mux.HandleFunc("/api/v1/racks", s.handleRacks)
-	mux.HandleFunc("/api/v1/racks/", s.handleRackAction) // Trailing slash for sub-paths
+	mux.HandleFunc("/api/v1/racks/{id}", s.handleRackAction) // Use Go 1.22 path value syntax if valid, or just check content first.
+	mux.HandleFunc("/api/v1/racks/", s.handleRackAction)     // Trailing slash for sub-paths
 	mux.HandleFunc("/api/v1/telemetry/", s.handleTelemetry)
+	mux.HandleFunc("/api/v1/scenario/import", s.handleScenarioImport)
+	mux.HandleFunc("/api/v1/topology/status", s.handleTopologyStatus)
+	mux.HandleFunc("/api/v1/topology/list", s.handleTopologyList)
 
 	// Log using global/standard logger which is slog at this point
 	slog.Info("Mixer Control Plane listening", "addr", addr)
+
+	lc := net.ListenConfig{
+		Control: func(network, address string, c syscall.RawConn) error {
+			var opErr error
+			if err := c.Control(func(fd uintptr) {
+				opErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
+			}); err != nil {
+				return err
+			}
+			return opErr
+		},
+	}
+	l, err := lc.Listen(context.Background(), "tcp", addr)
+	if err != nil {
+		return err
+	}
 
 	server := &http.Server{
 		Addr:              addr,
 		Handler:           mux,
 		ReadHeaderTimeout: 3 * time.Second,
 	}
-	return server.ListenAndServe()
+	return server.Serve(l)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -55,6 +86,14 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"status":  "ok",
 		"version": version.String(),
 	})
+}
+
+func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
+	if s.cfg == nil {
+		http.Error(w, "Config not available", http.StatusNotFound)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(s.cfg)
 }
 
 func (s *Server) handleRacks(w http.ResponseWriter, r *http.Request) {
@@ -137,11 +176,12 @@ func (s *Server) handleRackAction(w http.ResponseWriter, r *http.Request) {
 			var passportBytes []byte
 			if s.signer != nil {
 				rackState := pki.RackState{
-					MachineID:     rack.MachineID,
-					Name:          rack.Name,
-					Status:        rack.Status, // "active"
-					Secret:        rack.Secret,
-					ClusterPublic: s.signer.Public,
+					MixerID:     s.mixerID,
+					MachineID:   rack.MachineID,
+					Name:        rack.Name,
+					Status:      rack.Status, // "active"
+					Secret:      rack.Secret,
+					MixerPublic: s.signer.Public,
 				}
 				if env, err := s.signer.Sign(&rackState); err == nil {
 					if b, err := msgpack.Marshal(env); err == nil {
@@ -168,11 +208,12 @@ func (s *Server) handleRackAction(w http.ResponseWriter, r *http.Request) {
 			var passportBytes []byte
 			if rack, err := s.reg.Get(r.Context(), uint16(id)); err == nil && s.signer != nil {
 				rackState := pki.RackState{
-					MachineID:     rack.MachineID,
-					Name:          rack.Name,
-					Status:        rack.Status, // "inactive"
-					Secret:        rack.Secret,
-					ClusterPublic: s.signer.Public,
+					MixerID:     s.mixerID,
+					MachineID:   rack.MachineID,
+					Name:        rack.Name,
+					Status:      rack.Status, // "inactive"
+					Secret:      rack.Secret,
+					MixerPublic: s.signer.Public,
 				}
 				if env, err := s.signer.Sign(&rackState); err == nil {
 					if b, err := msgpack.Marshal(env); err == nil {
@@ -200,11 +241,12 @@ func (s *Server) handleRackAction(w http.ResponseWriter, r *http.Request) {
 			var passportBytes []byte
 			if rack, err := s.reg.Get(r.Context(), uint16(id)); err == nil && s.signer != nil {
 				rackState := pki.RackState{
-					MachineID:     rack.MachineID,
-					Name:          rack.Name,
-					Status:        rack.Status, // "active"
-					Secret:        rack.Secret,
-					ClusterPublic: s.signer.Public,
+					MixerID:     s.mixerID,
+					MachineID:   rack.MachineID,
+					Name:        rack.Name,
+					Status:      rack.Status, // "active"
+					Secret:      rack.Secret,
+					MixerPublic: s.signer.Public,
 				}
 				if env, err := s.signer.Sign(&rackState); err == nil {
 					if b, err := msgpack.Marshal(env); err == nil {
@@ -291,6 +333,117 @@ func (s *Server) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.Error(w, "Not found", http.StatusNotFound)
+}
+
+func (s *Server) handleScenarioImport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	dryRunVal := r.URL.Query().Get("dry_run")
+	dryRun := dryRunVal == "true" || dryRunVal == "1"
+
+	activateVal := r.URL.Query().Get("activate")
+	shouldActivate := activateVal == "true" || activateVal == "1"
+
+	// Read Body
+	// Limit size to prevent DoS
+	r.Body = http.MaxBytesReader(w, r.Body, 10*1024*1024) // 10MB limit
+	data, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Read error", http.StatusBadRequest)
+		return
+	}
+
+	name, err := s.scenarioCtrl.Import(r.Context(), data, dryRun)
+	if err != nil {
+		slog.Error("Import failed", "error", err)
+		http.Error(w, fmt.Sprintf("Import failed: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	// Activate if requested and not dry-run
+	if shouldActivate && !dryRun {
+		if err := s.scenarioCtrl.Activate(r.Context(), name); err != nil {
+			slog.Error("Activation failed", "scenario", name, "error", err)
+			http.Error(w, fmt.Sprintf("Imported but activation failed: %v", err), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	w.WriteHeader(http.StatusOK)
+	if dryRun {
+		_, _ = w.Write([]byte(`{"status":"validated"}`))
+	} else {
+		if shouldActivate {
+			_, _ = w.Write([]byte(`{"status":"imported_and_activated","name":"` + name + `"}`))
+		} else {
+			_, _ = w.Write([]byte(`{"status":"imported","name":"` + name + `"}`))
+		}
+	}
+}
+
+// handleTopologyStatus returns the current synchronization status.
+// Queries registry for actual rack count.
+func (s *Server) handleTopologyStatus(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	// Query registry for all racks
+	racks, err := s.reg.List(ctx, "")
+	racksTotal := 0
+	if err == nil {
+		racksTotal = len(racks)
+	}
+
+	// Get active scenario version
+	activeVer := "unknown"
+	if s.scenarioCtrl != nil {
+		activeVer = s.scenarioCtrl.CurrentVersion()
+	}
+
+	status := map[string]any{
+		"sync_status": "synchronized",
+		"active_ver":  activeVer,
+		"racks_total": racksTotal,
+	}
+	_ = json.NewEncoder(w).Encode(status)
+}
+
+// handleTopologyList returns the projected topology with rack and gear details.
+func (s *Server) handleTopologyList(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	// Query registry for all racks
+	racks, err := s.reg.List(ctx, "")
+	rackList := []map[string]any{}
+	if err == nil {
+		for _, rack := range racks {
+			rackList = append(rackList, map[string]any{
+				"machine_id": rack.MachineID,
+				"name":       rack.Name,
+				"status":     rack.Status,
+				"last_seen":  rack.LastSeen,
+			})
+		}
+	}
+
+	// Get gears from scenario controller
+	gearList := []string{}
+	if s.scenarioCtrl != nil {
+		scenario := s.scenarioCtrl.GetActiveScenario()
+		if scenario != nil {
+			for _, g := range scenario.Gears {
+				gearList = append(gearList, g.Name)
+			}
+		}
+	}
+
+	topology := map[string]any{
+		"racks": rackList,
+		"gears": gearList,
+	}
+	_ = json.NewEncoder(w).Encode(topology)
 }
 
 func (s *Server) publishStatus(id uint16, status string, cmd string, passport []byte) {

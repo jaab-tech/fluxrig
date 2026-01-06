@@ -30,7 +30,7 @@ func TestRegistry_ErrorPaths(t *testing.T) {
 	}
 
 	// 2. Heartbeat Non-Existent
-	err = reg.Heartbeat(ctx, 9999, map[string]any{"cpu": 1})
+	err = reg.Heartbeat(ctx, 9999, map[string]any{"cpu": 1}, nil)
 	if err == nil {
 		t.Error("Heartbeat(9999) should fail")
 	}
@@ -45,17 +45,17 @@ func TestRegistry_ErrorPaths(t *testing.T) {
 	// name is not NULL in schema? "name TEXT". Only "PRIMARY KEY" on entity_id.
 	// But `InitializeSchema` creates UNIQUE INDEX on name.
 	// So duplicate name should fail.
-	_, err = reg.Register(ctx, "dup-name", "secret", "1.2.3.4", 8080, "v1")
+	_, err = reg.Register(ctx, "dup-name", "rack", "dup-name", 8080, "1.2.3.4", map[string]any{"v": "v1"}, 500)
 	if err != nil {
 		t.Fatalf("First register failed: %v", err)
 	}
 	// Try duplicate
-	_, err = reg.Register(ctx, "dup-name", "secret2", "1.2.3.4", 8081, "v1")
+	_, err = reg.Register(ctx, "dup-name", "rack", "dup-name", 8081, "1.2.3.4", map[string]any{"v": "v1"}, 501)
 	if err == nil {
 		t.Error("Duplicate Register should fail (Unique Name Index)")
 	}
 
-	// 5. List with Limits 
+	// 5. List with Limits
 	// DuckDBRegistry.List implements status filtering, not pagination (limit/offset args removed/different?)
 	// Interface: List(ctx, status string) ([]*Rack, error)
 	// My previous test code assumed List(ctx, limit, offset).
@@ -76,9 +76,9 @@ func TestRegistry_ErrorPaths(t *testing.T) {
 	// 7. Approve Name Conflict
 	// "dup-name" exists (from 4).
 	// Register another one
-	_, err = reg.Register(ctx, "victim", "secret", "1.2.3.4", 9000, "v1")
+	_, err = reg.Register(ctx, "victim", "rack", "victim", 9000, "1.2.3.4", map[string]any{"v": "v1"}, 502)
 	// Try renaming "victim" to "dup-name"
-	_, err = reg.Approve(ctx, 300, "dup-name") // MachineID likely 101 or similar? 
+	_, err = reg.Approve(ctx, 300, "dup-name") // MachineID likely 101 or similar?
 	// We need actual ID.
 	// But without list, we assume sequence.
 	// Let's get victim ID

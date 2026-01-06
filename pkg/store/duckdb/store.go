@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jaab-tech/fluxrig/pkg/idgen"
 	_ "github.com/marcboeker/go-duckdb"
 )
 
@@ -62,22 +63,40 @@ func (s *Store) InitializeSchema(ctx context.Context) error {
 	query := `
 	CREATE TABLE IF NOT EXISTS registry (
 		entity_id UBIGINT PRIMARY KEY,    -- fluxEntityID
-		type_id USMALLINT,                -- 2=Mixer, 3=Rack, 8=Snake
-		machine_id USMALLINT,             -- Rack/Mixer ID
-		name TEXT,                        -- Unique Hostname
+		type_id USMALLINT,                -- 1=Cluster, 2=Mixer, 4=Rack, 5=Gear, etc.
+		machine_id USMALLINT,             -- Rack/Mixer MachineID component
+		mixer_id UBIGINT,                 -- Parent Mixer entity_id (NULL for Cluster/Mixer)
+		name TEXT,                        -- Unique Hostname/Name
 		status TEXT DEFAULT 'offline',    -- active/pending/offline
 		version TEXT,
 		started_at TIMESTAMP,
 		last_seen TIMESTAMP,
 		stats JSON,
-		attributes JSON                   -- Unified Attributes (IP, Port, Secret, Stats, etc.)
+		config JSON,
+		attributes JSON                   -- Unified Attributes (IP, Port, Secret, etc.)
 	);
 	
 	CREATE SEQUENCE IF NOT EXISTS seq_machine_id_server START 100;
 	CREATE UNIQUE INDEX IF NOT EXISTS idx_registry_name ON registry (name);
+	
+	CREATE TABLE IF NOT EXISTS entity_types (
+		id USMALLINT PRIMARY KEY,
+		name TEXT
+	);
 	`
-	_, err := s.db.ExecContext(ctx, query)
-	return err
+	if _, err := s.db.ExecContext(ctx, query); err != nil {
+		return err
+	}
+
+	// Populate entity_types from idgen
+	for id, name := range idgen.EntityTypes {
+		_, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO entity_types (id, name) VALUES (?, ?)", uint16(id), name)
+		if err != nil {
+			return fmt.Errorf("failed to insert entity type %s: %w", name, err)
+		}
+	}
+
+	return nil
 }
 
 // InitializeTelemetrySchema creates tables for embedded observability.
@@ -87,10 +106,14 @@ func (s *Store) InitializeTelemetrySchema(ctx context.Context) error {
 		CREATE TABLE IF NOT EXISTS telemetry_logs (
 			timestamp TIMESTAMP,
 			entity_id UBIGINT,
+			entity_type TEXT,
 			entity_name TEXT,
 			trace_id TEXT,
 			span_id TEXT,
 			severity TEXT,
+			source_file TEXT,
+			source_line INTEGER,
+			source_func TEXT,
 			body TEXT,
 			attributes JSON
 		);
@@ -220,9 +243,9 @@ func (s *Store) RegisterMixer(ctx context.Context, mid uint16, name string, eid 
 	statsJSON, _ := json.Marshal(stats)
 
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO registry (entity_id, type_id, machine_id, name, status, version, started_at, last_seen, stats, attributes)
-		VALUES (?, 2, ?, ?, 'active', ?, ?, ?, ?, ?)
-	`, eid, mid, name, version, now, now, string(statsJSON), string(attrsJSON))
+		INSERT INTO registry (entity_id, type_id, machine_id, mixer_id, name, status, version, started_at, last_seen, stats, config, attributes)
+		VALUES (?, 2, ?, NULL, ?, 'active', ?, ?, ?, ?, ?, ?)
+	`, eid, mid, name, version, now, now, string(statsJSON), "{}", string(attrsJSON))
 	if err != nil {
 		return err
 	}
@@ -242,7 +265,7 @@ func (s *Store) RegisterSnake(ctx context.Context, name string, eid uint64, vers
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if _, err := tx.ExecContext(ctx, "DELETE FROM registry WHERE entity_id = ? AND type_id = 8", eid); err != nil {
+	if _, err := tx.ExecContext(ctx, "DELETE FROM registry WHERE entity_id = ? AND type_id = 9", eid); err != nil {
 		return err
 	}
 
@@ -259,9 +282,9 @@ func (s *Store) RegisterSnake(ctx context.Context, name string, eid uint64, vers
 	statsJSON, _ := json.Marshal(stats)
 
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO registry (entity_id, type_id, machine_id, name, status, version, started_at, last_seen, stats, attributes)
-		VALUES (?, 8, ?, ?, 'active', ?, ?, ?, ?, ?)
-	`, eid, machineID, name, version, now, now, string(statsJSON), string(attrsJSON))
+		INSERT INTO registry (entity_id, type_id, machine_id, mixer_id, name, status, version, started_at, last_seen, stats, attributes)
+		VALUES (?, 9, ?, ?, ?, 'active', ?, ?, ?, ?, ?)
+	`, eid, machineID, toMixer, name, version, now, now, string(statsJSON), string(attrsJSON))
 	if err != nil {
 		return err
 	}
@@ -280,7 +303,7 @@ func (s *Store) UpdateSnakeStats(ctx context.Context, eid uint64, stats map[stri
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE registry 
 		SET stats = ?, last_seen = ? 
-		WHERE entity_id = ? AND type_id = 8
+		WHERE entity_id = ? AND type_id = 9
 	`, string(statsJSON), now, eid)
 
 	if err != nil {
@@ -296,13 +319,13 @@ func (s *Store) UpdateSnakeStats(ctx context.Context, eid uint64, stats map[stri
 
 // ClearSnakes removes all snake entities (used on startup).
 func (s *Store) ClearSnakes(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, "DELETE FROM registry WHERE type_id = 8")
+	_, err := s.db.ExecContext(ctx, "DELETE FROM registry WHERE type_id = 9")
 	return err
 }
 
 // RemoveSnake deletes a Snake from the registry.
 func (s *Store) RemoveSnake(ctx context.Context, eid uint64) error {
-	res, err := s.db.ExecContext(ctx, "DELETE FROM registry WHERE entity_id = ? AND type_id = 8", eid)
+	res, err := s.db.ExecContext(ctx, "DELETE FROM registry WHERE entity_id = ? AND type_id = 9", eid)
 	if err != nil {
 		return err
 	}
@@ -321,6 +344,183 @@ func (s *Store) GetEntityIDByName(ctx context.Context, name string) (uint64, err
 		return 0, err
 	}
 	return eid, nil
+}
+
+// RegisterScenario upserts a Scenario into the registry.
+func (s *Store) RegisterScenario(ctx context.Context, eid uint64, name, version string, gearCount, wireCount int, mixerID uint64) error {
+	now := time.Now()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, "DELETE FROM registry WHERE name = ? AND type_id = 10", name); err != nil {
+		return err
+	}
+
+	attrs := map[string]any{
+		"gear_count": gearCount,
+		"wire_count": wireCount,
+	}
+	attrsJSON, _ := json.Marshal(attrs)
+	statsJSON, _ := json.Marshal(map[string]any{})
+
+	// Extract MachineID from EntityID (Type 9 [8] + MachineID [16] + Sequence [40])
+	// But currently we don't have utility here.
+	mid := uint16((eid >> 40) & 0xFFFF) //nolint:gosec
+
+	// Wait, if eid was generated with seq 0?, mid is 0?
+	// The idgen uses:
+	// id := (uint64(idType) << 56) | (uint64(machineID) << 40) | (seq & 0xFFFFFFFFFF)
+	// So (eid >> 40) & 0xFFFF extracts machineID correctly.
+
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO registry (entity_id, type_id, machine_id, mixer_id, name, status, version, started_at, last_seen, stats, attributes)
+		VALUES (?, 10, ?, ?, ?, 'active', ?, ?, ?, ?, ?)
+	`, eid, mid, mixerID, name, version, now, now, string(statsJSON), string(attrsJSON))
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+// RegisterGear upserts a Gear into the registry.
+func (s *Store) RegisterGear(ctx context.Context, eid uint64, name, gearType, mode, bind, connect string, scenarioID uint64, machineID uint16, ports map[string]uint64, mixerID uint64) error {
+	now := time.Now()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, "DELETE FROM registry WHERE name = ? AND type_id = 5", name); err != nil {
+		return err
+	}
+
+	attrs := map[string]any{
+		"gear_type":   gearType,
+		"mode":        mode,
+		"bind":        bind,
+		"connect":     connect,
+		"scenario_id": fmt.Sprintf("%d", scenarioID),
+		"ports":       ports,
+	}
+	attrsJSON, _ := json.Marshal(attrs)
+	statsJSON, _ := json.Marshal(map[string]any{})
+
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO registry (entity_id, type_id, machine_id, mixer_id, name, status, version, started_at, last_seen, stats, attributes)
+		VALUES (?, 5, ?, ?, ?, 'active', '', ?, ?, ?, ?)
+	`, eid, machineID, mixerID, name, now, now, string(statsJSON), string(attrsJSON))
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+// RegisterWire upserts a Wire into the registry.
+func (s *Store) RegisterWire(ctx context.Context, eid uint64, fromName, toName string, fromID, toID uint64, scenarioID uint64, machineID uint16, mixerID uint64) error {
+	now := time.Now()
+	name := fmt.Sprintf("%s->%s", fromName, toName)
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, "DELETE FROM registry WHERE name = ? AND type_id = 8", name); err != nil {
+		return err
+	}
+
+	attrs := map[string]any{
+		"from":        fmt.Sprintf("%d", fromID),
+		"to":          fmt.Sprintf("%d", toID),
+		"scenario_id": fmt.Sprintf("%d", scenarioID),
+	}
+	attrsJSON, _ := json.Marshal(attrs)
+	statsJSON, _ := json.Marshal(map[string]any{})
+
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO registry (entity_id, type_id, machine_id, mixer_id, name, status, version, started_at, last_seen, stats, attributes)
+		VALUES (?, 8, ?, ?, ?, 'active', '', ?, ?, ?, ?)
+	`, eid, machineID, mixerID, name, now, now, string(statsJSON), string(attrsJSON))
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+// RegisterPort upserts a Port into the registry.
+func (s *Store) RegisterPort(ctx context.Context, eid uint64, name string, portType uint16, gearID uint64, scenarioID uint64, machineID uint16, mixerID uint64) error {
+	now := time.Now()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Delete existing port with same name and type
+	if _, err := tx.ExecContext(ctx, "DELETE FROM registry WHERE name = ? AND type_id = ?", name, portType); err != nil {
+		return err
+	}
+
+	attrs := map[string]any{
+		"gear": fmt.Sprintf("%d", gearID),
+		// scenario_id removed from schema
+	}
+	attrsJSON, _ := json.Marshal(attrs)
+	statsJSON, _ := json.Marshal(map[string]any{})
+
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO registry (entity_id, type_id, machine_id, mixer_id, name, status, version, started_at, last_seen, stats, attributes)
+		VALUES (?, ?, ?, ?, ?, 'active', '', ?, ?, ?, ?)
+	`, eid, portType, machineID, mixerID, name, now, now, string(statsJSON), string(attrsJSON))
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+// ActivateRack promotes a rack from 'pending' to 'active' status.
+func (s *Store) ActivateRack(ctx context.Context, rackName string) error {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE registry 
+		SET status = 'active', last_seen = ? 
+		WHERE name = ? AND type_id = 4 AND status = 'pending'
+	`, time.Now(), rackName)
+	if err != nil {
+		return err
+	}
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		// Already active or not found - not an error
+		return nil
+	}
+	return nil
+}
+
+// GetRackByName retrieves a rack's machine_id by name.
+func (s *Store) GetRackByName(ctx context.Context, rackName string) (machineID uint16, err error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT machine_id FROM registry 
+		WHERE name = ? AND type_id = 4
+	`, rackName)
+	if err := row.Scan(&machineID); err != nil {
+		return 0, err
+	}
+	return machineID, nil
+}
+
+// ClearScenarioEntities removes all Gear, Wire, and Scenario entities.
+func (s *Store) ClearScenarioEntities(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, "DELETE FROM registry WHERE type_id IN (5, 6, 7, 8, 10)")
+	return err
 }
 
 // TelemetryLog represents a log entry.

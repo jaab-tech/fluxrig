@@ -11,18 +11,20 @@ import (
 	"github.com/jaab-tech/fluxrig/pkg/pki"
 	"github.com/jaab-tech/fluxrig/pkg/registry"
 	"github.com/vmihailenco/msgpack/v5"
+	"log/slog"
+	"time"
 )
 
 // Mock Registry
 type MockRegistry struct {
-	RegisterFunc  func(ctx context.Context, name string, secret string, ip string, port int) (*registry.Rack, error)
+	RegisterFunc  func(ctx context.Context, name string, secret string, ip string, port int, version string, mixerID uint64) (*registry.Rack, error)
 	HeartbeatFunc func(ctx context.Context, machineID uint16, stats map[string]any) error
 	GetFunc       func(ctx context.Context, machineID uint16) (*registry.Rack, error)
 }
 
-func (m *MockRegistry) Register(ctx context.Context, name string, secret string, ip string, port int, version string) (*registry.Rack, error) {
+func (m *MockRegistry) Register(ctx context.Context, machineID string, entityType string, name string, port int, ip string, attrs map[string]any, fluxID uint64) (*registry.Rack, error) {
 	if m.RegisterFunc != nil {
-		return m.RegisterFunc(ctx, name, secret, ip, port)
+		return m.RegisterFunc(ctx, name, "", ip, port, "v1", fluxID) // Mapper
 	}
 	return &registry.Rack{MachineID: 1, Name: name, Status: "active", Secret: "test-secret"}, nil
 }
@@ -40,7 +42,7 @@ func (m *MockRegistry) List(ctx context.Context, status string) ([]*registry.Rac
 func (m *MockRegistry) Approve(ctx context.Context, machineID uint16, name string) (*registry.Rack, error) {
 	return nil, nil
 }
-func (m *MockRegistry) Heartbeat(ctx context.Context, machineID uint16, stats map[string]any) error {
+func (m *MockRegistry) Heartbeat(ctx context.Context, machineID uint16, stats map[string]any, attrs map[string]any) error {
 	if m.HeartbeatFunc != nil {
 		return m.HeartbeatFunc(ctx, machineID, stats)
 	}
@@ -81,7 +83,7 @@ func TestEnrollmentController_HandleHello(t *testing.T) {
 	mockReg := &MockRegistry{}
 	mockPub := &MockPublisher{}
 
-	ctrl := NewEnrollmentController(mockReg, mockPub, signer)
+	ctrl := NewEnrollmentController(slog.Default(), mockReg, mockPub, signer, 0x0200010000000001, time.Second)
 
 	// Create Hello Message
 	hello := &fluxmsg.HelloPayload{
@@ -121,7 +123,7 @@ func TestEnrollmentController_HandleHeartbeat(t *testing.T) {
 	mockReg := &MockRegistry{}
 	mockPub := &MockPublisher{}
 
-	ctrl := NewEnrollmentController(mockReg, mockPub, signer)
+	ctrl := NewEnrollmentController(slog.Default(), mockReg, mockPub, signer, 0x0200010000000001, time.Second)
 
 	// Create Heartbeat Message
 	hb := &fluxmsg.HeartbeatPayload{
@@ -155,7 +157,7 @@ func TestEnrollmentController_Garbage(t *testing.T) {
 	mockPub := &MockPublisher{}
 
 	// Must provide signer to avoid panic if validation mistakenly passes
-	ctrl := NewEnrollmentController(mockReg, mockPub, signer)
+	ctrl := NewEnrollmentController(slog.Default(), mockReg, mockPub, signer, 0x0200010000000001, time.Second)
 
 	// Test 1: Malformed MsgPack
 	msg := message.NewMessage("test", []byte("garbage"))

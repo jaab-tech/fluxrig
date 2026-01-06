@@ -53,7 +53,7 @@ func TestServer_Observability(t *testing.T) {
 	if conns < 1 {
 		t.Errorf("Expected at least 1 connection, got %d", conns)
 	}
-	
+
 	entities := stats["connected_entities"].([]string)
 	found := false
 	for _, e := range entities {

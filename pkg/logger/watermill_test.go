@@ -6,23 +6,29 @@ import (
 	"testing"
 
 	"github.com/ThreeDotsLabs/watermill"
+	"log/slog"
 )
 
 func TestWatermillAdapter(t *testing.T) {
 	buf := &bytes.Buffer{}
 	cfg := Config{
-		Level:     "debug",
-		Component: TypeRack,
-		Name:      "test",
-		Writer:    buf,
+		Level:      "debug",
+		EntityType: TypeRack,
+		Name:       "test",
+		Writer:     buf,
 	}
 	l := New(cfg)
+	// WatermillAdapter uses slog.Default(), so we must replace the global default for this test
+	original := slog.Default()
+	slog.SetDefault(l)
+	defer slog.SetDefault(original)
+
 	adapter := NewWatermillAdapter(l)
 
 	// Info
 	adapter.Info("info message", watermill.LogFields{"key": "value"})
 	if !bytes.Contains(buf.Bytes(), []byte("info message")) {
-		t.Error("Info not logged")
+		t.Errorf("Info not logged. Got: %s", buf.String())
 	}
 
 	// Debug

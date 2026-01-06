@@ -23,7 +23,7 @@ func TestInit_ConfigParsing(t *testing.T) {
 		MaxBatchSize:        10,
 	}
 
-	shutdown, err := telemetry.Init(context.Background(), cfg, mockBus)
+	shutdown, err := telemetry.Init(context.Background(), cfg, mockBus, nil, nil)
 	if err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
@@ -45,7 +45,7 @@ func TestInit_InvalidDuration(t *testing.T) {
 		BatchIntervalString: "invalid-duration",
 	}
 
-	shutdown, err := telemetry.Init(context.Background(), cfg, mockBus)
+	shutdown, err := telemetry.Init(context.Background(), cfg, mockBus, nil, nil)
 	if err != nil {
 		t.Fatalf("Init failed even with invalid duration (should be robust): %v", err)
 	}

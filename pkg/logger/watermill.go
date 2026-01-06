@@ -6,49 +6,53 @@ import (
 	"github.com/ThreeDotsLabs/watermill"
 )
 
+// WatermillAdapter adapts slog to Watermill's LoggerAdapter interface.
+// Uses slog.Default() dynamically to ensure logs always go through the current
+// OTel provider, even after UpdateIdentity reinitializes telemetry.
+// Watermill is internal to Mixer, so logs inherit the MIXER entity type.
 type WatermillAdapter struct {
-	logger *slog.Logger
 	fields watermill.LogFields
 }
 
+// NewWatermillAdapter creates a new Watermill logger adapter.
+// The logger parameter is ignored - we always use slog.Default() at log time.
 func NewWatermillAdapter(l *slog.Logger) *WatermillAdapter {
 	return &WatermillAdapter{
-		logger: l,
 		fields: make(watermill.LogFields),
 	}
+}
+
+// logger returns the current OTel-connected logger.
+// Does NOT add component attr - Watermill inherits the parent entity type (MIXER).
+// The source file (watermill.go:XX) identifies this as Watermill code.
+func (w *WatermillAdapter) logger() *slog.Logger {
+	return slog.Default()
 }
 
 func (w *WatermillAdapter) Error(msg string, err error, fields watermill.LogFields) {
 	attrs := w.toAttrs(fields)
 	attrs = append(attrs, slog.Any("error", err))
-	w.logger.Error(msg, attrs...)
+	w.logger().Error(msg, attrs...)
 }
 
 func (w *WatermillAdapter) Info(msg string, fields watermill.LogFields) {
-	w.logger.Info(msg, w.toAttrs(fields)...)
+	w.logger().Info(msg, w.toAttrs(fields)...)
 }
 
 func (w *WatermillAdapter) Debug(msg string, fields watermill.LogFields) {
-	w.logger.Debug(msg, w.toAttrs(fields)...)
+	w.logger().Debug(msg, w.toAttrs(fields)...)
 }
 
 func (w *WatermillAdapter) Trace(msg string, fields watermill.LogFields) {
 	// Map Trace to Debug
-	w.logger.Debug(msg, w.toAttrs(fields)...)
+	w.logger().Debug(msg, w.toAttrs(fields)...)
 }
 
 func (w *WatermillAdapter) With(fields watermill.LogFields) watermill.LoggerAdapter {
 	newAttrs := w.fields.Add(fields)
 	return &WatermillAdapter{
-		logger: w.logger, // We keep the same logger, attrs applied at call time??
-		// Watermill 'With' returns a NEW logger with fields pre-applied.
-		// slog.With returns a new logger.
-		// So we should actually update the stored logger.
 		fields: newAttrs,
 	}
-	// Actually better implementation:
-	// l := w.logger.With(w.toAttrs(fields)...)
-	// return NewWatermillAdapter(l)
 }
 
 func (w *WatermillAdapter) toAttrs(fields watermill.LogFields) []any {

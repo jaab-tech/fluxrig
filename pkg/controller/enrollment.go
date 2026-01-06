@@ -16,20 +16,37 @@ import (
 	"github.com/vmihailenco/msgpack/v5"
 )
 
+// ScenarioProvider defines the subset of ScenarioController used by Enrollment.
+type ScenarioProvider interface {
+	PushActiveToRack(ctx context.Context, rackName string) error
+}
+
 // EnrollmentController handles Rack registration and heartbeats.
 type EnrollmentController struct {
 	reg             registry.Registry
 	publisher       message.Publisher
 	signer          *pki.ClusterKey
+	scenario        ScenarioProvider
+	mixerID         uint64 // Mixer's fluxEntityID
+	pushDelay       time.Duration
 	processedHellos sync.Map // Deduplication cache: Name -> time.Time
+	logger          *slog.Logger
 }
 
-func NewEnrollmentController(reg registry.Registry, pub message.Publisher, signer *pki.ClusterKey) *EnrollmentController {
+func NewEnrollmentController(log *slog.Logger, reg registry.Registry, pub message.Publisher, signer *pki.ClusterKey, mixerID uint64, pushDelay time.Duration) *EnrollmentController {
 	return &EnrollmentController{
 		reg:       reg,
 		publisher: pub,
 		signer:    signer,
+		mixerID:   mixerID,
+		pushDelay: pushDelay,
+		logger:    log,
 	}
+}
+
+// SetScenario sets the scenario provider for pushing active scenarios on registration.
+func (c *EnrollmentController) SetScenario(sc ScenarioProvider) {
+	c.scenario = sc
 }
 
 func (c *EnrollmentController) RegisterRoutes(r *router.RouterWrapper) {
@@ -58,24 +75,24 @@ func (c *EnrollmentController) HandleHello(msg *message.Message) ([]*message.Mes
 	// 1. Unmarshal FluxMsg
 	var fm fluxmsg.FluxMsg
 	if err := msgpack.Unmarshal(msg.Payload, &fm); err != nil {
-		slog.Error("failed to unmarshal hello", "error", err)
+		c.logger.Error("failed to unmarshal hello", "error", err)
 		return nil, nil // Don't retry malformed
 	}
 
 	// 2. Parse Hello Payload
 	hello, err := fluxmsg.ParseHello(fm.Data)
 	if err != nil {
-		slog.Error("invalid hello payload", "error", err)
+		c.logger.Error("invalid hello payload", "error", err)
 		return nil, nil
 	}
 
-	slog.Info("Received Hello", "name", hello.Name, "ip", hello.IP, "port", hello.Port)
+	c.logger.Info("Received Hello", "name", hello.Name, "ip", hello.IP, "port", hello.Port)
 
-	// Deduplication Check with TTL
+	// Deduplication Check with TTL (Reduced to 1s for faster E2E restarts)
 	if val, loaded := c.processedHellos.Load(hello.Name); loaded {
 		lastSeen := val.(time.Time)
-		if time.Since(lastSeen) < 5*time.Second {
-			slog.Warn("Duplicate Hello ignored (throttled)", "name", hello.Name)
+		if time.Since(lastSeen) < 1*time.Second {
+			c.logger.Warn("Duplicate Hello ignored (throttled)", "name", hello.Name)
 			return nil, nil
 		}
 	}
@@ -85,36 +102,37 @@ func (c *EnrollmentController) HandleHello(msg *message.Message) ([]*message.Mes
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	rack, err := c.reg.Register(ctx, hello.Name, hello.Secret, hello.IP, hello.Port, hello.Version)
+	rack, err := c.reg.Register(ctx, hello.Name, hello.Secret, hello.IP, hello.Port, hello.Version, hello.Config, c.mixerID)
 	if err != nil {
-		slog.Error("failed to register rack", "error", err)
+		c.logger.Error("failed to register rack", "error", err)
 		// If DB failure, we might retry, but for now log and drop.
 		return nil, err
 	}
 
-	slog.Info("Rack Registered", "id", rack.MachineID, "name", rack.Name, "status", rack.Status)
+	c.logger.Info("Rack Registered", "id", rack.MachineID, "name", rack.Name, "status", rack.Status)
 
 	// 4. Issue Passport (StateEnvelope)
 	// Construct Rack State
 	rackState := pki.RackState{
-		MachineID:     rack.MachineID,
-		Name:          rack.Name,
-		Status:        rack.Status,
-		Secret:        rack.Secret, // Embed Secret in Passport
-		ClusterPublic: c.signer.Public,
+		MixerID:     c.mixerID,
+		MachineID:   rack.MachineID,
+		Name:        rack.Name,
+		Status:      rack.Status,
+		Secret:      rack.Secret, // Embed Secret in Passport
+		MixerPublic: c.signer.Public,
 	}
 
 	// Create Envelope and Sign
 	envelope, err := c.signer.Sign(&rackState)
 	if err != nil {
-		slog.Error("failed to sign state", "error", err)
+		c.logger.Error("failed to sign state", "error", err)
 		return nil, err
 	}
 
 	// Serialize Envelope
 	envBytes, err := msgpack.Marshal(envelope)
 	if err != nil {
-		slog.Error("failed to marshal envelope", "error", err)
+		c.logger.Error("failed to marshal envelope", "error", err)
 		return nil, err
 	}
 
@@ -141,11 +159,24 @@ func (c *EnrollmentController) HandleHello(msg *message.Message) ([]*message.Mes
 	pubMsg := message.NewMessage(watermill.NewUUID(), respBytes)
 
 	if err := c.publisher.Publish(topic, pubMsg); err != nil {
-		slog.Error("failed to publish enrollment response", "topic", topic, "error", err)
+		c.logger.Error("failed to publish enrollment response", "topic", topic, "error", err)
 		return nil, err
 	}
 
-	slog.Info("Issued Passport", "name", rack.Name, "topic", topic)
+	c.logger.Info("Issued Passport", "name", rack.Name, "topic", topic)
+
+	// 5. If there is an active scenario, push it to the rack immediately
+	if c.scenario != nil {
+		go func() {
+			// Delay to ensure Rack has subscribed to its scenario topic
+			if c.pushDelay > 0 {
+				time.Sleep(c.pushDelay)
+			}
+			if err := c.scenario.PushActiveToRack(context.Background(), rack.Name); err != nil {
+				c.logger.Warn("Failed to push active scenario to new rack", "rack", rack.Name, "error", err)
+			}
+		}()
+	}
 
 	return nil, nil
 }
@@ -158,13 +189,13 @@ func (c *EnrollmentController) HandleHeartbeat(msg *message.Message) ([]*message
 
 	hb, err := fluxmsg.ParseHeartbeat(fm.Data)
 	if err != nil {
-		slog.Warn("invalid heartbeat payload", "error", err)
+		c.logger.Warn("invalid heartbeat payload", "error", err)
 		return nil, nil
 	}
 
 	// Update LastSeen
-	slog.Debug("Heartbeat", "id", hb.MachineID)
-	if err := c.reg.Heartbeat(context.Background(), hb.MachineID, hb.Stats); err != nil {
+	c.logger.Debug("Heartbeat", "id", hb.MachineID)
+	if err := c.reg.Heartbeat(context.Background(), hb.MachineID, hb.Stats, hb.Config); err != nil {
 		return nil, nil
 	}
 
@@ -199,7 +230,7 @@ func (c *EnrollmentController) HandleHeartbeat(msg *message.Message) ([]*message
 
 	pubMsg := message.NewMessage(watermill.NewUUID(), respBytes)
 	if err := c.publisher.Publish(topic, pubMsg); err != nil {
-		slog.Error("failed to publish heartbeat response", "topic", topic, "error", err)
+		c.logger.Error("failed to publish heartbeat response", "topic", topic, "error", err)
 	}
 
 	return nil, nil

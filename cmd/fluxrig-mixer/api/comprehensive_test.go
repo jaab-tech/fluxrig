@@ -38,7 +38,7 @@ func (m *MockTelemetryRegistry) QueryMetrics(ctx context.Context, query registry
 func TestHandleTelemetry(t *testing.T) {
 	// Setup
 	mockReg := &MockTelemetryRegistry{&MockRegistry{}}
-	s := NewServer(mockReg, nil, nil) // Reg interface satisfied? Yes *MockTelemetryRegistry has methods
+	s := NewServer(mockReg, nil, nil, nil, 0, nil) // Reg interface satisfied? Yes *MockTelemetryRegistry has methods
 
 	// 1. Logs Success
 	req1 := httptest.NewRequest("GET", "/api/v1/telemetry/logs?since=1h&limit=50&min_level=WARN", nil)

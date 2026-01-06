@@ -33,8 +33,8 @@ func NewTelemetrySink(b bus.Bus, s *duckdb.Store, dataDir string) *TelemetrySink
 
 // Start subscribes to the telemetry stream.
 func (s *TelemetrySink) Start() error {
-	// Subscribe to all telemetry signals
-	sub, err := s.bus.Subscribe("flux.telemetry.>", s.handleMessage)
+	// Subscribe with a durable consumer to prevent duplicates across restarts
+	sub, err := s.bus.SubscribeDurable("flux.telemetry.>", "flux-telemetry-ingest", s.handleMessage)
 	if err != nil {
 		return err
 	}
@@ -59,9 +59,15 @@ func (s *TelemetrySink) Start() error {
 	return nil
 }
 
-// Stop unsubscribes.
+// Stop unsubscribes and performs a final flush.
 func (s *TelemetrySink) Stop() error {
 	close(s.stopCh)
+
+	// Perform final flush to ensure no data loss on shutdown
+	if err := s.store.FlushTelemetry(context.Background(), s.dataDir); err != nil {
+		slog.Error("Final telemetry flush failed", "error", err)
+	}
+
 	if s.sub != nil {
 		return s.sub.Unsubscribe()
 	}
@@ -86,6 +92,9 @@ func (s *TelemetrySink) handleMessage(msg *fluxmsg.FluxMsg) {
 	case "telemetry.log.json":
 		// Individual log from JSON handler
 		err = s.persistSingleLog(msg)
+	case "telemetry.log":
+		// Individual log from WAL (MsgPack)
+		err = s.persistMsgPackLog(msg)
 	default:
 		// Ignore unknown types
 		return
@@ -156,6 +165,73 @@ func (s *TelemetrySink) persistSpans(msg *fluxmsg.FluxMsg) error {
 	return nil
 }
 
+// helper to extracting override identity from attributes
+func extractIdentityAndSource(defaultName string, log map[string]interface{}) (eType, eName, sFile, sFunc string, sLine int) {
+	eName = defaultName
+	eType = "PROCESS" // Default type
+	sLine = 0
+
+	// 1. Check Top-Level Overrides (From WAL Handler)
+	if t, ok := log["entity_type"].(string); ok && t != "" {
+		eType = t
+	}
+
+	if attrs, ok := log["attributes"]; ok {
+		if m, ok := attrs.(map[string]interface{}); ok {
+			// Extract Identity
+			// Prioritize namespaced keys to avoid collision (e.g. heartbeat metrics having "name")
+			if t, ok := m["flux.type"].(string); ok && t != "" {
+				eType = t
+			} else if c, ok := m["component"].(string); ok && c != "" {
+				// Fallback for legacy / other loggers
+				eType = c
+			}
+
+			if n, ok := m["flux.name"].(string); ok && n != "" {
+				eName = n
+			}
+			// Note: We intentionally DO NOT fallback to "name" for EntityName
+			// because "name" is too common for metrics/events (e.g. "heartbeats_sent").
+			// The baseName (from entity_name field) is usually correct for the host/process.
+			// Only specific overrides (flux.name) should change it.
+
+			// Extract Source
+			if f, ok := m["code.file.path"].(string); ok {
+				sFile = f
+			}
+			if fn, ok := m["code.function.name"].(string); ok {
+				sFunc = fn
+			}
+			// Handle line number (various types)
+			if l, ok := m["code.line.number"]; ok {
+				switch v := l.(type) {
+				case int:
+					sLine = v
+				case float64:
+					sLine = int(v)
+				case int64:
+					sLine = int(v)
+				case string:
+					sLine, _ = strconv.Atoi(v)
+				}
+			}
+
+			// Clean up extracted attributes (Keep flux.* for trace context if needed, but maybe remove?)
+			// Keeping them in attributes is fine, but we remove the source ones to save space.
+			delete(m, "code.file.path")
+			delete(m, "code.function.name")
+			delete(m, "code.line.number")
+
+			// Clean up identity keys that were promoted to columns
+			delete(m, "flux.type")
+			delete(m, "component")
+			delete(m, "flux.name")
+			delete(m, "name")
+		}
+	}
+	return
+}
+
 func (s *TelemetrySink) persistLogs(msg *fluxmsg.FluxMsg) error {
 	batch, ok := msg.Data["batch"].([]interface{})
 	if !ok {
@@ -189,15 +265,19 @@ func (s *TelemetrySink) persistLogs(msg *fluxmsg.FluxMsg) error {
 			}
 		}
 
+		// Extract Identity & Source, and CLEAN attributes
+		baseName := str("entity_name")
+		eType, eName, sFile, sFunc, sLine := extractIdentityAndSource(baseName, log)
+
 		attrJSON, _ := json.Marshal(log["attributes"])
 
 		_, err := s.store.DB().Exec(`
-			INSERT INTO telemetry_logs (timestamp, entity_id, entity_name, trace_id, span_id, severity, body, attributes)
-			VALUES (to_timestamp(?/1000000.0), ?, ?, ?, ?, ?, ?, ?)
+			INSERT INTO telemetry_logs (timestamp, entity_id, entity_type, entity_name, trace_id, span_id, severity, source_file, source_line, source_func, body, attributes)
+			VALUES (to_timestamp(?/1000000.0), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`,
 			//nolint:gosec // timestamp conversion safe
-			int64(u64("timestamp")), u64("entity_id"), str("entity_name"), str("trace_id"), str("span_id"),
-			str("severity"), str("body"), string(attrJSON))
+			int64(u64("timestamp")), u64("entity_id"), eType, eName, str("trace_id"), str("span_id"),
+			str("severity"), sFile, sLine, sFunc, str("body"), string(attrJSON))
 
 		if err != nil {
 			return err
@@ -323,15 +403,65 @@ func (s *TelemetrySink) persistSingleLog(msg *fluxmsg.FluxMsg) error {
 		}
 	}
 
+	// Extract Identity & Source, and CLEAN attributes
+	baseName := str("entity_name")
+	eType, eName, sFile, sFunc, sLine := extractIdentityAndSource(baseName, log)
+
 	attrJSON, _ := json.Marshal(log["attributes"])
 
 	_, err := s.store.DB().Exec(`
-		INSERT INTO telemetry_logs (timestamp, entity_id, entity_name, trace_id, span_id, severity, body, attributes)
-		VALUES (to_timestamp(?/1000000.0), ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO telemetry_logs (timestamp, entity_id, entity_type, entity_name, trace_id, span_id, severity, source_file, source_line, source_func, body, attributes)
+		VALUES (to_timestamp(?/1000000.0), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		//nolint:gosec // timestamp conversion safe
-		int64(u64("timestamp")), u64("entity_id"), str("entity_name"), str("trace_id"), str("span_id"),
-		str("severity"), str("body"), string(attrJSON))
+		int64(u64("timestamp")), u64("entity_id"), eType, eName, str("trace_id"), str("span_id"),
+		str("severity"), sFile, sLine, sFunc, str("body"), string(attrJSON))
+
+	return err
+}
+
+func (s *TelemetrySink) persistMsgPackLog(msg *fluxmsg.FluxMsg) error {
+	// msg.Data IS the log record map[string]any
+	log := msg.Data
+
+	str := func(k string) string { v, _ := log[k].(string); return v }
+	u64 := func(k string) uint64 {
+		switch v := log[k].(type) {
+		case uint64:
+			return v
+		case int64:
+			//nolint:gosec // conversion safe
+			return uint64(v)
+		case int:
+			//nolint:gosec // conversion safe
+			return uint64(v)
+		case float64:
+			return uint64(v)
+		case string:
+			i, _ := strconv.ParseUint(v, 10, 64)
+			return i
+		default:
+			return 0
+		}
+	}
+
+	// Extract Identity & Source, and CLEAN attributes
+	baseName := str("entity_name")
+	eType, eName, sFile, sFunc, sLine := extractIdentityAndSource(baseName, log)
+
+	// Attributes might need marshalling if they are map/slice
+	attrJSON := []byte("{}")
+	if attrs, ok := log["attributes"]; ok {
+		attrJSON, _ = json.Marshal(attrs)
+	}
+
+	_, err := s.store.DB().Exec(`
+		INSERT INTO telemetry_logs (timestamp, entity_id, entity_type, entity_name, trace_id, span_id, severity, source_file, source_line, source_func, body, attributes)
+		VALUES (to_timestamp(?/1000000.0), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		//nolint:gosec // timestamp conversion safe
+		int64(u64("timestamp")), u64("entity_id"), eType, eName, str("trace_id"), str("span_id"),
+		str("severity"), sFile, sLine, sFunc, str("body"), string(attrJSON))
 
 	return err
 }

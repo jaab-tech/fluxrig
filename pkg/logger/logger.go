@@ -9,23 +9,58 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 )
 
-// ComponentType defines the source of the log
-type ComponentType string
+// EntityType defines the source of the log (aligns with Entity Type Table in protocols.md)
+type EntityType string
 
 const (
-	TypeMixer ComponentType = "MIXER"
-	TypeRack  ComponentType = "RACK"
-	TypeGear  ComponentType = "GEAR"
+	TypeMixer    EntityType = "MIXER"
+	TypeRack     EntityType = "RACK"
+	TypeGear     EntityType = "GEAR"
+	TypeSnake    EntityType = "SNAKE"
+	TypeScenario EntityType = "SCENARIO"
 )
+
+// LevelTrace is a custom log level for high-volume dumps
+const LevelTrace = slog.Level(-8)
+
+// AtomicLevel manages log level safely across goroutines
+type AtomicLevel struct {
+	val atomic.Int64
+}
+
+func NewAtomicLevel(l slog.Level) *AtomicLevel {
+	al := &AtomicLevel{}
+	al.Set(l)
+	return al
+}
+
+func (al *AtomicLevel) Set(l slog.Level) {
+	al.val.Store(int64(l))
+}
+
+func (al *AtomicLevel) Level() slog.Level {
+	return slog.Level(al.val.Load())
+}
 
 // Config holds logger configuration
 type Config struct {
-	Level     string
-	Component ComponentType
-	Name      string
-	Writer    io.Writer // Defaults to os.Stdout if nil
+	Level      string
+	EntityType EntityType
+	Name       string
+	Writer     io.Writer // Defaults to os.Stdout if nil
+}
+
+// FluxHandler defines the handler structure (exported so we can access SetLevel)
+type FluxHandler struct {
+	w         io.Writer
+	level     *AtomicLevel
+	component string
+	name      string
+	attrs     []slog.Attr
+	group     string
 }
 
 // New creates a standardized logger with custom formatting
@@ -35,22 +70,45 @@ func New(cfg Config) *slog.Logger {
 		w = os.Stdout
 	}
 
-	// Use custom handler for strict formatting
 	handler := &FluxHandler{
 		w:         w,
-		level:     parseLevel(cfg.Level),
-		component: string(cfg.Component),
+		level:     NewAtomicLevel(ParseLevel(cfg.Level)),
+		component: string(cfg.EntityType),
 		name:      cfg.Name,
 	}
 
 	return slog.New(handler)
 }
 
-func parseLevel(l string) slog.Level {
-	switch l {
+// SetLevel updates the log level dynamically
+func SetLevel(logger *slog.Logger, level string) {
+	// 1. Unwrap handler
+	h := logger.Handler()
+
+	if fh, ok := h.(*FluxHandler); ok {
+		fh.level.Set(ParseLevel(level))
+	}
+}
+
+// WithComponent creates a child logger with a specific component and name.
+// Always uses parent.With() to ensure OTel handlers are preserved.
+func WithComponent(parent *slog.Logger, entityType EntityType, name string) *slog.Logger {
+	return parent.With(
+		"component", string(entityType),
+		"name", name,
+		"flux.type", string(entityType),
+		"flux.name", name,
+	)
+}
+
+// ParseLevel converts string to slog.Level (case-insensitive)
+func ParseLevel(l string) slog.Level {
+	switch strings.ToLower(l) {
+	case "trace":
+		return LevelTrace
 	case "debug":
 		return slog.LevelDebug
-	case "warn":
+	case "warn", "warning":
 		return slog.LevelWarn
 	case "error":
 		return slog.LevelError
@@ -59,19 +117,8 @@ func parseLevel(l string) slog.Level {
 	}
 }
 
-// FluxHandler implements slog.Handler with custom formatting:
-// TIMESTAMP | LEVEL | COMPONENT | NAME | MESSAGE | ATTRS...
-type FluxHandler struct {
-	w         io.Writer
-	level     slog.Level
-	component string
-	name      string
-	attrs     []slog.Attr
-	group     string
-}
-
 func (h *FluxHandler) Enabled(_ context.Context, l slog.Level) bool {
-	return l >= h.level
+	return l >= h.level.Level()
 }
 
 func (h *FluxHandler) Handle(_ context.Context, r slog.Record) error {
@@ -83,6 +130,9 @@ func (h *FluxHandler) Handle(_ context.Context, r slog.Record) error {
 
 	// 2. Level (Fixed width alignment preferred)
 	lvl := r.Level.String()
+	if r.Level == LevelTrace {
+		lvl = "TRACE"
+	}
 
 	// 3. Component & Name
 	// 4. Message
@@ -116,7 +166,8 @@ func (h *FluxHandler) Handle(_ context.Context, r slog.Record) error {
 			// Simple heuristics: find "fluxrig/" or base
 			file := f.File
 			if idx := strings.Index(file, "fluxrig/"); idx != -1 {
-				file = file[idx:]
+				// Strip "fluxrig/" to get path relative to repo root
+				file = file[idx+len("fluxrig/"):]
 			} else {
 				file = filepath.Base(file)
 			}
@@ -136,17 +187,30 @@ func (h *FluxHandler) Handle(_ context.Context, r slog.Record) error {
 	msg = strings.ReplaceAll(msg, "\n", indent)
 	buf = append(buf, msg...)
 
-	// 5. Attributes (Pipe separated? "define a | separated fields")
-	// Pre-computed fields
-	for _, a := range h.attrs {
-		buf = append(buf, " | "...)
+	// 5. Attributes (Grouped under one pipe)
+	// Filter redundant code.* attributes
+	firstAttr := true
+
+	// Helper to process attrs
+	processAttr := func(a slog.Attr) {
+		if a.Key == "code.file.path" || a.Key == "code.line.number" || a.Key == "code.function.name" {
+			return
+		}
+		if firstAttr {
+			buf = append(buf, " | "...)
+			firstAttr = false
+		} else {
+			buf = append(buf, " "...)
+		}
 		buf = h.appendAttr(buf, a)
 	}
 
-	// Record attributes
+	for _, a := range h.attrs {
+		processAttr(a)
+	}
+
 	r.Attrs(func(a slog.Attr) bool {
-		buf = append(buf, " | "...)
-		buf = h.appendAttr(buf, a)
+		processAttr(a)
 		return true
 	})
 
@@ -157,15 +221,35 @@ func (h *FluxHandler) Handle(_ context.Context, r slog.Record) error {
 }
 
 func (h *FluxHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	newAttrs := make([]slog.Attr, len(h.attrs)+len(attrs))
-	copy(newAttrs, h.attrs)
-	copy(newAttrs[len(h.attrs):], attrs)
+	// Extract component and name from attrs and update internal fields
+	// This ensures the log header shows the correct identity
+	newComponent := h.component
+	newName := h.name
+	filteredAttrs := make([]slog.Attr, 0, len(attrs))
+
+	for _, a := range attrs {
+		switch a.Key {
+		case "component":
+			// Use the most specific component (last one wins)
+			newComponent = a.Value.String()
+		case "name":
+			newName = a.Value.String()
+		default:
+			filteredAttrs = append(filteredAttrs, a)
+		}
+	}
+
+	// Combine parent attrs with filtered new attrs (excluding component/name)
+	allAttrs := make([]slog.Attr, len(h.attrs)+len(filteredAttrs))
+	copy(allAttrs, h.attrs)
+	copy(allAttrs[len(h.attrs):], filteredAttrs)
+
 	return &FluxHandler{
 		w:         h.w,
 		level:     h.level,
-		component: h.component,
-		name:      h.name,
-		attrs:     newAttrs,
+		component: newComponent,
+		name:      newName,
+		attrs:     allAttrs,
 		group:     h.group,
 	}
 }

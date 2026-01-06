@@ -78,7 +78,7 @@ func TestMockBus(t *testing.T) {
 	if len(messages) != 1 {
 		t.Errorf("GetMessages returned wrong count: expected 1, got %d", len(messages))
 	}
-	
+
 	// GetMessages for non-existent topic
 	noMessages := mb.GetMessages("no.topic")
 	if len(noMessages) != 0 {

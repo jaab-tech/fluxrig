@@ -60,6 +60,11 @@ func (m *MockBus) Subscribe(subject string, handler Handler) (Subscription, erro
 	return &MockSubscription{}, nil
 }
 
+func (m *MockBus) SubscribeDurable(subject, durableName string, handler Handler) (Subscription, error) {
+	// Mock treats durable same as normal for testing
+	return m.Subscribe(subject, handler)
+}
+
 func (m *MockBus) Close() {}
 
 // GetMessages safely retrieves messages for a subject

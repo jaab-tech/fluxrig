@@ -1,10 +1,15 @@
 [logging]
 level = "debug"
+filename = "logs/rack.log"
+
+[store]
+dir = "./data"
+state_file = "state.flux"
 
 [rack]
 name = "offline-rack"
 machine_id = 0
-data_dir = "test/e2e_offline/rack/data"
+# data_dir removed
 heartbeat_interval = "2s"
 
 [rack.bus]

@@ -11,7 +11,7 @@ Suite Teardown    Teardown Test Environment
 *** Variables ***
 ${MIXER_BIN}      ./bin/fluxrig-mixer
 ${RACK_BIN}       ./bin/fluxrig
-${CONFIG_PATH}    test/fluxrig_mixer.toml
+${CONFIG_PATH}    test/robot/mixer.toml
 ${BASE_URL}       http://localhost:8090/api/v1
 ${DB_PATH}        data/fluxrig_test.duckdb
 

@@ -94,12 +94,12 @@ func TestPassport_Flow(t *testing.T) {
 
 	// Create State
 	originalState := &RackState{
-		ClusterID:     "cluster-alpha",
-		MachineID:     42,
-		Name:          "rack-42",
-		Status:        "active",
-		Secret:        "super-secret",
-		ClusterPublic: pub,
+		MixerID:     0x0200010000000001,
+		MachineID:   42,
+		Name:        "rack-42",
+		Status:      "active",
+		Secret:      "super-secret",
+		MixerPublic: pub,
 	}
 
 	// 1. Sign

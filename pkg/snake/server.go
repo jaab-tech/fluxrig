@@ -31,6 +31,7 @@ func NewServer(cfg Config) (*Server, error) {
 		JetStream:  true,
 		StoreDir:   cfg.StoreDir,
 		ServerName: "fluxrig-mixer-embedded",
+		NoSigs:     true, // FluxRig handles signals, preventing double-shutdown panic
 	}
 
 	// JetStream Configuration
@@ -81,10 +82,17 @@ func (s *Server) ProvisionStream(name string, subjects []string) error {
 	defer cancel()
 
 	// Check if exists
-	_, err = js.Stream(ctx, name)
+	stream, err := js.Stream(ctx, name)
 	if err == nil {
-		// Exists - we could update, but for now assuming immutable config
-		return nil
+		// Update Subjects
+		info, err := stream.Info(ctx)
+		if err != nil {
+			return err
+		}
+		cfg := info.Config
+		cfg.Subjects = subjects
+		_, err = js.UpdateStream(ctx, cfg)
+		return err
 	}
 
 	// Create
@@ -161,7 +169,7 @@ func (s *Server) Stats() map[string]any {
 	}
 
 	// 2. Connection Details (Connz)
-	// We want to list connected entities
+	// List connected entities
 	c, err := s.ns.Connz(&server.ConnzOptions{
 		State: server.ConnOpen,
 	})

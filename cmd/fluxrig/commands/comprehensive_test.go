@@ -55,7 +55,7 @@ func TestTelemetryCommands(t *testing.T) {
 	// Reset flags? Cobra flags persist if global vars.
 	// logsCmd is package var.
 	// We should be careful about parallel tests.
-	
+
 	// Logs
 	logsCmd.SetArgs([]string{
 		"--api-url", ts.URL,
@@ -86,11 +86,11 @@ func TestTelemetryCommands(t *testing.T) {
 	// Execute Run methods directly if possible or Execute?
 	// Execute parses args. SetArgs sets what to parse.
 	// If we use SetArgs, we must ensure strict flag parsing.
-	
+
 	// Better approach: Test RunE function directly?
 	// But RunE signature (cmd, args) logic reads flags from cmd.
 	// So setting flags is correct.
-	
+
 	if err := metricsCmd.RunE(metricsCmd, nil); err == nil {
 		t.Error("Expected error for invalid URL")
 	}
@@ -135,23 +135,23 @@ func TestKeysCommands(t *testing.T) {
 	// Or create real one.
 	// Since pki is internal, we can use it? pki is in pkg/pki.
 	// We are in commands/commands_test (package commands).
-	
+
 	// Let's create a real envelope to test success path.
 	pubC, privC, _ := ed25519.GenerateKey(rand.Reader)
 	signer := &pki.ClusterKey{Private: privC, Public: pubC}
-	
+
 	state := pki.RackState{
-		MachineID:     101,
-		Name:          "test-rack",
-		Status:        "active",
-		Secret:        "deadbeef",
-		ClusterPublic: pubC,
+		MachineID:   101,
+		Name:        "test-rack",
+		Status:      "active",
+		Secret:      "deadbeef",
+		MixerPublic: pubC,
 	}
 	env, err := signer.Sign(&state)
 	if err != nil {
 		t.Fatal(err)
 	}
-	
+
 	envPath := filepath.Join(tmpDir, "state.flux")
 	if err := env.Save(envPath); err != nil {
 		t.Fatal(err)
@@ -224,7 +224,7 @@ func TestMaskSecret(t *testing.T) {
 	if short != "****" {
 		t.Errorf("Expected ****, got %s", short)
 	}
-	
+
 	// Test long secret
 	long := maskSecret("1234567890abcdef")
 	if long != "1234...cdef" {

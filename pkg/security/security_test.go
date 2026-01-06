@@ -100,7 +100,7 @@ func TestMaskPAN(t *testing.T) {
 	if masked != "411111******1111" {
 		t.Errorf("Expected 411111******1111, got %s", masked)
 	}
-	
+
 	// Short PAN
 	short := MaskPAN("12345")
 	if short != "************" {

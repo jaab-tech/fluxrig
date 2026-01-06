@@ -11,10 +11,10 @@ import (
 func TestNewLogger(t *testing.T) {
 	buf := &bytes.Buffer{}
 	cfg := Config{
-		Level:     "debug",
-		Component: TypeMixer,
-		Name:      "test-mixer",
-		Writer:    buf,
+		Level:      "debug",
+		EntityType: TypeMixer,
+		Name:       "test-mixer",
+		Writer:     buf,
 	}
 
 	l := New(cfg)
@@ -72,7 +72,7 @@ func TestFormatting(t *testing.T) {
 	buf := &bytes.Buffer{}
 	h := &FluxHandler{
 		w:         buf,
-		level:     slog.LevelInfo,
+		level:     NewAtomicLevel(slog.LevelInfo),
 		component: "COMP",
 		name:      "NAME",
 	}

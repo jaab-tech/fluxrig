@@ -1,0 +1,17 @@
+[logging]
+level = "trace"
+filename = "logs/rack.log"
+
+[rack]
+machine_id = 101 # load-node-01
+name = "load-node-01"
+mixer_url = "http://127.0.0.1:9115"
+
+[store]
+dir = "./data"
+
+[rack.bus]
+url = "nats://127.0.0.1:4225"
+
+[rack.telemetry]
+enabled = true

@@ -1,5 +1,7 @@
 package telemetry
 
+import "github.com/jaab-tech/fluxrig/pkg/config"
+
 // Config holds the configuration for the Telemetry provider.
 type Config struct {
 	// ServiceName identifies the application (e.g. "flux-rack", "flux-mixer").
@@ -10,6 +12,9 @@ type Config struct {
 	EntityID uint64
 	// EntityName is the human-readable name of the component (e.g. "rack-nyc-01").
 	EntityName string
+	// Component identifies the role of the process (e.g. "RACK", "MIXER").
+	// This is used to enrich logs with the top-level component attribute.
+	Component string
 
 	// NatsURL is the endpoint for the NATS cluster (Option B: NATS Transport).
 	NatsURL string
@@ -25,4 +30,15 @@ type Config struct {
 	// MaxBatchSize is the number of items to buffer before forcing a flush.
 	// Default: 512
 	MaxBatchSize int
+
+	// MaxWALSizeMB moved to StoreConfig
+
+	// Logging configuration
+	Logging config.LoggingConfig
+
+	// Store configuration (For WAL location)
+	Store config.StoreConfig
+
+	// Throttling configuration
+	Throttling config.ThrottlingConfig
 }

@@ -36,6 +36,7 @@ func main() {
 	fmt.Printf("--- Decoded Passport Content ---\n")
 	fmt.Printf("MachineID  : %d\n", state.MachineID)
 	fmt.Printf("Name       : %s\n", state.Name)
-	fmt.Printf("ClusterID  : %s\n", state.ClusterID)
-	fmt.Printf("ClusterPub : %s (Verified)\n", hex.EncodeToString(state.ClusterPublic))
+	fmt.Printf("Status     : %s\n", state.Status)
+	fmt.Printf("MixerID    : 0x%x\n", state.MixerID)
+	fmt.Printf("MixerPub   : %s (Verified)\n", hex.EncodeToString(state.MixerPublic))
 }

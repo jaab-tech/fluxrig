@@ -2,6 +2,7 @@ package ingest_test
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"testing"
 	"time"
@@ -175,5 +176,141 @@ func TestTelemetrySink_SchemaInit(t *testing.T) {
 	_, err := store.DB().Exec("SELECT * FROM telemetry_spans LIMIT 0")
 	if err != nil {
 		t.Errorf("spans table missing: %v", err)
+	}
+}
+
+func TestTelemetrySink_Metrics(t *testing.T) {
+	mockBus := bus.NewMockBus()
+	store, _ := duckdb.NewStore(":memory:")
+	defer store.Close()
+	ctx := context.Background()
+	store.InitializeTelemetrySchema(ctx)
+
+	sink := ingest.NewTelemetrySink(mockBus, store, "test-mixer")
+	sink.Start()
+	defer sink.Stop()
+
+	// 1. Batch Metrics
+	batchMsg := fluxmsg.New()
+	batchMsg.Metadata["type"] = "telemetry.batch.metrics"
+	batchMsg.Data = map[string]interface{}{
+		"batch": []interface{}{
+			map[string]interface{}{
+				"timestamp":   int64(1700000000000000),
+				"entity_id":   100,
+				"entity_name": "test-metric",
+				"name":        "cpu",
+				"type":        "gauge",
+				"value":       50.0,
+			},
+		},
+	}
+	mockBus.Publish("flux.telemetry.metrics", batchMsg)
+
+	// 2. Single Metric
+	singleMsg := fluxmsg.New()
+	singleMsg.Metadata["type"] = "telemetry.metric"
+	singleMsg.Data = map[string]interface{}{
+		"timestamp":   time.Now().UnixMicro(),
+		"entity_id":   101,
+		"entity_name": "single-metric",
+		"name":        "mem",
+		"type":        "gauge",
+		"value":       1024,
+	}
+	mockBus.Publish("flux.telemetry.metric", singleMsg)
+
+	// Poll
+	deadline := time.Now().Add(2 * time.Second)
+	foundBatch, foundSingle := false, false
+	for time.Now().Before(deadline) {
+		if !foundBatch {
+			var cnt int
+			store.DB().QueryRow("SELECT count(*) FROM telemetry_metrics WHERE name='cpu'").Scan(&cnt)
+			if cnt > 0 {
+				foundBatch = true
+			}
+		}
+		if !foundSingle {
+			var cnt int
+			store.DB().QueryRow("SELECT count(*) FROM telemetry_metrics WHERE name='mem'").Scan(&cnt)
+			if cnt > 0 {
+				foundSingle = true
+			}
+		}
+		if foundBatch && foundSingle {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	if !foundBatch {
+		t.Error("Batch metric not found")
+	}
+	if !foundSingle {
+		t.Error("Single metric not found")
+	}
+}
+
+func TestTelemetrySink_MiscLogs(t *testing.T) {
+	mockBus := bus.NewMockBus()
+	store, _ := duckdb.NewStore(":memory:")
+	defer store.Close()
+	ctx := context.Background()
+	store.InitializeTelemetrySchema(ctx)
+
+	sink := ingest.NewTelemetrySink(mockBus, store, "test-mixer")
+	sink.Start()
+	defer sink.Stop()
+
+	// 1. Single Log JSON
+	jsonMsg := fluxmsg.New()
+	jsonMsg.Metadata["type"] = "telemetry.log.json"
+	// Record is raw json
+	jsonMsg.Data = map[string]interface{}{
+		"record": json.RawMessage(`{"entity_name":"json-log","body":"hello json","timestamp":1700000000000000}`),
+	}
+	mockBus.Publish("flux.telemetry.log.json", jsonMsg)
+
+	// 2. Single Log MsgPack (WAL style)
+	walMsg := fluxmsg.New()
+	walMsg.Metadata["type"] = "telemetry.log"
+	// Data IS the log
+	walMsg.Data = map[string]interface{}{
+		"entity_name": "wal-log",
+		"body":        "hello wal",
+		"timestamp":   int64(1700000000000000),
+	}
+	mockBus.Publish("flux.telemetry.log", walMsg)
+
+	// Poll
+	deadline := time.Now().Add(2 * time.Second)
+	foundJSON, foundWAL := false, false
+	for time.Now().Before(deadline) {
+		if !foundJSON {
+			var cnt int
+			store.DB().QueryRow("SELECT count(*) FROM telemetry_logs WHERE entity_name='json-log'").Scan(&cnt)
+			if cnt > 0 {
+				foundJSON = true
+			}
+		}
+		if !foundWAL {
+			var cnt int
+			store.DB().QueryRow("SELECT count(*) FROM telemetry_logs WHERE entity_name='wal-log'").Scan(&cnt)
+			if cnt > 0 {
+				foundWAL = true
+			}
+		}
+		if foundJSON && foundWAL {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	if !foundJSON {
+		t.Error("JSON log not found")
+	}
+	if !foundWAL {
+		t.Error("WAL log not found")
 	}
 }

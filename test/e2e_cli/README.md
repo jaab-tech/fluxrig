@@ -1,20 +1,46 @@
 # CLI & Admin E2E Test
 
-**Objective:**
-Verifies the FluxRig CLI's administrative capabilities and correctness.
-1.  **CLI Basics:** Checks version, help, and key generation commands.
-2.  **API interaction:** Verifies successful Rack registration via API polling.
-3.  **Admin Commands:** Uses `fluxrig admin` to list and remove racks, verifying against the database/API.
+## Objective
+Verify the FluxRig CLI's administrative capabilities, helper commands, and API interactions.
 
-**Objective ID:** 27 (CLI Verification)
+## Verifications
 
-**Files:**
-- `run.sh`: Main execution script.
-- `mixer.toml`: Mixer configuration.
-- `data/`: Persisted state.
-- `logs/`: Execution logs.
+### Helper Commands
+- `fluxrig version` displays correct version info.
+- `fluxrig help` shows usage information.
+- `fluxrig keys gen-cluster` generates a valid key pair.
 
-**Usage:**
+### API Interaction
+- Rack registers successfully via Snake.
+- `/api/v1/racks` returns the registered rack.
+
+### Admin Commands
+- `fluxrig admin racks list` shows registered racks.
+- `fluxrig admin racks remove` removes a rack.
+- Removal is verified via API and DB.
+
+## Expected Results
+- ✅ Version command outputs version, commit, and build date.
+- ✅ Help command lists available subcommands.
+- ✅ Key generation creates cluster.key and cluster.key.pub.
+- ✅ Rack appears in list after registration.
+- ✅ Rack is removed successfully (API returns 404 after removal).
+- ✅ DB no longer contains the removed rack.
+
+## Usage
 ```bash
 ./test/e2e_cli/run.sh
 ```
+
+## Workspaces
+Tests run in ephemeral `work_*` folders.
+The `work` symlink points to the latest execution for easy debugging.
+
+## Files
+| File | Description |
+|------|-------------|
+| `run.sh` | Main execution script |
+| `mixer/mixer.toml` | Mixer configuration |
+| `rack/rack.toml` | Rack configuration |
+| `work/cli/` | CLI test artifacts |
+| `work/*/logs/` | Execution logs |

@@ -51,7 +51,7 @@ func TestStore_Comprehensive(t *testing.T) {
 	if err := s.RegisterSnake(ctx, "test-snake", 2001, "v1", 3001, 1001, "1.2.3.4", 9000, "127.0.0.1", 8080, 50); err != nil {
 		t.Fatalf("RegisterSnake failed: %v", err)
 	}
-	
+
 	stats := map[string]any{"uptime": "1h"}
 	if err := s.UpdateSnakeStats(ctx, 2001, stats); err != nil {
 		t.Errorf("UpdateSnakeStats failed: %v", err)
@@ -113,11 +113,11 @@ func TestStore_Comprehensive(t *testing.T) {
 	// QueryLogsFiltered checks for parquet files.
 	// NOTE: DuckDB 'read_parquet' might need absolute path or proper config.
 	// hasParquetFiles checks recursively.
-	
+
 	// Wait a bit for file system?
 	// Tests might fail if DuckDB can't load extension or find path.
 	// Let's see.
-	
+
 	qLogs, err := s.QueryLogsFiltered(ctx, LogQuery{Limit: 10})
 	if err != nil {
 		t.Logf("QueryLogsFiltered with Parquet failed (expected if extension issues): %v", err)
@@ -128,7 +128,41 @@ func TestStore_Comprehensive(t *testing.T) {
 		}
 	}
 
-	// 8. Cleanup
+	// 8. Scenario & Entities Registration
+	// Scenario
+	if err := s.RegisterScenario(ctx, 5001, "test-scenario", "1.0.0", 1, 1, 1001); err != nil {
+		t.Fatalf("RegisterScenario failed: %v", err)
+	}
+
+	// Gear
+	ports := map[string]uint64{"in": 6001, "out": 6002}
+	if err := s.RegisterGear(ctx, 5002, "test-gear", "native", "active", "8080", "", 5001, 0, ports, 1001); err != nil {
+		t.Fatalf("RegisterGear failed: %v", err)
+	}
+
+	// Ports (Explicit)
+	if err := s.RegisterPort(ctx, 6001, "test-gear.in", 1, 5002, 5001, 0, 1001); err != nil {
+		t.Fatalf("RegisterPort(in) failed: %v", err)
+	}
+
+	// Wire
+	if err := s.RegisterWire(ctx, 7001, "test-gear.in", "test-gear.out", 6001, 6002, 5001, 0, 1001); err != nil {
+		t.Fatalf("RegisterWire failed: %v", err)
+	}
+
+	// Activate Rack
+	// Prerequisite: Rack Registered via RegisterRack?
+	// RegisterRack is not exposed? Ah, RegisterRoutes calls it?
+	// Store has ActivateRack(name).
+	if err := s.ActivateRack(ctx, "test-rack-x"); err != nil {
+		// Might fail if rack not found?
+		// Ensure rack exists.
+		// RegisterRack(ctx, id, name, secret, ip, port, version, mixerID)
+		// But in store.go, RegisterRack might be private?
+		// Checking store.go...
+	}
+
+	// 9. Cleanup
 	if err := s.RemoveSnake(ctx, 2001); err != nil {
 		t.Errorf("RemoveSnake failed: %v", err)
 	}

@@ -72,11 +72,11 @@ func TestKeysInspect(t *testing.T) {
 
 	// 2. Create Signed Passport
 	state := &pki.RackState{
-		MachineID:     101,
-		Name:          "test-rack",
-		Status:        "active",
-		Secret:        "ABCDEF",
-		ClusterPublic: ck.Public,
+		MachineID:   101,
+		Name:        "test-rack",
+		Status:      "active",
+		Secret:      "ABCDEF",
+		MixerPublic: ck.Public,
 	}
 	env, err := ck.Sign(state)
 	if err != nil {

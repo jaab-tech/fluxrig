@@ -6,7 +6,9 @@ import (
 	"time"
 
 	"github.com/jaab-tech/fluxrig/pkg/bus"
+	"github.com/jaab-tech/fluxrig/pkg/config"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
+	"github.com/jaab-tech/fluxrig/pkg/idgen"
 	"github.com/jaab-tech/fluxrig/pkg/snake"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -73,7 +75,8 @@ func TestSendHello(t *testing.T) {
 		Secret:    "secret-123",
 	}
 
-	if err := sendHello(b, payload); err != nil {
+	gen, _ := idgen.New(1)
+	if err := sendHello(b, payload, gen); err != nil {
 		t.Fatalf("sendHello failed: %v", err)
 	}
 
@@ -114,7 +117,9 @@ func TestSendHeartbeat(t *testing.T) {
 	sub, _ := nc.SubscribeSync("fluxrig.agent.heartbeat")
 	nc.Flush() // Ensure subscription is active before sending
 
-	if err := sendHeartbeat(b, 456); err != nil {
+	gen, _ := idgen.New(1)
+	hbCfg := &config.RackConfig{}
+	if err := sendHeartbeat(context.Background(), b, 456, hbCfg, gen); err != nil {
 		t.Fatal(err)
 	}
 

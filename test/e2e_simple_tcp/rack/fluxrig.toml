@@ -1,0 +1,21 @@
+[logging]
+level = "trace"
+filename = "logs/rack.log"
+
+[store]
+dir = "./data"
+wal_max_size_mb = 500
+state_file = "state.flux"
+
+[rack]
+name = "comp-node-01"
+# MachineID 100 is the first assigned by Mixer in fresh DB
+machine_id = 100
+# data_dir = "./data" (Uses store.dir)
+
+[rack.bus]
+url = "nats://127.0.0.1:4223"
+stream_name = "flux-msg"
+
+[rack.telemetry]
+enabled = true

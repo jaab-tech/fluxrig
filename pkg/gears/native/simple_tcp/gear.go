@@ -1,0 +1,91 @@
+package simple_tcp
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+
+	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
+	"github.com/jaab-tech/fluxrig/pkg/sdk"
+)
+
+// Gear implements sdk.NativeGear for Simple TCP
+type Gear struct {
+	config *Config
+	log    *slog.Logger
+	ctx    sdk.GearContext
+
+	// Mode implementations
+	server *Server
+	client *Client
+}
+
+// Ensure interface compliance
+var _ sdk.NativeGear = (*Gear)(nil)
+
+// Init loads configuration and prepares the gear.
+func (g *Gear) Init(ctx sdk.GearContext) error {
+	g.ctx = ctx
+	g.log = ctx.Logger()
+
+	cfg, err := ParseConfig(ctx.Config())
+	if err != nil {
+		return fmt.Errorf("simple_tcp: invalid config: %w", err)
+	}
+
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("simple_tcp: validation failed: %w", err)
+	}
+	g.config = cfg
+
+	g.log.Info("initialized", "mode", cfg.Mode, "bind", cfg.Bind, "connect", cfg.Connect)
+	return nil
+}
+
+// Start begins the active lifecycle (Listener/Dialer).
+func (g *Gear) Start(ctx context.Context, emit func(*fluxmsg.FluxMsg)) error {
+	g.log.Info("starting gear")
+
+	switch g.config.Mode {
+	case ModeServer:
+		g.server = NewServer(g.config, g.log, emit, g.ctx.IDGen())
+		if err := g.server.Start(ctx); err != nil {
+			return err
+		}
+	case ModeClient:
+		g.client = NewClient(g.config, g.log, emit, g.ctx.IDGen())
+		if err := g.client.Start(ctx); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// Process handles egress messages (writing to TCP).
+func (g *Gear) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.FluxMsg, error) {
+	if g.server != nil {
+		return g.server.Process(ctx, msg)
+	}
+	if g.client != nil {
+		return g.client.Process(ctx, msg)
+	}
+	return nil, nil
+}
+
+// Stop closes resources.
+func (g *Gear) Stop() error {
+	g.log.Info("stopping gear")
+	var err error
+	if g.server != nil {
+		if e := g.server.Stop(); e != nil {
+			err = e
+		}
+	}
+	if g.client != nil {
+		if e := g.client.Stop(); e != nil {
+			err = e
+		}
+	}
+	return err
+}

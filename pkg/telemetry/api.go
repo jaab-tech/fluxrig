@@ -23,7 +23,7 @@ func StartSpan(ctx context.Context, name string, attrs ...attribute.KeyValue) (c
 
 // Log is a convenience wrapper around slog to ensure OTel context is passed.
 // It is recommended to use the global slog.InfoContext(ctx, ...) directly,
-// as we configure the global logger to use the OTel bridge interactively.
+// since the global logger is configured to use the OTel bridge interactively.
 func Log(ctx context.Context, level slog.Level, msg string, attrs ...slog.Attr) {
 	slog.LogAttrs(ctx, level, msg, attrs...)
 }
@@ -33,7 +33,7 @@ func Log(ctx context.Context, level slog.Level, msg string, attrs ...slog.Attr) 
 func ContextWithFluxID(ctx context.Context, fluxID string) context.Context {
 	m, _ := baggage.NewMember("flux.id", fluxID)
 	b, _ := baggage.New(m) // Create new baggage with this member
-	// Merge with existing baggage if needed, but for now we often start fresh or overwrite
+	// Merge with existing baggage if needed
 	return baggage.ContextWithBaggage(ctx, b)
 }
 

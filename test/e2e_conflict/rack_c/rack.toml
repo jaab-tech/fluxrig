@@ -1,10 +1,15 @@
 [logging]
 level = "debug"
+filename = "logs/rack.log"
+
+[store]
+dir = "./data"
+state_file = "state.flux"
 
 [rack]
 name = "" # Force empty to trigger Zero Config logic
 name_prefix = "probes-" # Arbitrary Prefix Test
-data_dir = "test/e2e_conflict/rack_c/data"
+# data_dir removed
 
 [rack.bus]
 url = "nats://localhost:4223"

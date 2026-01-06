@@ -38,7 +38,7 @@ build: lint ## Build fluxrig binary
 test: ## Run unit tests with race detection and coverage
 	@echo "Running tests..."
 	@mkdir -p test/test_logs
-	go test -race -coverprofile=test/test_logs/coverage.out $$(go list ./... | grep -v '/test/helpers' | grep -v 'cmd/fluxrig$$' | grep -v 'cmd/fluxrig-mixer$$')
+	go test -race -coverprofile=test/test_logs/coverage.out $$(go list ./... | grep -v '/test/utils' | grep -v 'cmd/fluxrig$$' | grep -v 'cmd/fluxrig-mixer$$')
 	@go tool cover -func=test/test_logs/coverage.out | grep total | awk '{print "Total Coverage: " $$3}'
 
 lint: ## Run golangci-lint
@@ -62,17 +62,26 @@ regression: build ## Run full E2E regression suite (Simple, Conflict, Offline, C
 	@echo "--------------------------------------------------"
 	@echo "Running Regression Suite..."
 	@echo "--------------------------------------------------"
-	@echo ">>> [1/5] Running Simple E2E..."
+	@echo "--------------------------------------------------"
+	@echo ">>> [1/8] Running Simple E2E..."
 	@./test/e2e_simple/run.sh || { echo "❌ Simple E2E Failed"; exit 1; }
-	@echo ">>> [2/5] Running Conflict E2E..."
+	@echo ">>> [2/8] Running Registry E2E..."
+	@./test/e2e_registry/run.sh || { echo "❌ Registry E2E Failed"; exit 1; }
+	@echo ">>> [3/8] Running Conflict E2E..."
 	@./test/e2e_conflict/run.sh || { echo "❌ Conflict E2E Failed"; exit 1; }
-	@echo ">>> [3/5] Running Offline E2E..."
+	@echo ">>> [4/8] Running Offline E2E..."
 	@./test/e2e_offline/run.sh || { echo "❌ Offline E2E Failed"; exit 1; }
-	@echo ">>> [4/5] Running CLI E2E..."
+	@echo ">>> [5/8] Running CLI E2E..."
 	@./test/e2e_cli/run.sh || { echo "❌ CLI E2E Failed"; exit 1; }
 	@echo "--------------------------------------------------"
-	@echo ">>> [5/5] Running Telemetry E2E..."
+	@echo ">>> [6/8] Running Telemetry E2E..."
 	@./test/e2e_telemetry/run.sh || { echo "❌ Telemetry E2E Failed"; exit 1; }
+	@echo "--------------------------------------------------"
+	@echo ">>> [7/8] Running Simple TCP E2E..."
+	@./test/e2e_simple_tcp/run.sh || { echo "❌ Simple TCP E2E Failed"; exit 1; }
+	@echo "--------------------------------------------------"
+	@echo ">>> [8/8] Running Bento Load E2E..."
+	@./test/e2e_load/run.sh || { echo "❌ Bento Load E2E Failed"; exit 1; }
 	@echo "--------------------------------------------------"
 	@echo "✅ REGRESSION SUITE PASSED"
 	@echo "--------------------------------------------------"
@@ -85,6 +94,11 @@ clean: ## Remove build artifacts and temporary files
 	find test/e2e_* -name "data" -type d -exec rm -rf {} +
 	find test/e2e_* -name "logs" -type d -exec rm -rf {} +
 	find test/e2e_* -name "*.log" -delete
+	rm -rf test/work/
+	rm -rf test/e2e_*/work
+	rm -rf test/e2e_*/work_*
+	rm -rf test/test_logs/
+	rm -rf test/test_logs/
 	rm -rf test_data/
 	rm -rf data/
 	rm -rf logs/
@@ -106,7 +120,7 @@ $(VENV):
 	@echo "Creating Python virtual environment..."
 	python3 -m venv $(VENV)
 	$(PIP) install --upgrade pip
-	$(PIP) install -r test/requirements.txt
+	$(PIP) install -r test/robot/requirements.txt
 
 test-api: $(VENV) build ## Run Robot Framework API tests
 	@echo "Running API tests..."

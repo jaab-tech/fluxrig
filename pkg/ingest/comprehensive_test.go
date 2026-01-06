@@ -81,7 +81,7 @@ func TestTelemetrySink_Comprehensive(t *testing.T) {
 	if err := mockBus.Publish("flux.telemetry.spans", brokenMsg); err != nil {
 		t.Errorf("Publishing broken payload shouldn't fail publisher: %v", err)
 	}
-	
+
 	// 5. Verify Span with ParentID (Null checks)
 	spanMsg := fluxmsg.New()
 	spanMsg.Metadata["type"] = "telemetry.batch.spans"
@@ -94,8 +94,8 @@ func TestTelemetrySink_Comprehensive(t *testing.T) {
 				// parent_id missing -> NULL
 			},
 			map[string]any{
-				"trace_id": "t1",
-				"span_id":  "s2",
+				"trace_id":  "t1",
+				"span_id":   "s2",
 				"parent_id": "s1", // Has parent
 				"name":      "child",
 			},
@@ -129,13 +129,13 @@ func TestTelemetrySink_Comprehensive(t *testing.T) {
 	logBatch.Data = map[string]any{
 		"batch": []any{
 			map[string]any{
-				"timestamp":   time.Now().UnixMicro(),
-				"machine_id":  "test-rack",
-				"trace_id":    "t_valid",
-				"span_id":     "s_valid",
-				"severity":    "ERROR",
-				"body":        "critical failure", // Will check this
-				"attributes":  map[string]any{"code": 500.0},
+				"timestamp":  time.Now().UnixMicro(),
+				"machine_id": "test-rack",
+				"trace_id":   "t_valid",
+				"span_id":    "s_valid",
+				"severity":   "ERROR",
+				"body":       "critical failure", // Will check this
+				"attributes": map[string]any{"code": 500.0},
 			},
 		},
 	}
@@ -199,7 +199,7 @@ func TestTelemetrySink_Comprehensive(t *testing.T) {
 	// 8. Single Log JSON (telemetry.log.json)
 	singleLogMsg := fluxmsg.New()
 	singleLogMsg.Metadata["type"] = "telemetry.log.json"
-	
+
 	// 'record' field must contain JSON RAW message as per sink.go logic
 	logRecord := map[string]any{
 		"timestamp":   time.Now().UnixMicro(),
@@ -210,7 +210,7 @@ func TestTelemetrySink_Comprehensive(t *testing.T) {
 		"attributes":  map[string]any{"source": "json-handler"},
 	}
 	logBytes, _ := json.Marshal(logRecord)
-	
+
 	// IMPORTANT: sink.go expects msg.Data["record"] to be json.RawMessage.
 	// In MockBus local publish, it's just passed as is.
 	// If sink casts to json.RawMessage, it might fail if we pass []byte or string directly?

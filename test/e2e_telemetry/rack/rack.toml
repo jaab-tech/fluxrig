@@ -1,12 +1,17 @@
+[store]
+dir = "./data"
+state_file = "state.flux"
+
 [rack]
 name = "rack-e2e-telemetry-01"
-data_dir = "test/e2e_telemetry/rack/data"
+# data_dir removed
 
 [rack.bus]
 url = "nats://localhost:4225"
 
 [logging]
 level = "debug"
+filename = "logs/rack.log" # Json or Text? Format is json below..
 log_type = "json"
 
 [telemetry]

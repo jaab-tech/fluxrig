@@ -20,8 +20,8 @@ func TestLoadMixer_Defaults(t *testing.T) {
 	if cfg.Snake.Port != 4222 {
 		t.Errorf("Default Snake port mismatch: got %d", cfg.Snake.Port)
 	}
-	if cfg.Store.Path != "data/fluxrig.duckdb" {
-		t.Errorf("Default store path mismatch: got %s", cfg.Store.Path)
+	if cfg.Store.DatabaseFile != "fluxrig.duckdb" {
+		t.Errorf("Default store database file mismatch: got %s", cfg.Store.DatabaseFile)
 	}
 }
 
@@ -34,8 +34,8 @@ level = "warn"
 port = 9999
 
 [store]
-path = "custom.duckdb"
-cluster_key_path = "custom.key"
+database_file = "custom.duckdb"
+cluster_key_file = "custom.key"
 `
 	tmpfile, err := os.CreateTemp("", "mixer.*.toml")
 	if err != nil {
@@ -61,8 +61,8 @@ cluster_key_path = "custom.key"
 	if cfg.API.Port != 9999 {
 		t.Errorf("File load failed: got %d, want 9999", cfg.API.Port)
 	}
-	if cfg.Store.Path != "custom.duckdb" {
-		t.Errorf("File load failed: got %s", cfg.Store.Path)
+	if cfg.Store.DatabaseFile != "custom.duckdb" {
+		t.Errorf("File load failed: got %s", cfg.Store.DatabaseFile)
 	}
 }
 

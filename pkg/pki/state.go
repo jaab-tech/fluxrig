@@ -82,13 +82,18 @@ type StateEnvelope struct {
 }
 
 // RackState is the Core Identity Data.
+// A Rack is always associated with a specific Mixer (logical tenant).
+// The Scenario field is optional and contains the projected scenario for this rack.
+// When present, it is signed along with the identity for tamper-proof storage.
 type RackState struct {
-	ClusterID     string            `msgpack:"cluster_id"`
-	MachineID     uint16            `msgpack:"machine_id"`
-	Name          string            `msgpack:"name"`
-	Status        string            `msgpack:"status"`      // e.g. "pending", "active"
-	Secret        string            `msgpack:"secret"`      // Bearer Token
-	ClusterPublic ed25519.PublicKey `msgpack:"cluster_pub"` // Validation Root
+	MixerID     uint64            `msgpack:"mixer_id"`     // Mixer's fluxEntityID (binary)
+	MachineID   uint16            `msgpack:"machine_id"`   // Rack's unique machine ID
+	Name        string            `msgpack:"name"`         // Rack's display name
+	Status      string            `msgpack:"status"`       // e.g. "pending", "active"
+	Secret      string            `msgpack:"secret"`       // Bearer Token
+	MixerPublic ed25519.PublicKey `msgpack:"mixer_pub"`    // Mixer's signing key (for verification)
+	Scenario    []byte            `msgpack:"scenario"`     // YAML-encoded projected scenario (optional)
+	ScenarioVer string            `msgpack:"scenario_ver"` // Scenario version for quick check
 }
 
 // Verify checks the envelope's signature using the embedded Public Key.
@@ -99,12 +104,12 @@ func (e *StateEnvelope) Verify() (*RackState, error) {
 		return nil, fmt.Errorf("invalid payload format: %w", err)
 	}
 
-	if len(state.ClusterPublic) != ed25519.PublicKeySize {
-		return nil, fmt.Errorf("invalid cluster public key in state")
+	if len(state.MixerPublic) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("invalid mixer public key in state")
 	}
 
 	// 2. Verify Signature
-	if !ed25519.Verify(state.ClusterPublic, e.Payload, e.Signature) {
+	if !ed25519.Verify(state.MixerPublic, e.Payload, e.Signature) {
 		return nil, fmt.Errorf("signature verification failed! state is tampered")
 	}
 
