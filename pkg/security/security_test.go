@@ -1,3 +1,17 @@
+// Copyright 2025 JAAB Tech SAS, Uruguay
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package security
 
 import (
@@ -45,13 +59,13 @@ func TestLoadVerifierFromFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.Remove(tmpfile.Name())
+	defer func() { _ = os.Remove(tmpfile.Name()) }()
 
-	if _, err := tmpfile.Write(pub); err != nil {
-		t.Fatal(err)
+	if _, errWr := tmpfile.Write(pub); errWr != nil {
+		t.Fatal(errWr)
 	}
-	if err := tmpfile.Close(); err != nil {
-		t.Fatal(err)
+	if errClose := tmpfile.Close(); errClose != nil {
+		t.Fatal(errClose)
 	}
 
 	// 3. Load
@@ -73,7 +87,7 @@ func TestVerifier_Errors(t *testing.T) {
 
 	// 2. LoadVerifierFromFile Invalid Size
 	tmpfile, _ := os.CreateTemp("", "badkey.pub")
-	defer os.Remove(tmpfile.Name())
+	defer func() { _ = os.Remove(tmpfile.Name()) }()
 	_, _ = tmpfile.Write([]byte("short"))
 	_ = tmpfile.Close()
 

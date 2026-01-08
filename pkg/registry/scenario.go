@@ -1,3 +1,17 @@
+// Copyright 2025 JAAB Tech SAS, Uruguay
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package registry
 
 import (
@@ -5,6 +19,8 @@ import (
 	"regexp"
 )
 
+// Scenario represents the static definition of the system topology.
+// Reference: ADR 0005
 // Scenario represents the static definition of the system topology.
 // Reference: ADR 0005
 type Scenario struct {
@@ -15,8 +31,8 @@ type Scenario struct {
 }
 
 type ScenarioMeta struct {
-	Name    string `json:"name" yaml:"name"`
-	Version string `json:"version" yaml:"version"`
+	Name    string `json:"name" yaml:"name" example:"payment-switch"`
+	Version string `json:"version" yaml:"version" example:"1.0.0"`
 }
 
 // RackTarget defines where gears can run. Polymorphic (Name or Group).
@@ -34,21 +50,22 @@ type LabelMatch struct {
 }
 
 // GearSpec defines a logical unit of processing.
+// GearSpec defines a logical unit of processing.
 type GearSpec struct {
-	ID     uint64            `json:"id,omitempty" yaml:"id,omitempty"` // Assigned by Registry/Mixer
-	Name   string            `json:"name" yaml:"name"`
-	Type   string            `json:"type" yaml:"type"`
-	Deploy any               `json:"deploy" yaml:"deploy"` // string (Group/Rack) or map
-	Config map[string]any    `json:"config" yaml:"config"`
+	ID     uint64            `json:"id,omitempty" yaml:"id,omitempty" example:"100"` // Assigned by Registry/Mixer
+	Name   string            `json:"name" yaml:"name" example:"iso8583-in"`
+	Type   string            `json:"type" yaml:"type" example:"iso8583-server"`
+	Deploy any               `json:"deploy" yaml:"deploy" swaggertype:"string" example:"rack-group-1"` // string (Group/Rack) or map
+	Config map[string]any    `json:"config" yaml:"config" swaggertype:"object,string"`
 	Ports  map[string]uint64 `json:"ports,omitempty" yaml:"ports,omitempty"` // Assigned by Mixer
-	Doc    string            `json:"doc,omitempty" yaml:"doc,omitempty"`
+	Doc    string            `json:"doc,omitempty" yaml:"doc,omitempty" example:"Primary Ingress"`
 }
 
 // WireSpec defines a connection between ports.
 type WireSpec struct {
 	ID   uint64 `json:"id,omitempty" yaml:"id,omitempty"` // Assigned by Registry/Mixer
-	From string `json:"from" yaml:"from"`
-	To   string `json:"to" yaml:"to"`
+	From string `json:"from" yaml:"from" example:"iso8583-in.out"`
+	To   string `json:"to" yaml:"to" example:"router.in"`
 }
 
 // Validate ensures the Scenario is structurally sound.

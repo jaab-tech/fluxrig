@@ -1,0 +1,13 @@
+
+# Auto-generated artifacts
+.tox/
+.venv/
+__pycache__/
+*.pyc
+
+# Robot Framework
+log.html
+report.html
+output.xml
+results/
+work/

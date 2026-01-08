@@ -1,0 +1,18 @@
+{%- if title -%}
+<div class="fluxrig-table" style="margin: 5px 0 8px 0;"><h3 style="margin: 0 0 2px 0; color: #cccccc; font-family: monospace; font-size: 11px; font-weight: normal;">{{ title }}</h3>
+{%- else -%}
+<div class="fluxrig-table" style="margin: 5px 0 8px 0;">
+{%- endif -%}
+<table border="0" style="border-collapse: collapse; width: {{ width }}; font-family: monospace; font-size: 11px; background-color: #1e1e1e;"><thead><tr style="background-color: #0066cc;">
+{%- for header in headers -%}
+<th style="padding: 4px 8px; text-align: left; color: #ffffff; border-bottom: 1px solid #0088ff;">{{ header }}</th>
+{%- endfor -%}
+</tr></thead><tbody>
+{%- for row in rows -%}
+<tr style="background-color: {% if loop.index is odd %}#2d2d2d{% else %}#252525{% endif %};">
+{%- for cell in row -%}
+<td style="padding: 3px 8px; color: #e0e0e0; border-bottom: 1px solid #383838;">{{ cell }}</td>
+{%- endfor -%}
+</tr>
+{%- endfor -%}
+</tbody></table></div>

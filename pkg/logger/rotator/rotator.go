@@ -1,3 +1,17 @@
+// Copyright 2025 JAAB Tech SAS, Uruguay
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package rotator
 
 import (
@@ -31,7 +45,7 @@ type Rotator struct {
 func New(filename string, maxSizeMB int, maxBackups int, compress bool) (*Rotator, error) {
 	// Ensure directory exists
 	dir := filepath.Dir(filename)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0750); err != nil {
 		return nil, fmt.Errorf("failed to create log dir: %w", err)
 	}
 
@@ -52,7 +66,7 @@ func New(filename string, maxSizeMB int, maxBackups int, compress bool) (*Rotato
 
 // open opens the log file and gets its size.
 func (r *Rotator) open() error {
-	f, err := os.OpenFile(r.filename, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(r.filename, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {
 		return err
 	}
@@ -74,8 +88,8 @@ func (r *Rotator) Write(p []byte) (n int, err error) {
 	writeLen := int64(len(p))
 
 	if r.maxSize > 0 && r.size+writeLen > r.maxSize {
-		if err := r.rotate(); err != nil {
-			return 0, err
+		if errRot := r.rotate(); errRot != nil {
+			return 0, errRot
 		}
 	}
 
@@ -180,21 +194,21 @@ func (r *Rotator) cleanup(newBackup string) {
 }
 
 func compressFile(src string) error {
-	f, err := os.Open(src)
+	f, err := os.Open(filepath.Clean(src))
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	dst := src + ".gz"
-	out, err := os.Create(dst)
+	out, err := os.Create(filepath.Clean(dst))
 	if err != nil {
 		return err
 	}
-	defer out.Close()
+	defer func() { _ = out.Close() }()
 
 	w := gzip.NewWriter(out)
-	defer w.Close()
+	defer func() { _ = w.Close() }()
 
 	if _, err := io.Copy(w, f); err != nil {
 		return err

@@ -1,7 +1,22 @@
+// Copyright 2025 JAAB Tech SAS, Uruguay
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package registry_test
 
 import (
 	"context"
+	"log/slog"
 	"testing"
 
 	"github.com/jaab-tech/fluxrig/pkg/registry"
@@ -9,18 +24,19 @@ import (
 )
 
 func setupTestRegistry(t *testing.T) (*registry.DuckDBRegistry, func()) {
-	// Use unique temp file for isolation
-	dbPath := t.TempDir() + "/fluxrig_test.duckdb"
-	store, err := duckdb.NewStore(dbPath)
+	// Setup In-Memory Store
+	store, err := duckdb.NewStore(slog.Default(), "")
 	if err != nil {
-		t.Fatalf("failed to create store: %v", err)
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	// defer store.Close() // Removed premature close
+
+	if err := store.Migrate(context.Background()); err != nil {
+		_ = store.Close() // Close on error
+		t.Fatalf("Migrate failed: %v", err)
 	}
 
-	if err := store.InitializeSchema(context.Background()); err != nil {
-		t.Fatalf("setup schema failed: %v", err)
-	}
-
-	return registry.NewDuckDBRegistry(store), func() { store.Close() }
+	return registry.NewDuckDBRegistry(store), func() { _ = store.Close() }
 }
 
 func TestRegistry_Register_Static(t *testing.T) {

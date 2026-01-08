@@ -1,3 +1,17 @@
+// Copyright 2025 JAAB Tech SAS, Uruguay
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package pki
 
 import (
@@ -26,8 +40,8 @@ func TestClusterKey_Lifecycle(t *testing.T) {
 	tmpDir := t.TempDir()
 	keyPath := filepath.Join(tmpDir, "cluster.key")
 
-	if err := ck.Save(keyPath); err != nil {
-		t.Fatalf("Failed to save key: %v", err)
+	if errSave := ck.Save(keyPath); errSave != nil {
+		t.Fatalf("Failed to save key: %v", errSave)
 	}
 
 	// 3. Load
@@ -69,13 +83,13 @@ func TestLoadClusterKey_Variations(t *testing.T) {
 
 	// Case B: Seed (32 bytes)
 	seed := make([]byte, ed25519.SeedSize)
-	if _, err := rand.Read(seed); err != nil {
-		t.Fatal(err)
+	if _, errRd := rand.Read(seed); errRd != nil {
+		t.Fatal(errRd)
 	}
 	seedPriv := ed25519.NewKeyFromSeed(seed)
 	seedPath := filepath.Join(tmpDir, "seed.key")
-	if err := os.WriteFile(seedPath, seed, 0600); err != nil {
-		t.Fatal(err)
+	if errWr := os.WriteFile(seedPath, seed, 0600); errWr != nil {
+		t.Fatal(errWr)
 	}
 
 	ckSeed, err := LoadClusterKey(seedPath)
@@ -176,7 +190,7 @@ func TestLoadClusterKey_Errors(t *testing.T) {
 	if err := os.WriteFile(tmp, []byte("short"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	defer os.Remove(tmp)
+	defer func() { _ = os.Remove(tmp) }()
 
 	if _, err := LoadClusterKey(tmp); err == nil {
 		t.Error("Expected error for invalid key length")

@@ -1,3 +1,17 @@
+// Copyright 2025 JAAB Tech SAS, Uruguay
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package telemetry_test
 
 import (
@@ -6,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/jaab-tech/fluxrig/pkg/bus"
+	"github.com/jaab-tech/fluxrig/pkg/idgen"
 
 	"github.com/jaab-tech/fluxrig/pkg/telemetry"
 	"go.opentelemetry.io/otel"
@@ -99,12 +114,13 @@ func TestTelemetry_Init_Success(t *testing.T) {
 	}
 
 	telemetry.ResetGlobalsForTest()
+	gen, _ := idgen.New(1)
 
-	shutdown, err := telemetry.Init(context.Background(), telCfg, mockBus, nil, nil)
+	shutdown, err := telemetry.Init(context.Background(), telCfg, mockBus, nil, gen)
 	if err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
-	defer shutdown(context.Background())
+	defer func() { _ = shutdown(context.Background()) }()
 
 	// 3. Trace (Complex)
 	ctx, span := telemetry.StartSpan(context.Background(), "init-test-span",
@@ -141,8 +157,9 @@ func TestTelemetry_Init_Success(t *testing.T) {
 func TestExporterConstructors(t *testing.T) {
 	mockBus := bus.NewMockBus()
 
+	gen, _ := idgen.New(1)
 	// 1. NatsWriter
-	w := telemetry.NewNatsWriter(mockBus, 1, "test-entity", "flux.telemetry")
+	w := telemetry.NewNatsWriter(mockBus, 1, "test-entity", "flux.telemetry", gen)
 	if w == nil {
 		t.Error("NewNatsWriter returned nil")
 	}

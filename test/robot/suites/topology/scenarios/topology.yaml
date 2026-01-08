@@ -1,0 +1,66 @@
+# Copyright 2025 JAAB Tech SAS, Uruguay
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Topology Scenario for Cross-Rack Testing
+meta:
+  name: "cross_rack_topology"
+  version: "1.0.0"
+
+racks:
+  - name: "rack-a-adopted"
+    labels:
+      role: "primary"
+  - name: "rack-b"
+    labels:
+      role: "secondary"
+
+gears:
+  - name: "bento-gen"
+    type: "bento"
+    deploy: "rack-a-adopted"
+    config:
+      log_level: "INFO"
+      ports:
+        outputs: ["out"]
+      bento:
+        input:
+          generate:
+            interval: "100ms"
+            count: 50
+            mapping: |
+              root.id = count("messages")
+              root.ts = timestamp_unix_nano()
+              root.payload = "phase1_test_" + count("messages").string()
+        # Output auto-wired via port "out"
+
+  - name: "blackhole"
+    type: "bento"
+    deploy: "rack-b"
+    config:
+      log_level: "TRACE"
+      ports:
+        inputs: ["in"]
+      bento:
+        # Input auto-wired via port "in"
+        pipeline:
+          processors:
+            - log:
+                level: INFO
+                message: "phase1_test received: ${! content() }"
+        output:
+          drop: {}
+
+wires:
+  - from: "bento-gen.out"
+    to: "blackhole.in"

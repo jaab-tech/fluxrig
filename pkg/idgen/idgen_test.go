@@ -1,3 +1,17 @@
+// Copyright 2025 JAAB Tech SAS, Uruguay
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package idgen
 
 import (
@@ -21,7 +35,7 @@ func TestIDGenerator_FluxID(t *testing.T) {
 	// Actually Sonyflake default is:
 	// 39 bits time | 8 bits seq | 16 bits machine
 	// So lowest 16 bits should be machineID
-	extractedMachineID := uint16(id & 0xFFFF)
+	extractedMachineID := uint16(id & 0xFFFF) //nolint:gosec
 	if extractedMachineID != machineID {
 		t.Errorf("MachineID mismatch in FluxID. Got %d, want %d", extractedMachineID, machineID)
 	}
@@ -44,13 +58,13 @@ func TestIDGenerator_EntityID(t *testing.T) {
 
 	// Verify bits
 	// Type: Top 8 bits (63-56) => shift right 56
-	extractedType := EntityType(eid >> 56)
+	extractedType := EntityType(eid >> 56) //nolint:gosec
 	if extractedType != eType {
 		t.Errorf("Type mismatch. Got %d, want %d", extractedType, eType)
 	}
 
 	// MachineID: Next 16 bits (55-40) => shift right 40, mask 0xFFFF
-	extractedMachine := uint16((eid >> 40) & 0xFFFF)
+	extractedMachine := uint16((eid >> 40) & 0xFFFF) //nolint:gosec
 	if extractedMachine != machineID {
 		t.Errorf("MachineID mismatch. Got %d, want %d", extractedMachine, machineID)
 	}

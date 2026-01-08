@@ -1,10 +1,23 @@
+// Copyright 2025 JAAB Tech SAS, Uruguay
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package bus
 
 import (
 	"context"
 	"errors"
 	"strconv"
-	"time"
 
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/nats-io/nats.go"
@@ -27,20 +40,27 @@ func NewNatsBus(streamName string) *NatsBus {
 }
 
 // Connect establishes the connection to the NATS server and initializes JetStream.
-func (n *NatsBus) Connect(url string, name string, connectTimeout time.Duration, reconnectWait time.Duration) error {
-	// 1. Connect to NATS Core
-	nc, err := nats.Connect(url,
-		nats.Name(name),
-		nats.Timeout(connectTimeout),
-		nats.ReconnectWait(reconnectWait),
+func (n *NatsBus) Connect(url string, opts ConnectOptions) error {
+	// 1. Build Options
+	natsOpts := []nats.Option{
+		nats.Name(opts.Name),
+		nats.Timeout(opts.ConnectTimeout),
+		nats.ReconnectWait(opts.ReconnectWait),
 		nats.MaxReconnects(-1), // Infinite reconnects
-	)
+	}
+
+	if opts.RootCA != "" {
+		natsOpts = append(natsOpts, nats.RootCAs(opts.RootCA))
+	}
+
+	// 2. Connect to NATS Core
+	nc, err := nats.Connect(url, natsOpts...)
 	if err != nil {
 		return err
 	}
 	n.conn = nc
 
-	// 2. Initialize JetStream
+	// 3. Initialize JetStream
 	js, err := jetstream.New(nc)
 	if err != nil {
 		return err
@@ -69,6 +89,18 @@ func (n *NatsBus) Publish(subject string, msg *fluxmsg.FluxMsg) error {
 	msgID := strconv.FormatUint(msg.FluxID, 10)
 
 	_, err = n.js.Publish(context.Background(), subject, data, jetstream.WithMsgID(msgID))
+	return err
+}
+
+// PublishRaw sends pre-serialized data (MsgPack) with a specific deduplication ID.
+func (n *NatsBus) PublishRaw(subject string, data []byte, fluxID uint64) error {
+	if n.js == nil {
+		return errors.New("nats bus not connected")
+	}
+
+	// Send Bytes (Persistent) with Deduplication ID
+	msgID := strconv.FormatUint(fluxID, 10)
+	_, err := n.js.Publish(context.Background(), subject, data, jetstream.WithMsgID(msgID))
 	return err
 }
 
@@ -118,7 +150,7 @@ func (n *NatsBus) Subscribe(subject string, handler Handler) (Subscription, erro
 
 		// Deserialize
 		var fluxMsg fluxmsg.FluxMsg
-		if err := msgpack.Unmarshal(msg.Data(), &fluxMsg); err != nil {
+		if errUnmarshal := msgpack.Unmarshal(msg.Data(), &fluxMsg); errUnmarshal != nil {
 			return // Drop corrupt
 		}
 
@@ -164,7 +196,7 @@ func (n *NatsBus) SubscribeDurable(subject, durableName string, handler Handler)
 	cc, err := cons.Consume(func(msg jetstream.Msg) {
 		// Deserialize
 		var fluxMsg fluxmsg.FluxMsg
-		if err := msgpack.Unmarshal(msg.Data(), &fluxMsg); err != nil {
+		if errUnmarshal := msgpack.Unmarshal(msg.Data(), &fluxMsg); errUnmarshal != nil {
 			// If corrupt, we still Ack to move past it?
 			// Ideally dead letter queue, but for now Ack + Log error (if logger avail)
 			_ = msg.Ack()

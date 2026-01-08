@@ -1,8 +1,21 @@
+// Copyright 2025 JAAB Tech SAS, Uruguay
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//	http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 package snake
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/nats-io/nats-server/v2/server"
@@ -22,6 +35,8 @@ type Config struct {
 	StoreDir       string
 	StreamName     string
 	StreamSubjects []string
+	TLSCert        string
+	TLSKey         string
 }
 
 // NewServer creates and starts an embedded NATS server with JetStream enabled.
@@ -32,6 +47,25 @@ func NewServer(cfg Config) (*Server, error) {
 		StoreDir:   cfg.StoreDir,
 		ServerName: "fluxrig-mixer-embedded",
 		NoSigs:     true, // FluxRig handles signals, preventing double-shutdown panic
+		Debug:      true,
+		Trace:      true,
+	}
+
+	// TLS Configuration
+	if cfg.TLSCert != "" && cfg.TLSKey != "" {
+		cert, err := tls.LoadX509KeyPair(cfg.TLSCert, cfg.TLSKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load snake tls certs: %w", err)
+		}
+		opts.TLSConfig = &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			ClientAuth:   tls.NoClientCert,
+			MinVersion:   tls.VersionTLS12,
+		}
+		opts.TLS = true
+		opts.TLSCert = cfg.TLSCert
+		opts.TLSKey = cfg.TLSKey
+		opts.TLSVerify = false
 	}
 
 	// JetStream Configuration
@@ -85,10 +119,11 @@ func (s *Server) ProvisionStream(name string, subjects []string) error {
 	stream, err := js.Stream(ctx, name)
 	if err == nil {
 		// Update Subjects
-		info, err := stream.Info(ctx)
-		if err != nil {
-			return err
+		info, errInfo := stream.Info(ctx)
+		if errInfo != nil {
+			return errInfo
 		}
+
 		cfg := info.Config
 		cfg.Subjects = subjects
 		_, err = js.UpdateStream(ctx, cfg)

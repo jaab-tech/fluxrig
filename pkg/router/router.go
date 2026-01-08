@@ -1,3 +1,17 @@
+// Copyright 2025 JAAB Tech SAS, Uruguay
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package router
 
 import (
@@ -30,9 +44,14 @@ func NewRouter(logger watermill.LoggerAdapter) (*RouterWrapper, error) {
 // ConfigureJetStream sets up NATS JetStream Publisher and Subscriber.
 // url: NATS URL (e.g. "nats://localhost:4222")
 
-func (r *RouterWrapper) ConfigureJetStream(url string, durable bool, logger watermill.LoggerAdapter) error {
+func (r *RouterWrapper) ConfigureJetStream(url string, durable bool, rootCA string, logger watermill.LoggerAdapter) error {
 	// 1. Manually Ensure Stream Exists using Legacy Context
-	nc, err := nats.Connect(url)
+	connOpts := []nats.Option{}
+	if rootCA != "" {
+		connOpts = append(connOpts, nats.RootCAs(rootCA))
+	}
+
+	nc, err := nats.Connect(url, connOpts...)
 	if err != nil {
 		return err
 	}
@@ -98,6 +117,9 @@ func (r *RouterWrapper) ConfigureJetStream(url string, durable bool, logger wate
 		nats.Timeout(10 * time.Second),
 		nats.ReconnectWait(1 * time.Second),
 		nats.MaxReconnects(-1),
+	}
+	if rootCA != "" {
+		natsOpts = append(natsOpts, nats.RootCAs(rootCA))
 	}
 
 	subscribeOpts := []nats.SubOpt{}

@@ -1,3 +1,17 @@
+// Copyright 2025 JAAB Tech SAS, Uruguay
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package simple_tcp
 
 import (
@@ -67,7 +81,7 @@ func (s *Server) Start(ctx context.Context) error {
 }
 
 func (s *Server) acceptLoop() {
-	defer s.listener.Close()
+	defer func() { _ = s.listener.Close() }()
 
 	for {
 		select {
@@ -97,7 +111,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	s.conns.Store(connID, c)
 	defer func() {
 		s.conns.Delete(connID)
-		conn.Close()
+		defer func() { _ = conn.Close() }()
 	}()
 
 	s.log.Debug("connection accepted", "conn_id", connID, "remote", conn.RemoteAddr())
@@ -202,10 +216,10 @@ func (s *Server) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.Fl
 func (s *Server) Stop() error {
 	close(s.done)
 	if s.listener != nil {
-		s.listener.Close()
+		_ = s.listener.Close()
 	}
 	s.conns.Range(func(key, value any) bool {
-		value.(*Connection).conn.Close()
+		_ = value.(*Connection).conn.Close()
 		return true
 	})
 	return nil

@@ -1,3 +1,6 @@
+<!-- Copyright (c) 2025 JAAB Tech SAS, Uruguay All Rights Reserved -->
+<!-- See https://jaab.tech -->
+
 # Changelog
 
 All notable changes to this project will be documented in this file.
@@ -6,6 +9,10 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 - **Phase 3 Development**: Started work on Gear Ecosystem.
+- **Database Migrations**: Implemented a robust DuckDB migration system (`Migrate()`) replacing ad-hoc schema initialization.
+- **Telemetry Schema**: Added `description` column to `telemetry_metrics` table (Migration V2).
+- **Store API**: Updated `NewStore` to require structured logger injection.
+
 
 ## [v0.1.0-alpha] - 2025-12-27
 

@@ -35,4 +35,9 @@ __pycache__/
 # Test Artifacts
 test/test_logs/
 test/e2e_*/work_*/
+test/e2e_*/work_*/
 test/e2e_*/work
+
+# Unit Test Artifacts
+pkg/ingest/comprehensive-mixer/
+pkg/ingest/test-mixer/

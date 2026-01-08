@@ -1,3 +1,17 @@
+// Copyright 2025 JAAB Tech SAS, Uruguay
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package shipper
 
 import (
@@ -78,6 +92,13 @@ func (s *LogShipper) loop() {
 		}
 	}
 
+	// Create a cancellable context from stopCh
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-s.stopCh
+		cancel()
+	}()
+
 	for {
 		select {
 		case <-s.stopCh:
@@ -94,11 +115,10 @@ func (s *LogShipper) loop() {
 
 		// [QoS] Rate Limiting
 		// Wait for token before reading next log.
-		// Uses context.Background() as we handle stopCh separately, but could use cancellable ctx.
 		if s.limiter != nil {
-			if err := s.limiter.Wait(context.Background()); err != nil {
-				// Should only happen if ctx cancelled, but we use Background.
-				slog.Warn("Rate limiter error", "error", err)
+			if err := s.limiter.Wait(ctx); err != nil {
+				// Canceled?
+				return
 			}
 		}
 
@@ -106,19 +126,31 @@ func (s *LogShipper) loop() {
 		if err != nil {
 			if err == wal.ErrNotFound {
 				// End of log, wait for more data
-				time.Sleep(100 * time.Millisecond)
-				continue
+				select {
+				case <-s.stopCh:
+					return
+				case <-time.After(100 * time.Millisecond):
+					continue
+				}
 			}
 			slog.Error("WAL Read Error", "index", target, "error", err)
-			time.Sleep(100 * time.Millisecond)
-			continue
+			select {
+			case <-s.stopCh:
+				return
+			case <-time.After(100 * time.Millisecond):
+				continue
+			}
 		}
 
 		// Process
 		if err := s.process(data); err != nil {
 			slog.Error("Failed to process log", "error", err)
-			time.Sleep(1 * time.Second)
-			continue
+			select {
+			case <-s.stopCh:
+				return
+			case <-time.After(1 * time.Second):
+				continue
+			}
 		}
 
 		// Success
@@ -171,5 +203,7 @@ func (s *LogShipper) process(payload []byte) error {
 		}
 	}
 
-	return s.bus.Publish(s.baseSubject+suffix, &msg)
+	// Optimization: Send already-serialized payload directly.
+	// We unmarshaled only to check type and get FluxID.
+	return s.bus.PublishRaw(s.baseSubject+suffix, payload, msg.FluxID)
 }

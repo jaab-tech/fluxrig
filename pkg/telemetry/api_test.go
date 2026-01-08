@@ -1,3 +1,17 @@
+// Copyright 2025 JAAB Tech SAS, Uruguay
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package telemetry_test
 
 import (
@@ -6,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/jaab-tech/fluxrig/pkg/bus"
+	"github.com/jaab-tech/fluxrig/pkg/idgen"
 	"github.com/jaab-tech/fluxrig/pkg/telemetry"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/sdk/trace"
@@ -24,6 +39,7 @@ func TestStartSpan(t *testing.T) {
 	ctx := context.Background()
 	ctx, span := telemetry.StartSpan(ctx, "test-span")
 	span.End()
+	_ = ctx
 
 	// Verify
 	spans := exporter.GetSpans()
@@ -59,7 +75,8 @@ func TestLog(t *testing.T) {
 	telemetry.ResetGlobalsForTest()
 	mockBus := bus.NewMockBus()
 	// Test Writer directly
-	_ = telemetry.NewNatsWriter(mockBus, 12345, "test-name", "flux.test")
+	gen, _ := idgen.New(1)
+	_ = telemetry.NewNatsWriter(mockBus, 12345, "test-name", "flux.test", gen)
 	cfg := telemetry.Config{
 		ServiceName: "test-service",
 		EntityID:    12345,
@@ -68,14 +85,14 @@ func TestLog(t *testing.T) {
 
 	// This should not panic
 	t.Log("Calling Init...")
-	shutdown, err := telemetry.Init(ctx, cfg, mockBus, nil, nil)
+	shutdown, err := telemetry.Init(ctx, cfg, mockBus, nil, gen)
 	if err != nil {
 		t.Fatalf("Failed to init telemetry: %v", err)
 	}
 	t.Log("Init done. Deferring shutdown.")
 	defer func() {
 		t.Log("Calling Shutdown...")
-		shutdown(context.Background())
+		_ = shutdown(context.Background())
 		t.Log("Shutdown done.")
 	}()
 

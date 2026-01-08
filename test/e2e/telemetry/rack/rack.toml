@@ -1,0 +1,25 @@
+[store]
+dir = "./data"
+state_file = "state.flux"
+
+[rack]
+name = "rack-e2e-telemetry-01"
+heartbeat_interval = "1s"
+
+[rack.bus]
+url = "nats://localhost:4225"
+
+[logging]
+level = "debug"
+filename = "logs/rack.log"
+
+[telemetry]
+service_name = "rack"
+batch_interval = "1s"
+max_batch_size = 1024
+base_subject = "flux.telemetry"
+
+[telemetry.metrics]
+host_enabled = true
+runtime_enabled = true
+bento_enabled = true

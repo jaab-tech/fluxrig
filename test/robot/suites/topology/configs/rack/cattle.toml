@@ -1,0 +1,16 @@
+# Rack Configuration for Robot Tests (Cattle Mode)
+[logging]
+level = "debug"
+filename = "logs/fluxrig.log"
+
+[rack]
+# name = "robot-rack-01"  <-- Commented out to force Cattle/Pending mode
+data_dir = "data"
+
+[rack.bus]
+url = "nats://localhost:4222"
+connect_timeout = "5s"
+
+[telemetry]
+export_interval = "100ms"
+batch_size = 1

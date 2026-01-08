@@ -1,8 +1,23 @@
+// Copyright 2025 JAAB Tech SAS, Uruguay
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package ingest_test
 
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"os"
 	"testing"
 	"time"
@@ -15,19 +30,19 @@ import (
 
 func TestTelemetrySink_Logs(t *testing.T) {
 	mockBus := bus.NewMockBus()
-	store, _ := duckdb.NewStore(":memory:")
-	defer store.Close()
+	store, _ := duckdb.NewStore(slog.Default(), ":memory:")
+	defer func() { _ = store.Close() }()
 
 	// Init Schema
-	if err := store.InitializeTelemetrySchema(context.Background()); err != nil {
+	if err := store.Migrate(context.Background()); err != nil {
 		t.Fatalf("Failed to init schema: %v", err)
 	}
 
-	sink := ingest.NewTelemetrySink(mockBus, store, "test-mixer")
+	sink := ingest.NewTelemetrySink(mockBus, store, "test-mixer", 1*time.Minute, nil)
 	if err := sink.Start(); err != nil {
 		t.Fatalf("Failed to start sink: %v", err)
 	}
-	defer sink.Stop()
+	defer func() { _ = sink.Stop() }()
 
 	// Create Log Batch
 	logMsg := fluxmsg.New()
@@ -74,22 +89,22 @@ func TestTelemetrySink_Lifecycle(t *testing.T) {
 
 	// 2. Setup Test DB
 	tmpFile := "test_sink.db"
-	store, err := duckdb.NewStore(tmpFile)
+	store, err := duckdb.NewStore(slog.Default(), tmpFile)
 	if err != nil {
 		t.Fatalf("Failed to create test store: %v", err)
 	}
 	defer func() {
-		store.Close()
-		os.Remove(tmpFile)
+		_ = store.Close()
+		_ = os.Remove(tmpFile)
 	}()
 
 	// Init Schema for persistence test
-	if err := store.InitializeTelemetrySchema(context.Background()); err != nil {
+	if err := store.Migrate(context.Background()); err != nil {
 		t.Fatalf("Failed to init schema: %v", err)
 	}
 
 	// 3. Init Sink
-	sink := ingest.NewTelemetrySink(mockBus, store, "test-mixer")
+	sink := ingest.NewTelemetrySink(mockBus, store, "test-mixer", 1*time.Minute, nil)
 
 	// 4. Start
 	if err := sink.Start(); err != nil {
@@ -164,11 +179,11 @@ func TestTelemetrySink_Lifecycle(t *testing.T) {
 
 func TestTelemetrySink_SchemaInit(t *testing.T) {
 	// Helper to separate schema init verification
-	store, _ := duckdb.NewStore(":memory:")
-	defer store.Close()
+	store, _ := duckdb.NewStore(slog.Default(), ":memory:")
+	defer func() { _ = store.Close() }()
 
 	ctx := context.Background()
-	if err := store.InitializeTelemetrySchema(ctx); err != nil {
+	if err := store.Migrate(ctx); err != nil {
 		t.Fatalf("Failed to init schema: %v", err)
 	}
 
@@ -181,14 +196,15 @@ func TestTelemetrySink_SchemaInit(t *testing.T) {
 
 func TestTelemetrySink_Metrics(t *testing.T) {
 	mockBus := bus.NewMockBus()
-	store, _ := duckdb.NewStore(":memory:")
-	defer store.Close()
+	store, _ := duckdb.NewStore(slog.Default(), ":memory:")
+	defer func() { _ = store.Close() }()
 	ctx := context.Background()
-	store.InitializeTelemetrySchema(ctx)
+	_ = store.Migrate(ctx)
 
-	sink := ingest.NewTelemetrySink(mockBus, store, "test-mixer")
-	sink.Start()
-	defer sink.Stop()
+	sink := ingest.NewTelemetrySink(mockBus, store, "test-mixer", 1*time.Minute, nil)
+	// Start sink
+	_ = sink.Start()
+	defer func() { _ = sink.Stop() }()
 
 	// 1. Batch Metrics
 	batchMsg := fluxmsg.New()
@@ -205,7 +221,7 @@ func TestTelemetrySink_Metrics(t *testing.T) {
 			},
 		},
 	}
-	mockBus.Publish("flux.telemetry.metrics", batchMsg)
+	_ = mockBus.Publish("flux.telemetry.metrics", batchMsg)
 
 	// 2. Single Metric
 	singleMsg := fluxmsg.New()
@@ -218,7 +234,7 @@ func TestTelemetrySink_Metrics(t *testing.T) {
 		"type":        "gauge",
 		"value":       1024,
 	}
-	mockBus.Publish("flux.telemetry.metric", singleMsg)
+	_ = mockBus.Publish("flux.telemetry.metric", singleMsg)
 
 	// Poll
 	deadline := time.Now().Add(2 * time.Second)
@@ -226,14 +242,14 @@ func TestTelemetrySink_Metrics(t *testing.T) {
 	for time.Now().Before(deadline) {
 		if !foundBatch {
 			var cnt int
-			store.DB().QueryRow("SELECT count(*) FROM telemetry_metrics WHERE name='cpu'").Scan(&cnt)
+			_ = store.DB().QueryRow("SELECT count(*) FROM telemetry_metrics WHERE name='cpu'").Scan(&cnt)
 			if cnt > 0 {
 				foundBatch = true
 			}
 		}
 		if !foundSingle {
 			var cnt int
-			store.DB().QueryRow("SELECT count(*) FROM telemetry_metrics WHERE name='mem'").Scan(&cnt)
+			_ = store.DB().QueryRow("SELECT count(*) FROM telemetry_metrics WHERE name='mem'").Scan(&cnt)
 			if cnt > 0 {
 				foundSingle = true
 			}
@@ -254,14 +270,14 @@ func TestTelemetrySink_Metrics(t *testing.T) {
 
 func TestTelemetrySink_MiscLogs(t *testing.T) {
 	mockBus := bus.NewMockBus()
-	store, _ := duckdb.NewStore(":memory:")
-	defer store.Close()
+	store, _ := duckdb.NewStore(slog.Default(), ":memory:")
+	defer func() { _ = store.Close() }()
 	ctx := context.Background()
-	store.InitializeTelemetrySchema(ctx)
+	_ = store.Migrate(ctx)
 
-	sink := ingest.NewTelemetrySink(mockBus, store, "test-mixer")
-	sink.Start()
-	defer sink.Stop()
+	sink := ingest.NewTelemetrySink(mockBus, store, "test-mixer", 1*time.Minute, nil)
+	_ = sink.Start()
+	defer func() { _ = sink.Stop() }()
 
 	// 1. Single Log JSON
 	jsonMsg := fluxmsg.New()
@@ -270,7 +286,7 @@ func TestTelemetrySink_MiscLogs(t *testing.T) {
 	jsonMsg.Data = map[string]interface{}{
 		"record": json.RawMessage(`{"entity_name":"json-log","body":"hello json","timestamp":1700000000000000}`),
 	}
-	mockBus.Publish("flux.telemetry.log.json", jsonMsg)
+	_ = mockBus.Publish("flux.telemetry.log.json", jsonMsg)
 
 	// 2. Single Log MsgPack (WAL style)
 	walMsg := fluxmsg.New()
@@ -281,7 +297,7 @@ func TestTelemetrySink_MiscLogs(t *testing.T) {
 		"body":        "hello wal",
 		"timestamp":   int64(1700000000000000),
 	}
-	mockBus.Publish("flux.telemetry.log", walMsg)
+	_ = mockBus.Publish("flux.telemetry.log", walMsg)
 
 	// Poll
 	deadline := time.Now().Add(2 * time.Second)
@@ -289,14 +305,14 @@ func TestTelemetrySink_MiscLogs(t *testing.T) {
 	for time.Now().Before(deadline) {
 		if !foundJSON {
 			var cnt int
-			store.DB().QueryRow("SELECT count(*) FROM telemetry_logs WHERE entity_name='json-log'").Scan(&cnt)
+			_ = store.DB().QueryRow("SELECT count(*) FROM telemetry_logs WHERE entity_name='json-log'").Scan(&cnt)
 			if cnt > 0 {
 				foundJSON = true
 			}
 		}
 		if !foundWAL {
 			var cnt int
-			store.DB().QueryRow("SELECT count(*) FROM telemetry_logs WHERE entity_name='wal-log'").Scan(&cnt)
+			_ = store.DB().QueryRow("SELECT count(*) FROM telemetry_logs WHERE entity_name='wal-log'").Scan(&cnt)
 			if cnt > 0 {
 				foundWAL = true
 			}

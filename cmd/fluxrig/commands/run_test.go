@@ -1,3 +1,17 @@
+// Copyright 2025 JAAB Tech SAS, Uruguay
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package commands
 
 import (
@@ -30,17 +44,27 @@ func setupBus(t *testing.T) (*snake.Server, *bus.NatsBus, string) {
 	// Since we can't easily mock the bus package function without dependency injection,
 	// we will rely on the interface in the real code.
 	// For this test, we just check the config parsing.
+	// 2. Connect Bus
 	b := bus.NewNatsBus("flux")
 	url := s.ClientURL()
-	if err := b.Connect(url, "test-runner", 2*time.Second, 1*time.Second); err != nil {
-		s.Shutdown()
-		t.Fatalf("Failed to connect bus: %v", err)
+	if err := b.Connect(url, bus.ConnectOptions{
+		Name:           "test-runner",
+		ConnectTimeout: 2 * time.Second,
+		ReconnectWait:  1 * time.Second,
+	}); err != nil {
+		t.Fatalf("Bus connect failed: %v", err)
 	}
 
 	// 3. Create Stream (Required for JS Publish)
-	nc, _ := nats.Connect(url)
+	nc, err := nats.Connect(url)
+	if err != nil {
+		t.Fatalf("NATS connect failed: %v", err)
+	}
 	defer nc.Close()
-	js, _ := jetstream.New(nc)
+	js, err := jetstream.New(nc)
+	if err != nil {
+		t.Fatalf("JetStream init failed: %v", err)
+	}
 	_, err = js.CreateStream(context.Background(), jetstream.StreamConfig{
 		Name:     "flux",
 		Subjects: []string{"fluxrig.>"},
@@ -58,7 +82,10 @@ func TestSendHello(t *testing.T) {
 	defer b.Close()
 
 	// 1. Subscribe to verify
-	nc, _ := nats.Connect(url)
+	nc, err := nats.Connect(url)
+	if err != nil {
+		t.Fatalf("NATS connect failed: %v", err)
+	}
 	defer nc.Close()
 
 	sub, err := nc.SubscribeSync("fluxrig.agent.hello")
@@ -76,8 +103,8 @@ func TestSendHello(t *testing.T) {
 	}
 
 	gen, _ := idgen.New(1)
-	if err := sendHello(b, payload, gen); err != nil {
-		t.Fatalf("sendHello failed: %v", err)
+	if errSend := sendHello(b, payload, gen); errSend != nil {
+		t.Fatalf("sendHello failed: %v", errSend)
 	}
 
 	// 3. Verify
@@ -88,8 +115,8 @@ func TestSendHello(t *testing.T) {
 
 	// Unpack FluxMsg
 	var fMsg fluxmsg.FluxMsg
-	if err := msgpack.Unmarshal(msg.Data, &fMsg); err != nil {
-		t.Fatal(err)
+	if errUnmarshal := msgpack.Unmarshal(msg.Data, &fMsg); errUnmarshal != nil {
+		t.Fatal(errUnmarshal)
 	}
 
 	if fMsg.SrcGearID != 123 {
@@ -112,10 +139,13 @@ func TestSendHeartbeat(t *testing.T) {
 	defer s.Shutdown()
 	defer b.Close()
 
-	nc, _ := nats.Connect(url)
+	nc, err := nats.Connect(url)
+	if err != nil {
+		t.Fatalf("NATS connect failed: %v", err)
+	}
 	defer nc.Close()
 	sub, _ := nc.SubscribeSync("fluxrig.agent.heartbeat")
-	nc.Flush() // Ensure subscription is active before sending
+	_ = nc.Flush() // Ensure subscription is active before sending
 
 	gen, _ := idgen.New(1)
 	hbCfg := &config.RackConfig{}
@@ -129,8 +159,8 @@ func TestSendHeartbeat(t *testing.T) {
 	}
 
 	var fMsg fluxmsg.FluxMsg
-	if err := msgpack.Unmarshal(msg.Data, &fMsg); err != nil {
-		t.Fatalf("Failed to unmarshal FluxMsg: %v", err)
+	if errUnmarshal := msgpack.Unmarshal(msg.Data, &fMsg); errUnmarshal != nil {
+		t.Fatalf("Failed to unmarshal FluxMsg: %v", errUnmarshal)
 	}
 
 	if fMsg.SrcGearID != 456 {

@@ -1,22 +1,38 @@
+// Copyright 2025 JAAB Tech SAS, Uruguay
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package registry_test
 
 import (
 	"context"
+	"log/slog"
 	"testing"
 
 	"github.com/jaab-tech/fluxrig/pkg/registry"
 	"github.com/jaab-tech/fluxrig/pkg/store/duckdb"
 )
 
-func TestRegistry_ErrorPaths(t *testing.T) {
-	// Setup Store
-	s, err := duckdb.NewStore(":memory:")
+func TestRegistry_Comprehensive(t *testing.T) {
+	// 1. Setup Store
+	s, err := duckdb.NewStore(slog.Default(), "")
 	if err != nil {
-		t.Fatalf("Failed to create store: %v", err)
+		t.Fatalf("NewStore failed: %v", err)
 	}
-	defer s.Close()
-	if err := s.InitializeSchema(context.Background()); err != nil {
-		t.Fatalf("InitSchema failed: %v", err)
+	defer func() { _ = s.Close() }()
+
+	if errMig := s.Migrate(context.Background()); errMig != nil {
+		t.Fatalf("Migrate failed: %v", errMig)
 	}
 
 	reg := registry.NewDuckDBRegistry(s)
@@ -77,8 +93,14 @@ func TestRegistry_ErrorPaths(t *testing.T) {
 	// "dup-name" exists (from 4).
 	// Register another one
 	_, err = reg.Register(ctx, "victim", "rack", "victim", 9000, "1.2.3.4", map[string]any{"v": "v1"}, 502)
+	if err != nil {
+		t.Fatalf("Failed to register victim: %v", err)
+	}
 	// Try renaming "victim" to "dup-name"
-	_, err = reg.Approve(ctx, 300, "dup-name") // MachineID likely 101 or similar?
+	_, errApprove := reg.Approve(ctx, 300, "dup-name") // MachineID likely 101 or similar?
+	if errApprove == nil {
+		t.Log("Expected error (maybe) or just checking assignment")
+	}
 	// We need actual ID.
 	// But without list, we assume sequence.
 	// Let's get victim ID

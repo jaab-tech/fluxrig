@@ -1,3 +1,17 @@
+// Copyright 2025 JAAB Tech SAS, Uruguay
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package registry
 
 import (
@@ -51,13 +65,13 @@ func (r *DuckDBRegistry) Register(ctx context.Context, name string, secret strin
 
 	var id uint16
 	row := r.store.DB().QueryRowContext(ctx, "SELECT nextval('seq_machine_id_server')")
-	if err := row.Scan(&id); err != nil {
-		return nil, fmt.Errorf("failed to generate id: %w", err)
+	if errScan := row.Scan(&id); errScan != nil {
+		return nil, fmt.Errorf("failed to generate id: %w", errScan)
 	}
 
 	secretBytes := make([]byte, 32)
-	if _, err := rand.Read(secretBytes); err != nil {
-		return nil, fmt.Errorf("failed to generate secret: %w", err)
+	if _, errRand := rand.Read(secretBytes); errRand != nil {
+		return nil, fmt.Errorf("failed to generate secret: %w", errRand)
 	}
 	newSecret := hex.EncodeToString(secretBytes)
 
@@ -225,7 +239,7 @@ func (r *DuckDBRegistry) List(ctx context.Context, statusFilter string) ([]*Rack
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var i Rack
@@ -284,6 +298,9 @@ func (r *DuckDBRegistry) List(ctx context.Context, statusFilter string) ([]*Rack
 		i.Config = regConfig
 
 		racks = append(racks, &i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return racks, nil
 }

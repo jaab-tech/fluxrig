@@ -17,11 +17,11 @@ LDFLAGS := -w -s \
 	-X '$(MODULE_NAME)/pkg/version.BuildDate=$(DATE)' \
 	-X '$(MODULE_NAME)/pkg/version.Dirty=$(DIRTY)'
 
-.PHONY: all build test lint clean help
+.PHONY: all build test lint clean help catalog
 
 all: lint test build
 
-build: lint ## Build fluxrig binary
+build: lint catalog ## Build fluxrig binary
 	@echo "--------------------------------------------------"
 	@echo "Building fluxrig..."
 	@echo "  Version:  $(VERSION)"
@@ -34,6 +34,10 @@ build: lint ## Build fluxrig binary
 
 # Mixer (Requires CGO)
 	go build $(GO_FLAGS) -ldflags "$(LDFLAGS)" -o bin/fluxrig-mixer ./cmd/fluxrig-mixer
+
+catalog: ## Generate log message catalog
+	@echo "Generating log catalog..."
+	@go run scripts/catalog_logs.go > ops/docs/internal/log_catalog.csv
 
 test: ## Run unit tests with race detection and coverage
 	@echo "Running tests..."
@@ -58,45 +62,25 @@ install: build ## Install binaries to $GOPATH/bin
 verify: build ## Run quick E2E verification script
 	@./test/debug_e2e.sh
 
-regression: build ## Run full E2E regression suite (Simple, Conflict, Offline, CLI)
+regression: build ## Run full E2E regression suite (Unified Runner)
 	@echo "--------------------------------------------------"
-	@echo "Running Regression Suite..."
-	@echo "--------------------------------------------------"
-	@echo "--------------------------------------------------"
-	@echo ">>> [1/8] Running Simple E2E..."
-	@./test/e2e_simple/run.sh || { echo "❌ Simple E2E Failed"; exit 1; }
-	@echo ">>> [2/8] Running Registry E2E..."
-	@./test/e2e_registry/run.sh || { echo "❌ Registry E2E Failed"; exit 1; }
-	@echo ">>> [3/8] Running Conflict E2E..."
-	@./test/e2e_conflict/run.sh || { echo "❌ Conflict E2E Failed"; exit 1; }
-	@echo ">>> [4/8] Running Offline E2E..."
-	@./test/e2e_offline/run.sh || { echo "❌ Offline E2E Failed"; exit 1; }
-	@echo ">>> [5/8] Running CLI E2E..."
-	@./test/e2e_cli/run.sh || { echo "❌ CLI E2E Failed"; exit 1; }
-	@echo "--------------------------------------------------"
-	@echo ">>> [6/8] Running Telemetry E2E..."
-	@./test/e2e_telemetry/run.sh || { echo "❌ Telemetry E2E Failed"; exit 1; }
-	@echo "--------------------------------------------------"
-	@echo ">>> [7/8] Running Simple TCP E2E..."
-	@./test/e2e_simple_tcp/run.sh || { echo "❌ Simple TCP E2E Failed"; exit 1; }
-	@echo "--------------------------------------------------"
-	@echo ">>> [8/8] Running Bento Load E2E..."
-	@./test/e2e_load/run.sh || { echo "❌ Bento Load E2E Failed"; exit 1; }
-	@echo "--------------------------------------------------"
-	@echo "✅ REGRESSION SUITE PASSED"
-	@echo "--------------------------------------------------"
+	@echo "Running Regression Suite (Unified)..."
+	@test/e2e/run_all.sh
 
 clean: ## Remove build artifacts and temporary files
 	@echo "Cleaning..."
 	rm -rf bin/
 	rm -rf test/test_logs/
 	# Clean E2E test artifacts (recursive data/logs)
-	find test/e2e_* -name "data" -type d -exec rm -rf {} +
-	find test/e2e_* -name "logs" -type d -exec rm -rf {} +
-	find test/e2e_* -name "*.log" -delete
-	rm -rf test/work/
-	rm -rf test/e2e_*/work
-	rm -rf test/e2e_*/work_*
+	find test/e2e -name "data" -type d -exec rm -rf {} +
+	find test/e2e -name "logs" -type d -exec rm -rf {} +
+	find test/e2e -name "*.log" -delete
+	rm -rf test/e2e/*/work
+	rm -rf test/e2e/*/work_*
+	# Clean comprehensive test artifacts
+	rm -rf pkg/ingest/comprehensive-mixer/
+	rm -rf pkg/ingest/test-mixer/
+	$(MAKE) clean-robot
 	rm -rf test/test_logs/
 	rm -rf test/test_logs/
 	rm -rf test_data/
@@ -109,6 +93,7 @@ clean: ## Remove build artifacts and temporary files
 	rm -f fluxrig_test.toml
 	rm -f cluster.key
 	rm -f cluster.key.pub
+	rm -f ops/docs/internal/log_catalog.csv
 	go clean -cache
 
 # Python / Test Automation
@@ -142,3 +127,27 @@ test-scenarios: $(VENV) build ## Run Robot Framework Scenarios (Multi-Rack)
 
 help: ## Display this help screen
 	@grep -h -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}'
+# Robot Framework (Validation)
+.PHONY: robot
+robot: build ## Run Robot Framework validation suite
+	@echo "Running Robot Framework tests..."
+	@cd test/robot && ./run.sh
+
+
+
+.PHONY: clean-robot
+clean-robot: ## Clean Robot Framework artifacts
+	@rm -rf test/robot/.venv
+	@rm -rf test/robot/results
+	@rm -f test/robot/log.html test/robot/report.html test/robot/output.xml
+
+.PHONY: openapi
+openapi: ## Generate OpenAPI specification
+	@echo "Generating OpenAPI spec..."
+	@if command -v swag >/dev/null; then \
+		swag init -g cmd/fluxrig-mixer/main.go -o ops/docs/public/5_reference --outputTypes yaml; \
+	else \
+		$(shell go env GOPATH)/bin/swag init -g cmd/fluxrig-mixer/main.go -o ops/docs/public/5_reference --outputTypes yaml; \
+	fi
+	@mv ops/docs/public/5_reference/swagger.yaml ops/docs/public/5_reference/openapi.yaml
+	@echo "Spec generated at ops/docs/public/5_reference/openapi.yaml"

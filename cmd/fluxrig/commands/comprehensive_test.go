@@ -1,3 +1,17 @@
+// Copyright 2025 JAAB Tech SAS, Uruguay
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package commands
 
 import (
@@ -66,6 +80,7 @@ func TestTelemetryCommands(t *testing.T) {
 	// The command writes to os.Stdout wrapped in TabWriter.
 	// We can't easily capture os.Stdout without pipe tricks.
 	// But coverage counts execution.
+	// we can check err.
 	if err := logsCmd.Execute(); err != nil {
 		t.Errorf("logsCmd failed: %v", err)
 	}
@@ -109,7 +124,7 @@ func TestTelemetryCommands(t *testing.T) {
 
 func TestKeysCommands(t *testing.T) {
 	tmpDir, _ := os.MkdirTemp("", "keys-test")
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// 1. Gen Cluster
 	// fluxrig keys gen-cluster -d tmpDir
@@ -171,7 +186,7 @@ func TestAdminRacksCommands(t *testing.T) {
 		switch {
 		case path == "/api/v1/racks" && r.Method == "GET":
 			// List
-			fmt.Fprintln(w, `[{"machine_id":1,"name":"rack-1","status":"active"}]`)
+			_, _ = fmt.Fprintln(w, `[{"machine_id":1,"name":"rack-1","status":"active"}]`)
 		case path == "/api/v1/racks/1/approve" && r.Method == "POST":
 			w.WriteHeader(http.StatusOK)
 		case path == "/api/v1/racks/1/suspend" && r.Method == "POST":

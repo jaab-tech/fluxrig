@@ -1,8 +1,23 @@
+// Copyright 2025 JAAB Tech SAS, Uruguay
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package shipper
 
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"sync"
 )
 
@@ -22,14 +37,14 @@ type Cursor struct {
 func NewCursor(path string) (*Cursor, error) {
 	c := &Cursor{path: path}
 
-	f, err := os.Open(path)
+	f, err := os.Open(filepath.Clean(path))
 	if os.IsNotExist(err) {
 		return c, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	if err := json.NewDecoder(f).Decode(&c.State); err != nil {
 		return c, nil
@@ -45,13 +60,13 @@ func (c *Cursor) Save() error {
 
 	// Atomic write via temp file
 	tmpPath := c.path + ".tmp"
-	f, err := os.Create(tmpPath)
+	f, err := os.Create(filepath.Clean(tmpPath))
 	if err != nil {
 		return err
 	}
 
 	if err := json.NewEncoder(f).Encode(c.State); err != nil {
-		f.Close()
+		_ = f.Close()
 		return err
 	}
 	if err := f.Close(); err != nil {

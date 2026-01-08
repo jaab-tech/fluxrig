@@ -1,3 +1,17 @@
+// Copyright 2025 JAAB Tech SAS, Uruguay
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package controller
 
 import (
@@ -13,8 +27,8 @@ import (
 
 func TestScenarioController_Metadata(t *testing.T) {
 	// 1. Setup
-	store, _ := duckdb.NewStore(":memory:")
-	_ = store.InitializeSchema(context.Background())
+	store, _ := duckdb.NewStore(slog.Default(), ":memory:")
+	_ = store.Migrate(context.Background())
 	tmpDir := t.TempDir()
 	gen, _ := idgen.New(1)
 	sc := NewScenarioController(slog.Default(), tmpDir, store, gen, 1)
@@ -69,8 +83,8 @@ racks: []
 }
 
 func TestScenarioController_ComplexActivation(t *testing.T) {
-	store, _ := duckdb.NewStore(":memory:")
-	_ = store.InitializeSchema(context.Background())
+	store, _ := duckdb.NewStore(slog.Default(), ":memory:")
+	_ = store.Migrate(context.Background())
 	tmpDir := t.TempDir()
 	gen, _ := idgen.New(1)
 	sc := NewScenarioController(slog.Default(), tmpDir, store, gen, 1)
@@ -139,12 +153,12 @@ func (m *MockScenarioBus) Publish(subject string, msg *fluxmsg.FluxMsg) error {
 
 func TestScenarioController_LifeCycle(t *testing.T) {
 	// 1. Setup DB
-	store, err := duckdb.NewStore(":memory:")
+	store, err := duckdb.NewStore(slog.Default(), ":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.InitializeSchema(context.Background()); err != nil {
-		t.Fatal(err)
+	if errMig := store.Migrate(context.Background()); errMig != nil {
+		t.Fatal(errMig)
 	}
 
 	// 2. Setup Dependencies

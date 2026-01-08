@@ -1,3 +1,17 @@
+// Copyright 2025 JAAB Tech SAS, Uruguay
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package telemetry
 
 import (
@@ -71,10 +85,16 @@ func (h *CaptureHandler) WithGroup(name string) slog.Handler       { return h }
 // Mock Bus
 type MockBus struct{}
 
-func (m *MockBus) Connect(url string, name string, connectTimeout time.Duration, reconnectWait time.Duration) error {
+func (m *MockBus) Connect(url string, opts bus.ConnectOptions) error {
 	return nil
 }
 func (m *MockBus) Publish(subject string, msg *fluxmsg.FluxMsg) error { return nil }
+func (m *MockBus) PublishWithContext(ctx context.Context, subject string, msg *fluxmsg.FluxMsg) error {
+	return nil
+}
+func (m *MockBus) PublishRaw(subject string, data []byte, fluxID uint64) error {
+	return nil
+}
 func (m *MockBus) Subscribe(subject string, handler bus.Handler) (bus.Subscription, error) {
 	return nil, nil
 }
@@ -92,14 +112,6 @@ func TestInit_Validation(t *testing.T) {
 	// Init(ctx, cfg, bus, buf, idgen)
 	_, err := Init(context.Background(), Config{}, &MockBus{}, nil, nil)
 	if err == nil {
-		// Init might succeed partially or return error.
-		// With nil bus, it might fail inside.
-		// Let's expect failure due to missing critical parts if any.
-		// Actually, without bus, `Init` proceeds until it needs it?
-		// It uses `b` in `NewNatsWriter`.
-		// If bus is nil, `NewNatsWriter` stores nil bus.
-		// `Init` returns init function.
-		// The error return is for immediate setup failure (e.g. dir creation).
-		// If it succeeds, we should call cleanup
+		t.Logf("Got expected error (or not): %v", err)
 	}
 }

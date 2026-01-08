@@ -1,7 +1,22 @@
+// Copyright 2025 JAAB Tech SAS, Uruguay
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package duckdb
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -14,29 +29,26 @@ func TestStore_Comprehensive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// 1. NewStore (File-based to test Flush)
 	dbPath := filepath.Join(tmpDir, "test.duckdb")
-	s, err := NewStore(dbPath)
+	s, err := NewStore(slog.Default(), dbPath)
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	ctx := context.Background()
 
 	// 2. Schemas
-	if err := s.InitializeSchema(ctx); err != nil {
-		t.Fatalf("InitializeSchema failed: %v", err)
-	}
-	if err := s.InitializeTelemetrySchema(ctx); err != nil {
-		t.Fatalf("InitializeTelemetrySchema failed: %v", err)
+	if errMig := s.Migrate(ctx); errMig != nil {
+		t.Fatalf("Migrate failed: %v", errMig)
 	}
 
 	// 3. Registry Operations (Mixer)
-	if err := s.RegisterMixer(ctx, 1, "test-mixer", 1001, "localhost:8080", "v1"); err != nil {
-		t.Fatalf("RegisterMixer failed: %v", err)
+	if errReg := s.RegisterMixer(ctx, 1, "test-mixer", 1001, "localhost:8080", "v1"); errReg != nil {
+		t.Fatalf("RegisterMixer failed: %v", errReg)
 	}
 
 	id, err := s.GetEntityIDByName(ctx, "test-mixer")
@@ -48,13 +60,13 @@ func TestStore_Comprehensive(t *testing.T) {
 	}
 
 	// 4. Registry Operations (Snake)
-	if err := s.RegisterSnake(ctx, "test-snake", 2001, "v1", 3001, 1001, "1.2.3.4", 9000, "127.0.0.1", 8080, 50); err != nil {
-		t.Fatalf("RegisterSnake failed: %v", err)
+	if errSnake := s.RegisterSnake(ctx, "test-snake", 2001, "v1", 3001, 1001, "1.2.3.4", 9000, "127.0.0.1", 8080, 50); errSnake != nil {
+		t.Fatalf("RegisterSnake failed: %v", errSnake)
 	}
 
 	stats := map[string]any{"uptime": "1h"}
-	if err := s.UpdateSnakeStats(ctx, 2001, stats); err != nil {
-		t.Errorf("UpdateSnakeStats failed: %v", err)
+	if errStats := s.UpdateSnakeStats(ctx, 2001, stats); errStats != nil {
+		t.Errorf("UpdateSnakeStats failed: %v", errStats)
 	}
 
 	// 5. Telemetry Logs Insert & Query
@@ -98,13 +110,14 @@ func TestStore_Comprehensive(t *testing.T) {
 
 	// 7. Flush Telemetry
 	// This should move data to parquet
-	if err := s.FlushTelemetry(ctx, tmpDir); err != nil {
-		t.Fatalf("FlushTelemetry failed: %v", err)
+	// This should move data to parquet
+	if errFlush := s.FlushTelemetry(ctx, tmpDir); errFlush != nil {
+		t.Fatalf("FlushTelemetry failed: %v", errFlush)
 	}
 
 	// Verify buffer empty
 	var count int
-	s.db.QueryRow("SELECT count(*) FROM telemetry_logs").Scan(&count)
+	_ = s.db.QueryRow("SELECT count(*) FROM telemetry_logs").Scan(&count)
 	if count != 0 {
 		t.Errorf("Expected 0 logs after flush, got %d", count)
 	}
@@ -123,8 +136,7 @@ func TestStore_Comprehensive(t *testing.T) {
 		t.Logf("QueryLogsFiltered with Parquet failed (expected if extension issues): %v", err)
 	} else {
 		if len(qLogs) != 1 {
-			// If 0, maybe parquet config issue.
-			// t.Logf("Parquet read returned 0 rows usually requires duckdb parquet extension loaded")
+			t.Logf("Warning: Parquet read returned %d rows (expected 1). DuckDB Parquet extension might be missing.", len(qLogs))
 		}
 	}
 
@@ -155,11 +167,7 @@ func TestStore_Comprehensive(t *testing.T) {
 	// RegisterRack is not exposed? Ah, RegisterRoutes calls it?
 	// Store has ActivateRack(name).
 	if err := s.ActivateRack(ctx, "test-rack-x"); err != nil {
-		// Might fail if rack not found?
-		// Ensure rack exists.
-		// RegisterRack(ctx, id, name, secret, ip, port, version, mixerID)
-		// But in store.go, RegisterRack might be private?
-		// Checking store.go...
+		t.Logf("ActivateRack failed (expected if rack missing): %v", err)
 	}
 
 	// 9. Cleanup

@@ -1,8 +1,23 @@
+// Copyright 2025 JAAB Tech SAS, Uruguay
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package lockfile
 
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"syscall"
 )
 
@@ -16,7 +31,7 @@ type Lock struct {
 // If the lock is already held by another process, it returns an error.
 func Acquire(path string) (*Lock, error) {
 	// 1. Open or create the lock file
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0666)
+	f, err := os.OpenFile(filepath.Clean(path), os.O_RDWR|os.O_CREATE, 0600)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open lock file %s: %w", path, err)
 	}
@@ -26,7 +41,7 @@ func Acquire(path string) (*Lock, error) {
 	// LOCK_NB = Non-blocking (fail if unable to acquire)
 	err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 	if err != nil {
-		f.Close()
+		_ = f.Close()
 		if err == syscall.EWOULDBLOCK {
 			return nil, fmt.Errorf("lock already held by another process")
 		}
