@@ -1,0 +1,8 @@
+{%- if title -%}
+<div class="fluxrig-chart" style="margin: 5px 0; padding: 8px; background-color: #ffffff; border-radius: 4px;"><h3 style="margin: 0 0 4px 0; color: #333333; font-family: sans-serif; font-size: 11px; font-weight: normal;">{{ title }}</h3>
+{%- else -%}
+<div class="fluxrig-chart" style="margin: 5px 0; padding: 8px; background-color: #ffffff; border-radius: 4px;">
+{%- endif -%}
+<div style="width: 100%; max-width: 450px; height: 180px;"><canvas id="{{ chart_id }}"></canvas></div></div>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script>(function initChart(){if(typeof Chart==='undefined'){setTimeout(initChart,100);return;}var ctx=document.getElementById('{{ chart_id }}');if(!ctx)return;new Chart(ctx,{type:'bar',data:{labels:{{ labels | tojson }},datasets:[{label:'{{ dataset_label }}',data:{{ data | tojson }},backgroundColor:'{{ color }}',borderWidth:1}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{y:{beginAtZero:true,ticks:{precision:0,font:{size:9}}},x:{ticks:{font:{size:9}}}}}});})();</script>

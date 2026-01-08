@@ -1,3 +1,17 @@
+// Copyright 2025 JAAB Tech SAS, Uruguay
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package duckdb
 
 import (
@@ -5,25 +19,24 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	_ "github.com/marcboeker/go-duckdb"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
-
-	"github.com/jaab-tech/fluxrig/pkg/idgen"
-	_ "github.com/marcboeker/go-duckdb"
 )
 
 // Store manages the DuckDB connection.
 type Store struct {
 	db      *sql.DB
-	dataDir string // Directory containing the DB file and telemetry
+	dataDir string       // Directory containing the DB file and telemetry
+	log     *slog.Logger // Logger for store operations
 }
 
 // NewStore opens a DuckDB database file.
-func NewStore(path string) (*Store, error) {
+func NewStore(log *slog.Logger, path string) (*Store, error) {
 	// If path is empty, use in-memory
 	dsn := path
 	if dsn == "" {
@@ -45,7 +58,7 @@ func NewStore(path string) (*Store, error) {
 		dataDir = filepath.Dir(path)
 	}
 
-	return &Store{db: db, dataDir: dataDir}, nil
+	return &Store{db: db, dataDir: dataDir, log: log.With("component", "STORE")}, nil
 }
 
 // Close closes the database connection.
@@ -58,111 +71,8 @@ func (s *Store) DB() *sql.DB {
 	return s.db
 }
 
-// InitializeSchema creates the foundational tables if they don't exist.
-func (s *Store) InitializeSchema(ctx context.Context) error {
-	query := `
-	CREATE TABLE IF NOT EXISTS registry (
-		entity_id UBIGINT PRIMARY KEY,    -- fluxEntityID
-		type_id USMALLINT,                -- 1=Cluster, 2=Mixer, 4=Rack, 5=Gear, etc.
-		machine_id USMALLINT,             -- Rack/Mixer MachineID component
-		mixer_id UBIGINT,                 -- Parent Mixer entity_id (NULL for Cluster/Mixer)
-		name TEXT,                        -- Unique Hostname/Name
-		status TEXT DEFAULT 'offline',    -- active/pending/offline
-		version TEXT,
-		started_at TIMESTAMP,
-		last_seen TIMESTAMP,
-		stats JSON,
-		config JSON,
-		attributes JSON                   -- Unified Attributes (IP, Port, Secret, etc.)
-	);
-	
-	CREATE SEQUENCE IF NOT EXISTS seq_machine_id_server START 100;
-	CREATE UNIQUE INDEX IF NOT EXISTS idx_registry_name ON registry (name);
-	
-	CREATE TABLE IF NOT EXISTS entity_types (
-		id USMALLINT PRIMARY KEY,
-		name TEXT
-	);
-	`
-	if _, err := s.db.ExecContext(ctx, query); err != nil {
-		return err
-	}
-
-	// Populate entity_types from idgen
-	for id, name := range idgen.EntityTypes {
-		_, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO entity_types (id, name) VALUES (?, ?)", uint16(id), name)
-		if err != nil {
-			return fmt.Errorf("failed to insert entity type %s: %w", name, err)
-		}
-	}
-
-	return nil
-}
-
-// InitializeTelemetrySchema creates tables for embedded observability.
-func (s *Store) InitializeTelemetrySchema(ctx context.Context) error {
-	// 1. Logs
-	_, err := s.db.ExecContext(ctx, `
-		CREATE TABLE IF NOT EXISTS telemetry_logs (
-			timestamp TIMESTAMP,
-			entity_id UBIGINT,
-			entity_type TEXT,
-			entity_name TEXT,
-			trace_id TEXT,
-			span_id TEXT,
-			severity TEXT,
-			source_file TEXT,
-			source_line INTEGER,
-			source_func TEXT,
-			body TEXT,
-			attributes JSON
-		);
-	`)
-	if err != nil {
-		return fmt.Errorf("failed to create logs table: %w", err)
-	}
-
-	// 2. Spans (Traces)
-	_, err = s.db.ExecContext(ctx, `
-		CREATE TABLE IF NOT EXISTS telemetry_spans (
-			start_time TIMESTAMP,
-			end_time TIMESTAMP,
-			entity_id UBIGINT,
-			entity_name TEXT,
-			trace_id TEXT,
-			span_id TEXT,
-			parent_span_id TEXT,
-			name TEXT,
-			kind TEXT,
-			status_code TEXT,
-			status_message TEXT,
-			attributes JSON
-		);
-	`)
-	if err != nil {
-		return fmt.Errorf("failed to create spans table: %w", err)
-	}
-
-	// 3. Metrics (Simplified)
-	_, err = s.db.ExecContext(ctx, `
-		CREATE TABLE IF NOT EXISTS telemetry_metrics (
-			timestamp TIMESTAMP,
-			entity_id UBIGINT,
-			entity_name TEXT,
-			name TEXT,
-			description TEXT,
-			unit TEXT,
-			type TEXT,
-			value DOUBLE,
-			attributes JSON
-		);
-	`)
-	if err != nil {
-		return fmt.Errorf("failed to create metrics table: %w", err)
-	}
-
-	return nil
-}
+// InitializeSchema removed (Use Migrate)
+// InitializeTelemetrySchema removed (Use Migrate)
 
 // Wipe drops all tables. internal use for testing.
 func (s *Store) Wipe(ctx context.Context) error {
@@ -187,7 +97,7 @@ func (s *Store) FlushTelemetry(ctx context.Context, dataDir string) error {
 
 	for table, dirName := range tables {
 		dir := filepath.Join(dataDir, dirName, ts.Format("2006/01/02/15"))
-		if err := os.MkdirAll(dir, 0755); err != nil {
+		if err := os.MkdirAll(dir, 0750); err != nil {
 			return fmt.Errorf("failed to create dir %s: %w", dir, err)
 		}
 
@@ -218,6 +128,70 @@ func (s *Store) FlushTelemetry(ctx context.Context, dataDir string) error {
 	return tx.Commit()
 }
 
+// InitializeArchiverSchema removed (Use Migrate)
+
+// FlushArchiverBuffer exports buffered messages to Parquet, partitioned by WireID.
+func (s *Store) FlushArchiverBuffer(ctx context.Context, dataDir string) error {
+	ts := time.Now().UTC()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// 1. Get Distinct WireIDs with data
+	rows, err := tx.QueryContext(ctx, "SELECT DISTINCT wire_id FROM archiver_buffer")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var wireIDs []uint64
+	for rows.Next() {
+		var wid uint64
+		if err := rows.Scan(&wid); err == nil {
+			wireIDs = append(wireIDs, wid)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_ = rows.Close()
+
+	if len(wireIDs) == 0 {
+		return nil // Nothing to flush
+	}
+
+	// 2. Export each WireID to its own folder structure
+	for _, wid := range wireIDs {
+		// Path: data/messages/<wire_id>/YYYY/MM/DD/HH
+		dir := filepath.Join(dataDir, "messages", fmt.Sprintf("%d", wid), ts.Format("2006/01/02/15"))
+		if err := os.MkdirAll(dir, 0750); err != nil {
+			return fmt.Errorf("failed to create dir %s: %w", dir, err)
+		}
+
+		filename := fmt.Sprintf("messages_%d_%d.parquet", wid, ts.UnixNano())
+		path := filepath.Join(dir, filename)
+
+		// SQL: COPY (SELECT ...) TO 'path'
+		query := fmt.Sprintf( //nolint:gosec
+			"COPY (SELECT ts, flux_id, trace_id, subject, payload, meta FROM archiver_buffer WHERE wire_id = %d) TO '%s' (FORMAT 'parquet', COMPRESSION 'zstd')",
+			wid, path)
+
+		if _, err := tx.ExecContext(ctx, query); err != nil {
+			return fmt.Errorf("failed to export wire %d: %w", wid, err)
+		}
+	}
+
+	// 3. Truncate Buffer
+	if _, err := tx.ExecContext(ctx, "DELETE FROM archiver_buffer"); err != nil {
+		return fmt.Errorf("failed to truncate archiver_buffer: %w", err)
+	}
+
+	return tx.Commit()
+}
+
 // RegisterMixer upserts the Mixer's status in the registry.
 func (s *Store) RegisterMixer(ctx context.Context, mid uint16, name string, eid uint64, addr, version string) error {
 	now := time.Now()
@@ -227,8 +201,8 @@ func (s *Store) RegisterMixer(ctx context.Context, mid uint16, name string, eid 
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if _, err := tx.ExecContext(ctx, "DELETE FROM registry WHERE name = ? AND type_id = 2", name); err != nil {
-		return err
+	if _, errDel := tx.ExecContext(ctx, "DELETE FROM registry WHERE name = ? AND type_id = 2", name); errDel != nil {
+		return errDel
 	}
 
 	attrs := map[string]any{
@@ -265,8 +239,8 @@ func (s *Store) RegisterSnake(ctx context.Context, name string, eid uint64, vers
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if _, err := tx.ExecContext(ctx, "DELETE FROM registry WHERE entity_id = ? AND type_id = 9", eid); err != nil {
-		return err
+	if _, errDel := tx.ExecContext(ctx, "DELETE FROM registry WHERE entity_id = ? AND type_id = 9", eid); errDel != nil {
+		return errDel
 	}
 
 	attrs := map[string]any{
@@ -355,8 +329,8 @@ func (s *Store) RegisterScenario(ctx context.Context, eid uint64, name, version 
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if _, err := tx.ExecContext(ctx, "DELETE FROM registry WHERE name = ? AND type_id = 10", name); err != nil {
-		return err
+	if _, errDel := tx.ExecContext(ctx, "DELETE FROM registry WHERE name = ? AND type_id = 10", name); errDel != nil {
+		return errDel
 	}
 
 	attrs := map[string]any{
@@ -395,8 +369,8 @@ func (s *Store) RegisterGear(ctx context.Context, eid uint64, name, gearType, mo
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if _, err := tx.ExecContext(ctx, "DELETE FROM registry WHERE name = ? AND type_id = 5", name); err != nil {
-		return err
+	if _, errDel := tx.ExecContext(ctx, "DELETE FROM registry WHERE name = ? AND type_id = 5", name); errDel != nil {
+		return errDel
 	}
 
 	attrs := map[string]any{
@@ -432,8 +406,8 @@ func (s *Store) RegisterWire(ctx context.Context, eid uint64, fromName, toName s
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if _, err := tx.ExecContext(ctx, "DELETE FROM registry WHERE name = ? AND type_id = 8", name); err != nil {
-		return err
+	if _, errDel := tx.ExecContext(ctx, "DELETE FROM registry WHERE name = ? AND type_id = 8", name); errDel != nil {
+		return errDel
 	}
 
 	attrs := map[string]any{
@@ -464,8 +438,9 @@ func (s *Store) RegisterPort(ctx context.Context, eid uint64, name string, portT
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// Delete existing port with same name and type
-	if _, err := tx.ExecContext(ctx, "DELETE FROM registry WHERE name = ? AND type_id = ?", name, portType); err != nil {
+	// 1. Delete Existing
+	_, err = tx.ExecContext(ctx, "DELETE FROM registry WHERE name = ? AND type_id = ?", name, portType)
+	if err != nil {
 		return err
 	}
 
@@ -607,7 +582,7 @@ func (s *Store) QueryLogsFiltered(ctx context.Context, q LogQuery) ([]TelemetryL
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var logs []TelemetryLog
 	for rows.Next() {
@@ -627,6 +602,9 @@ func (s *Store) QueryLogsFiltered(ctx context.Context, q LogQuery) ([]TelemetryL
 		}
 
 		logs = append(logs, l)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return logs, nil
 }
@@ -712,7 +690,7 @@ func (s *Store) QueryMetricsFiltered(ctx context.Context, q MetricQuery) ([]Tele
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var metrics []TelemetryMetric
 	for rows.Next() {
@@ -732,6 +710,9 @@ func (s *Store) QueryMetricsFiltered(ctx context.Context, q MetricQuery) ([]Tele
 		}
 
 		metrics = append(metrics, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return metrics, nil
 }

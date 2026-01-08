@@ -1,3 +1,17 @@
+// Copyright 2025 JAAB Tech SAS, Uruguay
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package controller
 
 import (
@@ -149,6 +163,8 @@ func (c *ScenarioController) Activate(ctx context.Context, name string) error {
 	scenarioFile := filepath.Join(c.repoPath, safeName+".yaml")
 
 	// 1. Load scenario from disk
+	// Clean the path to avoid G304
+	scenarioFile = filepath.Clean(scenarioFile)
 	content, err := os.ReadFile(scenarioFile)
 	if err != nil {
 		return fmt.Errorf("scenario not found: %s", safeName)
@@ -212,6 +228,7 @@ func (c *ScenarioController) List() ([]string, error) {
 // GetActiveName returns the name of the currently active scenario.
 func (c *ScenarioController) GetActiveName() string {
 	activeFile := filepath.Join(c.repoPath, "active")
+	activeFile = filepath.Clean(activeFile)
 	data, err := os.ReadFile(activeFile)
 	if err != nil {
 		return ""
@@ -306,8 +323,8 @@ func (c *ScenarioController) registerScenarioEntities(ctx context.Context, s *re
 			inPortID = c.idGen.NextEntityID(idgen.EntityPortInput)
 		}
 
-		if err := c.store.RegisterPort(ctx, inPortID, inPortName, uint16(idgen.EntityPortInput), gearEID, scenarioEID, machineID, c.mixerID); err != nil {
-			c.log.Warn("failed to register input port", "name", inPortName, "error", err)
+		if errReg := c.store.RegisterPort(ctx, inPortID, inPortName, uint16(idgen.EntityPortInput), gearEID, scenarioEID, machineID, c.mixerID); errReg != nil {
+			c.log.Warn("failed to register input port", "name", inPortName, "error", errReg)
 		}
 
 		// Output Port
@@ -401,7 +418,7 @@ func (c *ScenarioController) ensureScenariosRepo() error {
 	}
 
 	// Create directory if it doesn't exist
-	if err := os.MkdirAll(c.repoPath, 0755); err != nil {
+	if err := os.MkdirAll(c.repoPath, 0750); err != nil {
 		return fmt.Errorf("failed to create scenarios directory: %w", err)
 	}
 

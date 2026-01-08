@@ -1,3 +1,6 @@
+<!-- Copyright (c) 2025 JAAB Tech SAS, Uruguay All Rights Reserved -->
+<!-- See https://jaab.tech -->
+
 # fluxrig
 
 <p align="center">

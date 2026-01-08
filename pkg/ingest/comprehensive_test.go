@@ -1,8 +1,23 @@
+// Copyright 2025 JAAB Tech SAS, Uruguay
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package ingest_test
 
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -15,21 +30,21 @@ import (
 func TestTelemetrySink_Comprehensive(t *testing.T) {
 	mockBus := bus.NewMockBus()
 	// Use In-Memory DB
-	store, err := duckdb.NewStore(":memory:")
+	store, err := duckdb.NewStore(slog.Default(), ":memory:")
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
-	if err := store.InitializeTelemetrySchema(context.Background()); err != nil {
+	if err := store.Migrate(context.Background()); err != nil {
 		t.Fatalf("Failed to init schema: %v", err)
 	}
 
-	sink := ingest.NewTelemetrySink(mockBus, store, "comprehensive-mixer")
+	sink := ingest.NewTelemetrySink(mockBus, store, "comprehensive-mixer", 1*time.Minute, nil)
 	if err := sink.Start(); err != nil {
 		t.Fatalf("Failed to start sink: %v", err)
 	}
-	defer sink.Stop()
+	defer func() { _ = sink.Stop() }()
 
 	// 1. Metric Injection
 	metricMsg := fluxmsg.New()

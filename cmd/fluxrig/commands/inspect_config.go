@@ -1,6 +1,21 @@
+// Copyright 2025 JAAB Tech SAS, Uruguay
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package commands
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -25,16 +40,16 @@ var configCmd = &cobra.Command{
 
 		fmt.Printf("[CLI] Querying Mixer Config at %s...\n", apiURL)
 		// 1. Get Mixer Config
-		fmt.Println("--- Mixer Configuration ---")
-		if err := showMixerConfig(apiURL); err != nil {
+		_, _ = fmt.Println("--- Mixer Configuration ---")
+		if err := showMixerConfig(cmd.Context(), apiURL); err != nil {
 			fmt.Printf("Warning: failed to get mixer configuration: %v\n", err)
 		}
-		fmt.Println()
+		_, _ = fmt.Println()
 
 		fmt.Printf("[CLI] Querying Racks Config at %s...\n", apiURL)
 		// 2. Get Racks Config
 		fmt.Println("--- Racks Configuration ---")
-		if err := showRacksConfig(apiURL); err != nil {
+		if err := showRacksConfig(cmd.Context(), apiURL); err != nil {
 			fmt.Printf("Warning: failed to get racks configuration: %v\n", err)
 		}
 
@@ -42,12 +57,16 @@ var configCmd = &cobra.Command{
 	},
 }
 
-func showMixerConfig(apiURL string) error {
-	resp, err := http.Get(apiURL + "/api/v1/config")
+func showMixerConfig(ctx context.Context, apiURL string) error {
+	req, err := http.NewRequestWithContext(ctx, "GET", apiURL+"/api/v1/config", nil)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("server returned error: %s", resp.Status)
@@ -65,12 +84,16 @@ func showMixerConfig(apiURL string) error {
 	return enc.Encode(config)
 }
 
-func showRacksConfig(apiURL string) error {
-	resp, err := http.Get(apiURL + "/api/v1/racks")
+func showRacksConfig(ctx context.Context, apiURL string) error {
+	req, err := http.NewRequestWithContext(ctx, "GET", apiURL+"/api/v1/racks", nil)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("server returned error: %s", resp.Status)
@@ -88,16 +111,16 @@ func showRacksConfig(apiURL string) error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(w, "ID\tNAME\tSTATUS\tCONFIGURATION")
+	_, _ = fmt.Fprintln(w, "ID\tNAME\tSTATUS\tCONFIGURATION")
 	for _, r := range racks {
 		configStr := "no-config"
 		if len(r.Config) > 0 {
 			c, _ := json.Marshal(r.Config)
 			configStr = string(c)
 		}
-		fmt.Fprintf(w, "%d\t%s\t%s\t%s\n", r.MachineID, r.Name, r.Status, configStr)
+		_, _ = fmt.Fprintf(w, "%d\t%s\t%s\t%s\n", r.MachineID, r.Name, r.Status, configStr)
 	}
-	w.Flush()
+	_ = w.Flush()
 	return nil
 }
 

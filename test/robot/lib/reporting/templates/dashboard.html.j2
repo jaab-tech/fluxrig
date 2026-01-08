@@ -1,0 +1,9 @@
+{%- if title -%}
+<div class="fluxrig-dashboard" style="padding: 8px; background-color: #1a1a2e; border: 1px solid #3a3a5e; border-radius: 4px; margin: 2px 0;"><h2 style="margin: 0 0 5px 0; color: #ffffff; font-family: monospace; font-size: 13px; border-bottom: 1px solid #4a90d9; padding-bottom: 4px;">{{ title }}</h2>
+{%- else -%}
+<div class="fluxrig-dashboard" style="padding: 8px; background-color: #1a1a2e; border: 1px solid #3a3a5e; border-radius: 4px; margin: 2px 0;">
+{%- endif -%}
+{%- for component in components -%}
+{{ component | safe }}
+{%- endfor -%}
+</div>

@@ -1,3 +1,17 @@
+// Copyright 2025 JAAB Tech SAS, Uruguay
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package runtime
 
 import (
@@ -20,10 +34,16 @@ type MockBus struct {
 	FailSubscribe bool
 }
 
-func (m *MockBus) Connect(url string, name string, connectTimeout time.Duration, reconnectWait time.Duration) error {
+func (m *MockBus) Connect(url string, opts bus.ConnectOptions) error {
 	return nil
 }
 func (m *MockBus) Publish(subject string, msg *fluxmsg.FluxMsg) error { return nil }
+func (m *MockBus) PublishRaw(subject string, data []byte, fluxID uint64) error {
+	return nil
+}
+func (m *MockBus) PublishWithContext(ctx context.Context, subject string, msg *fluxmsg.FluxMsg) error {
+	return nil
+}
 func (m *MockBus) Subscribe(subject string, handler bus.Handler) (bus.Subscription, error) {
 	if m.FailSubscribe {
 		return nil, errors.New("subscribe failed")
@@ -59,7 +79,7 @@ func TestManager_Lifecycle(t *testing.T) {
 	mockBus := &MockBus{}
 	gen, _ := idgen.New(1)
 
-	mgr := NewManager(slog.Default(), mockBus, gen, 100, "test-rack")
+	mgr := NewManager(slog.Default(), mockBus, gen, 100, "test-rack", 5*time.Second)
 
 	// 2. Apply Scenario
 	sc := &registry.Scenario{
@@ -84,7 +104,7 @@ func TestManager_Lifecycle(t *testing.T) {
 func TestManager_Errors(t *testing.T) {
 	mockBus := &MockBus{}
 	gen, _ := idgen.New(1)
-	mgr := NewManager(slog.Default(), mockBus, gen, 100, "test-rack")
+	mgr := NewManager(slog.Default(), mockBus, gen, 100, "test-rack", 5*time.Second)
 
 	// 1. Unknown Gear Type
 	sc := &registry.Scenario{
@@ -123,7 +143,7 @@ func TestManager_Errors(t *testing.T) {
 
 	// 4. Subscribe Failure
 	failBus := &MockBus{FailSubscribe: true}
-	mgr2 := NewManager(slog.Default(), failBus, gen, 100, "test-rack")
+	mgr2 := NewManager(slog.Default(), failBus, gen, 100, "test-rack", 5*time.Second)
 	// Use good gear, but bad bus
 	sc2 := &registry.Scenario{
 		Meta: registry.ScenarioMeta{Name: "test", Version: "1.0"},

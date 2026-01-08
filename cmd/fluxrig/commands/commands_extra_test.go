@@ -1,6 +1,21 @@
+// Copyright 2025 JAAB Tech SAS, Uruguay
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package commands
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 
@@ -20,7 +35,8 @@ func TestRunAgent_Failures(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	conflict := filepath.Join(tmpDir, "file_blocking_dir")
-	os.Create(conflict)
+	f, _ := os.Create(filepath.Clean(conflict))
+	_ = f.Close()
 
 	cfg.Store.Dir = conflict
 
@@ -49,16 +65,16 @@ func TestSetupLogger(t *testing.T) {
 	if l == nil {
 		t.Error("Logger is nil")
 	}
-	if !l.Enabled(nil, slog.LevelDebug) {
+	if !l.Enabled(context.TODO(), slog.LevelDebug) {
 		t.Error("Logger should be debug")
 	}
 
 	// Env Override
-	os.Setenv("FLUXRIG_TRACE", "true")
-	defer os.Unsetenv("FLUXRIG_TRACE")
+	_ = os.Setenv("FLUXRIG_TRACE", "true")
+	defer func() { _ = os.Unsetenv("FLUXRIG_TRACE") }()
 	l2 := setupLogger(cfg)
 	// Trace level check (not standardized in slog until recently/custom, assuming loggerPkg supports it)
-	if !l2.Enabled(nil, loggerPkg.LevelTrace) {
+	if !l2.Enabled(context.TODO(), loggerPkg.LevelTrace) {
 		t.Error("Logger should be trace")
 	}
 }

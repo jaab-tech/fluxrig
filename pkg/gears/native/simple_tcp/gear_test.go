@@ -1,3 +1,17 @@
+// Copyright 2025 JAAB Tech SAS, Uruguay
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package simple_tcp
 
 import (
@@ -51,7 +65,7 @@ func TestGear_Loopback(t *testing.T) {
 	// Find free port
 	l, _ := net.Listen("tcp", "127.0.0.1:0")
 	addr := l.Addr().String()
-	l.Close() // Close so gear can bind
+	_ = l.Close() // Close so gear can bind
 
 	ctxS := &MockCtx{cfg: map[string]any{"mode": "server", "bind": addr}}
 	require.NoError(t, serverGear.Init(ctxS))
@@ -61,7 +75,7 @@ func TestGear_Loopback(t *testing.T) {
 		serverMsgs <- msg
 	})
 	assert.NoError(t, err)
-	defer serverGear.Stop()
+	defer func() { _ = serverGear.Stop() }()
 
 	// 2. Start Client Gear
 	clientGear := &Gear{}
@@ -73,7 +87,7 @@ func TestGear_Loopback(t *testing.T) {
 		clientMsgs <- msg
 	})
 	assert.NoError(t, err)
-	defer clientGear.Stop()
+	defer func() { _ = clientGear.Stop() }()
 
 	// 3. Test Flow
 	// Wait for connection
@@ -107,10 +121,10 @@ func TestGear_Loopback(t *testing.T) {
 }
 
 func TestGear_E2E_RoundTrip(t *testing.T) {
-	// Port finding
-	l, _ := net.Listen("tcp", "127.0.0.1:0")
-	addr := l.Addr().String()
-	l.Close()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := l.Addr().String() // Capture address before closing
+	_ = l.Close()
 
 	// --- SETUP SERVER ---
 	s := &Gear{}
@@ -118,7 +132,7 @@ func TestGear_E2E_RoundTrip(t *testing.T) {
 
 	sReceived := make(chan *fluxmsg.FluxMsg, 5)
 	assert.NoError(t, s.Start(context.Background(), func(m *fluxmsg.FluxMsg) { sReceived <- m }))
-	defer s.Stop()
+	defer func() { _ = s.Stop() }()
 
 	// --- SETUP CLIENT ---
 	c := &Gear{}
@@ -126,13 +140,13 @@ func TestGear_E2E_RoundTrip(t *testing.T) {
 
 	cReceived := make(chan *fluxmsg.FluxMsg, 5)
 	assert.NoError(t, c.Start(context.Background(), func(m *fluxmsg.FluxMsg) { cReceived <- m }))
-	defer c.Stop()
+	defer func() { _ = c.Stop() }()
 
 	time.Sleep(100 * time.Millisecond) // Allow connect
 
 	// 1. Client -> Server
 	// Client Gear Process() writes to the socket.
-	_, err := c.Process(context.Background(), &fluxmsg.FluxMsg{RawPayload: []byte("ping\n")})
+	_, err = c.Process(context.Background(), &fluxmsg.FluxMsg{RawPayload: []byte("ping\n")})
 	assert.NoError(t, err)
 
 	// Check Server emitted it

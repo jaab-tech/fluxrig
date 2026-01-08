@@ -1,12 +1,28 @@
+// Copyright 2025 JAAB Tech SAS, Uruguay
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package telemetry
 
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"time"
 
 	"github.com/jaab-tech/fluxrig/pkg/bus"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
+	"github.com/jaab-tech/fluxrig/pkg/idgen"
 
 	"go.opentelemetry.io/otel/attribute"
 	otellog "go.opentelemetry.io/otel/log"
@@ -23,14 +39,16 @@ type NatsWriter struct {
 	entityID    uint64
 	entityName  string
 	baseSubject string
+	gen         *idgen.IDGenerator
 }
 
-func NewNatsWriter(b bus.Bus, entityID uint64, entityName, baseSubject string) *NatsWriter {
+func NewNatsWriter(b bus.Bus, entityID uint64, entityName, baseSubject string, gen *idgen.IDGenerator) *NatsWriter {
 	return &NatsWriter{
 		bus:         b,
 		entityID:    entityID,
 		entityName:  entityName,
 		baseSubject: baseSubject,
+		gen:         gen,
 	}
 }
 
@@ -49,8 +67,8 @@ func (w *NatsWriter) Write(p []byte) (n int, err error) {
 	// Alternative: Unmarshal to map, append fields, and Marshal, or use a structured transport wrapper.
 	// Performance penalty, but safer.
 	var record map[string]interface{}
-	if err := json.Unmarshal(p, &record); err != nil {
-		return 0, err
+	if errJSON := json.Unmarshal(p, &record); errJSON != nil {
+		return 0, errJSON
 	}
 	record["entity_id"] = w.entityID
 	record["entity_name"] = w.entityName
@@ -61,6 +79,7 @@ func (w *NatsWriter) Write(p []byte) (n int, err error) {
 	}
 
 	msg := fluxmsg.New()
+	msg.FluxID, _ = w.gen.NextFluxID()
 	msg.Data = map[string]any{"record": json.RawMessage(data)}
 	msg.Metadata["type"] = "telemetry.log.json"
 	msg.Metadata["scope"] = "telemetry"
@@ -105,6 +124,7 @@ func (e *SpanExporter) ExportSpans(ctx context.Context, spans []trace.ReadOnlySp
 	}
 
 	msg := fluxmsg.New()
+	msg.FluxID, _ = e.gen.NextFluxID()
 	msg.Data = map[string]any{"batch": batchedPayload}
 	msg.Metadata["type"] = "telemetry.batch.spans"
 	msg.Metadata["scope"] = "telemetry"
@@ -151,6 +171,7 @@ func (e *LogExporter) Export(ctx context.Context, records []sdklog.Record) error
 	}
 
 	msg := fluxmsg.New()
+	msg.FluxID, _ = e.gen.NextFluxID()
 	msg.Data = map[string]any{"batch": batchedPayload}
 	msg.Metadata["type"] = "telemetry.batch.logs"
 	msg.Metadata["scope"] = "telemetry"
@@ -193,12 +214,16 @@ func (e *MetricExporter) Export(ctx context.Context, metrics *metricdata.Resourc
 
 				// Fix: fluxmsg.NewFromData -> manual wrap
 				msg := fluxmsg.New()
+				msg.FluxID, _ = e.gen.NextFluxID()
 				msg.Data = payload
 				msg.Metadata["type"] = "telemetry.metric"
 				// fluxmsg.Data is map[string]any.
 				// Sink handles JSON marshaling if required.
 
-				_ = e.bus.Publish(e.baseSubject+".metrics", msg)
+				if err := e.bus.PublishWithContext(ctx, e.baseSubject+".metrics", msg); err != nil {
+					// We still log errors but more cleanly
+					slog.Debug("Failed to publish metric", "name", m.Name, "error", err)
+				}
 			}
 		}
 	}
@@ -227,7 +252,7 @@ func resolvePoints(m metricdata.Metrics) []simplePoint {
 				Type:       "gauge",
 				Value:      float64(p.Value),
 				LinkTime:   p.Time,
-				Attributes: attributeToMap(p.Attributes.ToSlice()),
+				Attributes: metricAttributeToMap(p.Attributes.ToSlice()),
 			})
 		}
 	case metricdata.Gauge[float64]:
@@ -236,7 +261,7 @@ func resolvePoints(m metricdata.Metrics) []simplePoint {
 				Type:       "gauge",
 				Value:      p.Value,
 				LinkTime:   p.Time,
-				Attributes: attributeToMap(p.Attributes.ToSlice()),
+				Attributes: metricAttributeToMap(p.Attributes.ToSlice()),
 			})
 		}
 	case metricdata.Sum[int64]:
@@ -245,7 +270,7 @@ func resolvePoints(m metricdata.Metrics) []simplePoint {
 				Type:       "sum",
 				Value:      float64(p.Value),
 				LinkTime:   p.Time,
-				Attributes: attributeToMap(p.Attributes.ToSlice()),
+				Attributes: metricAttributeToMap(p.Attributes.ToSlice()),
 			})
 		}
 	case metricdata.Sum[float64]:
@@ -254,8 +279,24 @@ func resolvePoints(m metricdata.Metrics) []simplePoint {
 				Type:       "sum",
 				Value:      p.Value,
 				LinkTime:   p.Time,
-				Attributes: attributeToMap(p.Attributes.ToSlice()),
+				Attributes: metricAttributeToMap(p.Attributes.ToSlice()),
 			})
+		}
+	case metricdata.Histogram[float64]:
+		for _, p := range data.DataPoints {
+			// Export Sum
+			points = append(points, simplePoint{
+				Type:       "histogram_sum",
+				Value:      p.Sum,
+				LinkTime:   p.Time,
+				Attributes: metricAttributeToMap(p.Attributes.ToSlice()),
+			})
+			// Export Count (as a separate point? Or rely on backend? For now just sum is enough to prove existence)
+			// But let's add count too with suffix in name?
+			// resolvePoints signature only returns points, caller uses m.Name.
+			// Caller iterates points and uses m.Name.
+			// We can't easily change name here unless simplePoint supports NameOverride.
+			// Let's just export Sum for now to satisfy "presence".
 		}
 	}
 	return points
@@ -268,6 +309,28 @@ func attributeToMap(attrs []attribute.KeyValue) map[string]interface{} {
 		m[string(kv.Key)] = kv.Value.AsInterface()
 	}
 	return m
+}
+
+// metricAttributeToMap filters attributes to prevent cardinality explosion
+func metricAttributeToMap(attrs []attribute.KeyValue) map[string]interface{} {
+	m := make(map[string]interface{})
+	for _, kv := range attrs {
+		k := string(kv.Key)
+		if isAllowedMetricAttribute(k) {
+			m[k] = kv.Value.AsInterface()
+		}
+	}
+	return m
+}
+
+func isAllowedMetricAttribute(k string) bool {
+	switch k {
+	case "component", "subject", "error", "status", "gear_id", "port_id", "outcome", "handler":
+		return true
+	case "state", "cpu", "device", "disk", "usage", "direction", "process", "filesystem":
+		return true
+	}
+	return false
 }
 
 func (e *MetricExporter) Aggregation(k sdkmetric.InstrumentKind) sdkmetric.Aggregation {

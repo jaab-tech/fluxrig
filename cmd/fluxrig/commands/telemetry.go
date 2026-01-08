@@ -1,3 +1,17 @@
+// Copyright 2025 JAAB Tech SAS, Uruguay
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package commands
 
 import (
@@ -43,7 +57,7 @@ var logsCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("failed to connect to mixer: %w", err)
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		if resp.StatusCode != http.StatusOK {
 			return fmt.Errorf("server returned error: %s", resp.Status)
@@ -63,11 +77,11 @@ var logsCmd = &cobra.Command{
 		}
 
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(w, "TIME\tENTITY\tLEVEL\tMESSAGE")
+		_, _ = fmt.Fprintln(w, "TIME\tENTITY\tLEVEL\tMESSAGE")
 		for _, l := range logs {
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", l.Timestamp.Format(time.TimeOnly), l.EntityName, l.Severity, l.Body)
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", l.Timestamp.Format(time.TimeOnly), l.EntityName, l.Severity, l.Body)
 		}
-		w.Flush()
+		_ = w.Flush()
 		return nil
 	},
 }
@@ -103,7 +117,7 @@ var metricsCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("failed to connect to mixer: %w", err)
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		if resp.StatusCode != http.StatusOK {
 			return fmt.Errorf("server returned error: %s", resp.Status)
@@ -124,11 +138,11 @@ var metricsCmd = &cobra.Command{
 		}
 
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(w, "TIME\tENTITY\tNAME\tTYPE\tVALUE")
+		_, _ = fmt.Fprintln(w, "TIME\tENTITY\tNAME\tTYPE\tVALUE")
 		for _, m := range metrics {
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%.2f\n", m.Timestamp.Format(time.TimeOnly), m.EntityName, m.Name, m.Type, m.Value)
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%.2f\n", m.Timestamp.Format(time.TimeOnly), m.EntityName, m.Name, m.Type, m.Value)
 		}
-		w.Flush()
+		_ = w.Flush()
 		return nil
 	},
 }

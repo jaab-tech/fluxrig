@@ -1,3 +1,17 @@
+// Copyright 2025 JAAB Tech SAS, Uruguay
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package bento
 
 import (
@@ -17,7 +31,7 @@ func TestConfigToYaml(t *testing.T) {
 	m := map[string]any{
 		"input": map[string]any{
 			"generate": map[string]any{
-				"count": 10,
+				"count":   10,
 				"mapping": `root = "hello world"`,
 			},
 		},
@@ -37,7 +51,7 @@ func TestBridge(t *testing.T) {
 	fm.Metadata["user"] = "admin"
 
 	bm := ToBentoMessage(fm)
-	
+
 	// Verify Bento Content
 	data, err := bm.AsStructured()
 	require.NoError(t, err)
@@ -51,7 +65,6 @@ func TestBridge(t *testing.T) {
 	assert.Equal(t, "abc-123", v)
 	v, _ = bm.MetaGet("flux_id")
 	assert.Equal(t, "123456789", v)
-
 
 	// 2. Bento -> Flux
 	outFm, err := FromBentoMessage(bm)
@@ -67,11 +80,11 @@ type MockContext struct {
 }
 
 func (m *MockContext) Context() context.Context { return context.Background() }
-func (m *MockContext) Config() map[string]any { return m.config }
-func (m *MockContext) GearName() string { return "test-gear" }
-func (m *MockContext) MachineID() uint64 { return 1 }
-func (m *MockContext) Logger() *slog.Logger { return slog.Default() }
-func (m *MockContext) IDGen() sdk.IDGenerator { return nil }
+func (m *MockContext) Config() map[string]any   { return m.config }
+func (m *MockContext) GearName() string         { return "test-gear" }
+func (m *MockContext) MachineID() uint64        { return 1 }
+func (m *MockContext) Logger() *slog.Logger     { return slog.Default() }
+func (m *MockContext) IDGen() sdk.IDGenerator   { return nil }
 
 func TestStrictValidation(t *testing.T) {
 	g := New()
@@ -81,16 +94,16 @@ func TestStrictValidation(t *testing.T) {
 			"bento": map[string]any{
 				"pipeline": map[string]any{
 					"processors": []any{
-						map[string]any{"mapping": "root = this.broken((("}, 
+						map[string]any{"mapping": "root = this.broken((("},
 					},
 				},
 			},
 		},
 	}
-	
+
 	err := g.Init(ctx)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "bento config invalid")
+	assert.Contains(t, err.Error(), "failed to parse bento yaml")
 }
 
 func TestAutoWiring(t *testing.T) {
@@ -98,82 +111,82 @@ func TestAutoWiring(t *testing.T) {
 	ctx := &MockContext{
 		config: map[string]any{
 			"ports": map[string]any{
-				"inputs": []any{"in"},
+				"inputs":  []any{"in"},
 				"outputs": []any{"out"},
 			},
 			"bento": map[string]any{
 				"pipeline": map[string]any{
 					"processors": []any{
-						map[string]any{"mapping": "root = this"}, 
+						map[string]any{"mapping": "root = this"},
 					},
 				},
 			},
 		},
 	}
-	
+
 	err := g.Init(ctx)
 	require.NoError(t, err)
-    
-    // Check Config Injection
-    // Structure: input -> flux_in_<name>
-    inBlock, hasInBlock := g.config.Bento["input"].(map[string]any)
-    assert.True(t, hasInBlock, "Should have input block")
-    if hasInBlock {
-        _, hasPlugin := inBlock[g.inputType]
-        assert.True(t, hasPlugin, "Should have specific input plugin")
-    }
 
-    outBlock, hasOutBlock := g.config.Bento["output"].(map[string]any)
-    assert.True(t, hasOutBlock, "Should have output block")
-    if hasOutBlock {
-         _, hasPlugin := outBlock[g.outputType]
-        assert.True(t, hasPlugin, "Should have specific output plugin")
-    }
+	// Check Config Injection
+	// Structure: input -> flux_in_<name>
+	inBlock, hasInBlock := g.config.Bento["input"].(map[string]any)
+	assert.True(t, hasInBlock, "Should have input block")
+	if hasInBlock {
+		_, hasPlugin := inBlock[g.inputType]
+		assert.True(t, hasPlugin, "Should have specific input plugin")
+	}
+
+	outBlock, hasOutBlock := g.config.Bento["output"].(map[string]any)
+	assert.True(t, hasOutBlock, "Should have output block")
+	if hasOutBlock {
+		_, hasPlugin := outBlock[g.outputType]
+		assert.True(t, hasPlugin, "Should have specific output plugin")
+	}
 }
 
 func TestEndToEndFlow(t *testing.T) {
 	g := New()
 	ctx := &MockContext{
 		config: map[string]any{
-			"ports": map[string]any{ "inputs": []any{"in"}, "outputs": []any{"out"} },
+			"ports": map[string]any{"inputs": []any{"in"}, "outputs": []any{"out"}},
 			"bento": map[string]any{
 				"pipeline": map[string]any{
 					"processors": []any{
-						map[string]any{"mapping": "root = this\nroot.processed = true"}, 
+						map[string]any{"mapping": "root = this\nroot.processed = true"},
 					},
 				},
 			},
 		},
 	}
-    require.NoError(t, g.Init(ctx))
-    
-    outChan := make(chan *fluxmsg.FluxMsg, 10)
-    emit := func(m *fluxmsg.FluxMsg) {
-        outChan <- m
-    }
-    
-    // Start
-    runtimeCtx, cancel := context.WithCancel(context.Background())
-    defer cancel()
-    
-    require.NoError(t, g.Start(runtimeCtx, emit))
-    defer g.Stop()
-    
-    // Process (Simulate SDK calling Process)
-    inMsg := fluxmsg.New()
-    inMsg.Data["foo"] = "bar"
-    
-    // Process returns nil, nil because it pushes to Bento async
-    res, err := g.Process(runtimeCtx, inMsg)
-    assert.Nil(t, res)
-    assert.NoError(t, err)
-    
-    // Wait for Output (bridge is async)
-    select {
-    case outMsg := <-outChan:
-        assert.Equal(t, "bar", outMsg.Data["foo"])
-        assert.Equal(t, true, outMsg.Data["processed"])
-    case <-time.After(5 * time.Second):
+	require.NoError(t, g.Init(ctx))
+
+	outChan := make(chan *fluxmsg.FluxMsg, 10)
+	emit := func(m *fluxmsg.FluxMsg) {
+		outChan <- m
+	}
+
+	// Start
+	runtimeCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	require.NoError(t, g.Start(runtimeCtx, emit))
+	defer func() { _ = g.Stop() }()
+
+	// Process (Simulate SDK calling Process)
+	inMsg := fluxmsg.New()
+	inMsg.Data["foo"] = "bar"
+
+	// Process returns nil, nil because it pushes to Bento async
+	res, err := g.Process(runtimeCtx, inMsg)
+	assert.Nil(t, res)
+	assert.NoError(t, err)
+
+	// Wait for Output (bridge is async)
+	select {
+	case outMsg := <-outChan:
+		assert.Equal(t, "bar", outMsg.Data["foo"])
+		assert.Equal(t, true, outMsg.Data["processed"])
+	case <-time.After(5 * time.Second):
 		t.Fatal("Timeout waiting for message")
 	}
 }
@@ -204,10 +217,10 @@ func TestProcess_Cancel(t *testing.T) {
 	cancel() // Cancel immediately
 
 	// Fill channel to force block
-    for i := 0; i < 100; i++ {
-        g.inChan <- fluxmsg.New()
-    }
-	
+	for i := 0; i < 100; i++ {
+		g.inChan <- fluxmsg.New()
+	}
+
 	msg := fluxmsg.New()
 	_, err := g.Process(ctx, msg)
 	assert.ErrorIs(t, err, context.Canceled)
@@ -216,10 +229,10 @@ func TestProcess_Cancel(t *testing.T) {
 func TestRead_Cancel(t *testing.T) {
 	g := New()
 	input := &fluxInput{g: g}
-	
+
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	
+
 	msg, ack, err := input.Read(ctx)
 	assert.Nil(t, msg)
 	assert.Nil(t, ack)
@@ -228,33 +241,32 @@ func TestRead_Cancel(t *testing.T) {
 
 func TestStart_InvalidConfig(t *testing.T) {
 	g := New()
-    // 1. Init with VALID config to setup Env
-    validCtx := &MockContext{
-        config: map[string]any{
-            "bento": map[string]any{
-                 "pipeline": map[string]any{
-                    "processors": []any{
-                        map[string]any{"mapping": "root = this"}, 
-                    },
-                },
-            },
-        },
-    }
-    require.NoError(t, g.Init(validCtx))
+	// 1. Init with VALID config to setup Env
+	validCtx := &MockContext{
+		config: map[string]any{
+			"bento": map[string]any{
+				"pipeline": map[string]any{
+					"processors": []any{
+						map[string]any{"mapping": "root = this"},
+					},
+				},
+			},
+		},
+	}
+	require.NoError(t, g.Init(validCtx))
 
 	// 2. Corrupt config internally (simulating runtime modification or bad state)
 	g.config.Bento = map[string]any{
 		"pipeline": map[string]any{
-			"processors": "invalid_should_be_list", 
+			"processors": "invalid_should_be_list",
 		},
 	}
 	// We need a context
 	ctx := context.Background()
 	emit := func(m *fluxmsg.FluxMsg) {}
-	
+
 	err := g.Start(ctx, emit)
 	// Start attempts to marshal config to recreate stream builder
-	assert.Error(t, err) 
+	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "bento config invalid in start")
 }
-

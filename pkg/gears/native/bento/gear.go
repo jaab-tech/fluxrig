@@ -1,3 +1,17 @@
+// Copyright 2025 JAAB Tech SAS, Uruguay
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package bento
 
 import (
@@ -131,6 +145,12 @@ func (g *Gear) Init(ctx sdk.GearContext) error {
 		}
 	}
 
+	// 4b. Register Metrics Bridge
+	if errMetrics := RegisterMetrics(g.env); errMetrics != nil {
+		g.logger.Warn("Failed to register fluxrig metrics in bento", "error", errMetrics)
+		// Non-fatal?
+	}
+
 	// Default Buffer if missing (Bento requires one usually, or defaults?)
 	if _, hasBuffer := cfg.Bento["buffer"]; !hasBuffer {
 		cfg.Bento["buffer"] = map[string]any{
@@ -144,9 +164,10 @@ func (g *Gear) Init(ctx sdk.GearContext) error {
 		return fmt.Errorf("failed to marshal bento config: %w", err)
 	}
 
-	builder := g.env.NewStreamBuilder()
-	if err := builder.SetYAML(string(yamlBytes)); err != nil {
-		return fmt.Errorf("bento config invalid: %w", err)
+	builder := g.env.NewStreamBuilder() // Parse YAML
+	builder.SetLogger(g.logger)
+	if errYAML := builder.SetYAML(string(yamlBytes)); errYAML != nil {
+		return fmt.Errorf("failed to parse bento yaml: %w", errYAML)
 	}
 
 	return nil
@@ -157,12 +178,13 @@ func (g *Gear) Start(ctx context.Context, emit func(*fluxmsg.FluxMsg)) error {
 	g.emitFn = emit
 
 	builder := g.env.NewStreamBuilder()
+	builder.SetLogger(g.logger)
 	yamlBytes, err := MapToYaml(g.config.Bento)
 	if err != nil {
 		return fmt.Errorf("failed to marshal bento config in start: %w", err)
 	}
-	if err := builder.SetYAML(string(yamlBytes)); err != nil {
-		return fmt.Errorf("bento config invalid in start: %w", err)
+	if errYAML := builder.SetYAML(string(yamlBytes)); errYAML != nil {
+		return fmt.Errorf("bento config invalid in start: %w", errYAML)
 	}
 
 	g.stream, err = builder.Build()
@@ -238,7 +260,7 @@ func (i *fluxInput) Read(ctx context.Context) (*service.Message, service.AckFunc
 			return nil, nil, service.ErrEndOfInput
 		}
 		bMsg := ToBentoMessage(msg)
-		i.g.logger.Debug("Bento Input Read", "id", msg.FluxID)
+		i.g.logger.Debug("Bento Input Read", "id", msg.FluxID, "payload", string(msg.RawPayload))
 		return bMsg, func(ctx context.Context, err error) error { return nil }, nil
 	case <-ctx.Done():
 		return nil, nil, service.ErrEndOfInput

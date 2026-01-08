@@ -1,0 +1,38 @@
+# Copyright 2025 JAAB Tech SAS, Uruguay
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+meta:
+  version: "1.0.0"
+
+racks:
+  - name: "comp-node-01"
+    labels:
+      tier: "edge"
+
+gears:
+  - name: "gateway"
+    type: "simple_tcp"
+    deploy: "comp-node-01" # Target the Rack Name
+    config:
+      mode: "server"
+      bind: ":9001"
+      delimiter: "\n"
+      delimiter_append: true
+      tags:
+        role: "ingress"
+
+wires:
+  # Loopback Echo: Gateway out -> Gateway in
+  - from: "gateway.out"
+    to: "gateway.in"

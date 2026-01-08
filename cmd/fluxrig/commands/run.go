@@ -1,3 +1,17 @@
+// Copyright 2025 JAAB Tech SAS, Uruguay
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package commands
 
 import (
@@ -26,8 +40,6 @@ import (
 	"github.com/jaab-tech/fluxrig/pkg/version"
 	"github.com/spf13/cobra"
 	"github.com/vmihailenco/msgpack/v5"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/metric"
 	"gopkg.in/yaml.v3"
 )
 
@@ -36,10 +48,10 @@ var ErrReconnect = fmt.Errorf("reconnect needed")
 
 // RunAgent implements the main loop of the FluxRig Rack Agent.
 func RunAgent(cfg *config.RackConfig, logger *slog.Logger, logBuffer *telemetry.BufferHandler) error {
-	logger.Info("Starting Rack Agent", "config", cfg)
+	logger.Debug("Starting Rack Agent", "config", cfg)
 
 	// 0. Ensure DataDir exists and acquire lock
-	if err := os.MkdirAll(cfg.Store.Dir, 0755); err != nil {
+	if err := os.MkdirAll(cfg.Store.Dir, 0750); err != nil {
 		return fmt.Errorf("failed to create data directory: %w", err)
 	}
 	lockPath := filepath.Join(cfg.Store.Dir, ".lock")
@@ -74,22 +86,22 @@ func RunAgent(cfg *config.RackConfig, logger *slog.Logger, logBuffer *telemetry.
 func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger, logBuffer *telemetry.BufferHandler) error {
 	// 0. Try Load Passport (Offline Capability)
 	statePath := filepath.Join(cfg.Store.Dir, cfg.Store.StateFile)
-	logger.Info("DEBUG: FLUXRIG_E2E_SCENARIO", "val", os.Getenv("FLUXRIG_E2E_SCENARIO"))
-	logger.Info("Attempting to load Passport", "path", statePath)
+	logger.Debug("DEBUG: FLUXRIG_E2E_SCENARIO", "val", os.Getenv("FLUXRIG_E2E_SCENARIO"))
+	logger.Debug("Attempting to load Passport", "path", statePath)
 	var secret string
 	var currentStatus string
 	if env, err := pki.LoadStateEnvelope(statePath); err == nil {
-		if s, err := env.Verify(); err == nil {
-			logger.Info("Loaded Cached Passport", "id", s.MachineID, "name", s.Name)
+		if s, errVer := env.Verify(); errVer == nil {
+			logger.Debug("Loaded Cached Passport", "id", s.MachineID, "name", s.Name)
 			cfg.Rack.MachineID = s.MachineID
 			cfg.Rack.Name = s.Name // Ensure name is loaded for telemetry init
 			secret = s.Secret
 			currentStatus = s.Status
 		} else {
-			logger.Error("Failed to verify cached passport", "error", err)
+			logger.Error("Failed to verify cached passport", "error", errVer)
 		}
 	} else {
-		logger.Info("No cached passport found or load failed", "error", err)
+		logger.Debug("No cached passport found or load failed", "error", err)
 	}
 
 	// 1. Parse Timeouts
@@ -111,7 +123,7 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 	}
 
 	// 2. Connect to Bus
-	logger.Info("Connecting to Bus", "url", cfg.Rack.Bus.URL)
+	logger.Debug("Connecting to Bus", "url", cfg.Rack.Bus.URL)
 	natsBus := bus.NewNatsBus(cfg.Rack.Bus.StreamName)
 	busConnected := false
 
@@ -134,72 +146,26 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 		return err
 	}
 
-	if err := natsBus.Connect(cfg.Rack.Bus.URL, clientName, connectTimeout, reconnectWait); err != nil {
+	if errCon := natsBus.Connect(cfg.Rack.Bus.URL, bus.ConnectOptions{
+		Name:           clientName,
+		ConnectTimeout: connectTimeout,
+		ReconnectWait:  reconnectWait,
+		RootCA:         cfg.Rack.Bus.RootCA,
+	}); errCon != nil {
 		if cfg.Rack.MachineID != 0 {
-			logger.Warn("Bus Unavailable. Starting in OFFLINE Mode", "error", err)
+			logger.Warn("Bus Unavailable. Starting in OFFLINE Mode", "error", errCon)
 		} else {
-			return fmt.Errorf("bus unavailable and no passport found: %w", err)
+			return fmt.Errorf("bus unavailable and no passport found: %w", errCon)
 		}
 	} else {
 		busConnected = true
 		defer natsBus.Close()
 		logger.Info("Bus Connected")
 
-		// 2b. Initialize Telemetry (Zero-Config / Embedded)
-		// Rack uses default batch settings (5s, 512).
-		// Initial Identity: ID="0", Name="pending" (unless loaded from passport or static ID)
-
-		initialName := "pending"
-		if cfg.Rack.MachineID > 0 && cfg.Rack.Name != "" {
-			initialName = cfg.Rack.Name
-		}
-
-		// gen created above
-		entityID := gen.NewEntityID(idgen.EntityRack, 0)
-
-		telCfg := telemetry.Config{
-			ServiceName:         "flux-rack",
-			ServiceVersion:      version.Version,
-			EntityID:            entityID,
-			EntityName:          initialName,
-			BatchIntervalString: "5s",
-			BaseSubject:         "flux.telemetry",
-			MaxBatchSize:        512,
-			Logging:             cfg.Logging,
-			Store:               cfg.Store,
-			Throttling:          cfg.Logging.Throttling,
-		}
-
-		// Override Level if FLUXRIG_TRACE is set
-		if os.Getenv("FLUXRIG_TRACE") == "true" || os.Getenv("FLUXRIG_TRACE") == "1" {
-			telCfg.Logging.Level = "trace"
-			// WAL level follows global level
-		}
-
-		if os.Getenv("FLUXRIG_DISABLE_TELEMETRY") == "true" {
-			logger.Info("Telemetry Disabled by Env Var")
-		} else {
-			shutdownTel, err := telemetry.Init(context.Background(), telCfg, natsBus, logBuffer, gen)
-			if err != nil {
-				logger.Warn("Failed to init telemetry", "error", err)
-			} else {
-				defer func() {
-					if err := shutdownTel(context.Background()); err != nil {
-						logger.Error("Telemetry shutdown error", "error", err)
-					}
-				}()
-				// REFRESH LOGGER: telemetry.Init sets the global default logger (OTel Bridge).
-				// We must update our local logger to point to this new default so subsequent
-				// 6. Update Logger to use OTel Bridge (slog.Default() was updated by telemetry.Init)
-				// We also inject the RACK component and Agent Name so they appear in OTel attributes.
-				logger = slog.Default().With(
-					"component", string(loggerPkg.TypeRack),
-					"name", initialName,
-				)
-				slog.SetDefault(logger)
-				logger.Info("Telemetry Initialized")
-			}
-		}
+		// NOTE: Telemetry initialization is DEFERRED until after passport verification.
+		// This ensures we initialize with the correct identity (Name + ID) from the start,
+		// avoiding dual MeterProvider issues with stale "pending" identity.
+		// See: initTelemetryDeferred() called after passport verification.
 	}
 
 	// 2. Initialize ID Generator
@@ -210,7 +176,14 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 	_ = gen // unused for now except for generating trace IDs if we wanted
 
 	// 2.5 Initialize Runtime Manager (Rack Engine)
-	rtManager := rt.NewManager(logger, natsBus, gen, uint64(mID), clientName)
+	opTimeout, _ := time.ParseDuration(cfg.Rack.Bus.OperationTimeout)
+
+	// INSTRUMENTATION: Wrap Bus
+	// We always wrap it so it can dynamically pick up metrics via GetMetrics()
+	// even if telemetry initialization is deferred.
+	managedBus := telemetry.NewInstrumentedBus(natsBus, nil)
+
+	rtManager := rt.NewManager(logger, managedBus, gen, uint64(mID), clientName, opTimeout)
 	defer rtManager.Shutdown()
 
 	// Scenario Loading:
@@ -232,8 +205,8 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 	}
 
 	if busConnected {
-		if err := sendHello(natsBus, hello, gen); err != nil {
-			logger.Error("Failed to send Hello", "error", err)
+		if errSend := sendHello(managedBus, hello, gen); errSend != nil {
+			logger.Error("Failed to send Hello", "error", errSend)
 		} else {
 			logger.Info("Sent Hello", "name", hello.Name)
 		}
@@ -249,11 +222,11 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 	if busConnected {
 		passportCh := make(chan *fluxmsg.HelloResponse, 1)
 
-		sub, err := natsBus.Subscribe(enrollTopic, func(msg *fluxmsg.FluxMsg) {
+		sub, errSub := managedBus.Subscribe(enrollTopic, func(msg *fluxmsg.FluxMsg) {
 			// Parse HelloResponse
-			resp, err := fluxmsg.ParseHelloResponse(msg.Data)
-			if err != nil {
-				logger.Error("Failed to parse enrollment response", "error", err)
+			resp, errParse := fluxmsg.ParseHelloResponse(msg.Data)
+			if errParse != nil {
+				logger.Error("Failed to parse enrollment response", "error", errParse)
 				return
 			}
 			logger.Info(resp.Message, "status", resp.Status)
@@ -263,9 +236,9 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 			default:
 			}
 		})
-		if err != nil {
-			logger.Error("Failed to subscribe to enrollment", "error", err)
-			return err
+		if errSub != nil {
+			logger.Error("Failed to subscribe to enrollment", "error", errSub)
+			return errSub
 		}
 
 		defer func() { _ = sub.Unsubscribe() }()
@@ -276,58 +249,183 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 			// Process Passport if present
 			if len(resp.Passport) > 0 {
 				env := pki.StateEnvelope{}
-				if err := msgpack.Unmarshal(resp.Passport, &env); err != nil {
-					logger.Error("Failed to unmarshal passport envelope", "error", err)
-					return err
+				if errUnmarshal := msgpack.Unmarshal(resp.Passport, &env); errUnmarshal != nil {
+					logger.Error("Failed to unmarshal passport envelope", "error", errUnmarshal)
+					return errUnmarshal
 				}
 
 				// Re-verify
-				state, err := env.Verify()
-				if err != nil {
-					logger.Error("Passport invalid", "error", err)
-					return err
+				state, errVerify := env.Verify()
+				if errVerify != nil {
+					logger.Error("Passport invalid", "error", errVerify)
+					return errVerify
 				}
 
 				logger.Info("Passport Verified", "id", state.MachineID, "name", state.Name)
 				// Save path already calculated as statePath
-				if err := os.MkdirAll(cfg.Store.Dir, 0755); err != nil {
-					return err
+				if errMk := os.MkdirAll(cfg.Store.Dir, 0750); errMk != nil {
+					return errMk
 				}
 
-				if err := env.Save(statePath); err != nil {
-					logger.Error("Failed to save state.flux", "error", err)
-					return err
+				if errSave := env.Save(statePath); errSave != nil {
+					logger.Error("Failed to save state.flux", "error", errSave)
+					return errSave
 				}
 				logger.Info("Passport Saved", "path", statePath)
 				mID = state.MachineID
 
-				// TRIGGER TELEMETRY UPDATE
-				// Now we have the real identity (Name + ID)
+				// INITIALIZE TELEMETRY WITH CONFIRMED IDENTITY
+				// Now we have the real identity (Name + ID) - this is the first and only telemetry init
 				newGen, _ := idgen.New(state.MachineID)
 				newEntityID := newGen.NewEntityID(idgen.EntityRack, 0)
 
-				if err := telemetry.UpdateIdentity(context.Background(), newEntityID, state.Name); err != nil {
-					logger.Warn("Failed to update telemetry identity", "error", err)
+				telCfg := telemetry.Config{
+					ServiceName:         cfg.Telemetry.ServiceName,
+					ServiceVersion:      version.Version,
+					EntityID:            newEntityID,
+					EntityName:          state.Name,
+					Component:           string(loggerPkg.TypeRack),
+					BatchIntervalString: cfg.Telemetry.BatchInterval,
+					BaseSubject:         cfg.Telemetry.BaseSubject,
+					MaxBatchSize:        cfg.Telemetry.MaxBatchSize,
+					Logging:             cfg.Logging,
+					Store:               cfg.Store,
+					Throttling:          cfg.Logging.Throttling,
+					StdoutEnabled:       true,
+					StdoutLevel:         "info",
+					Metrics: telemetry.MetricsConfig{
+						HostEnabled:    cfg.Telemetry.Metrics.HostEnabled,
+						RuntimeEnabled: cfg.Telemetry.Metrics.RuntimeEnabled,
+						BentoEnabled:   cfg.Telemetry.Metrics.BentoEnabled,
+					},
 				}
 
-				// Refresh local logger reference IMMEDIATELY so we can log the success event with the new identity
-				logger = slog.Default()
-				logger.Info("Telemetry Identity Updated", "id", state.MachineID, "name", state.Name)
+				// Override Level if FLUXRIG_TRACE is set
+				if os.Getenv("FLUXRIG_TRACE") == "true" || os.Getenv("FLUXRIG_TRACE") == "1" {
+					telCfg.Logging.Level = "trace"
+				}
+
+				if os.Getenv("FLUXRIG_DISABLE_TELEMETRY") != "true" {
+					shutdownTel, errInit := telemetry.Init(context.Background(), telCfg, natsBus, logBuffer, newGen)
+					if errInit != nil {
+						logger.Warn("Failed to init telemetry", "error", errInit)
+					} else {
+						defer func() {
+							shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+							defer cancel()
+							if errStop := shutdownTel(shutdownCtx); errStop != nil {
+								logger.Error("Telemetry shutdown error", "error", errStop)
+							}
+						}()
+						// Update logger to use OTel Bridge
+						logger = slog.Default().With(
+							"component", string(loggerPkg.TypeRack),
+							"name", state.Name,
+						)
+						slog.SetDefault(logger)
+						logger.Info("Telemetry Initialized", "id", state.MachineID, "name", state.Name)
+					}
+				}
 			} else {
 				// No passport? Should not happen in strict mode implementation
 				logger.Warn("No passport received in HelloResponse?")
 			}
 
 			// STATUS HANDLING
-			currentStatus := resp.Status
-			logger.Info("Current Status", "status", currentStatus)
+			newStatus := resp.Status
+			logger.Info("Current Status", "status", newStatus)
 
 		case <-time.After(enrollTimeout):
 			if cfg.Rack.MachineID == 0 {
 				logger.Warn("Enrollment Timeout. No Passport received.")
-				// Fallback or retry? For now continue as pending.
+				// Fallback: Init telemetry with best-effort identity (rack name from config)
+				fallbackName := cfg.Rack.Name
+				if fallbackName == "" {
+					fallbackName = "pending"
+				}
+				entityID := gen.NewEntityID(idgen.EntityRack, 0)
+
+				telCfg := telemetry.Config{
+					ServiceName:         cfg.Telemetry.ServiceName,
+					ServiceVersion:      version.Version,
+					EntityID:            entityID,
+					EntityName:          fallbackName,
+					Component:           string(loggerPkg.TypeRack),
+					BatchIntervalString: cfg.Telemetry.BatchInterval,
+					BaseSubject:         cfg.Telemetry.BaseSubject,
+					MaxBatchSize:        cfg.Telemetry.MaxBatchSize,
+					Logging:             cfg.Logging,
+					Store:               cfg.Store,
+					Throttling:          cfg.Logging.Throttling,
+					StdoutEnabled:       true,
+					StdoutLevel:         "info",
+					Metrics: telemetry.MetricsConfig{
+						HostEnabled:    cfg.Telemetry.Metrics.HostEnabled,
+						RuntimeEnabled: cfg.Telemetry.Metrics.RuntimeEnabled,
+						BentoEnabled:   cfg.Telemetry.Metrics.BentoEnabled,
+					},
+				}
+
+				if os.Getenv("FLUXRIG_DISABLE_TELEMETRY") != "true" {
+					shutdownTel, errInit := telemetry.Init(context.Background(), telCfg, natsBus, logBuffer, gen)
+					if errInit != nil {
+						logger.Warn("Failed to init telemetry (fallback)", "error", errInit)
+					} else {
+						defer func() {
+							shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+							defer cancel()
+							if errStop := shutdownTel(shutdownCtx); errStop != nil {
+								logger.Error("Telemetry shutdown error", "error", errStop)
+							}
+						}()
+						logger = slog.Default().With("component", string(loggerPkg.TypeRack), "name", fallbackName)
+						slog.SetDefault(logger)
+						logger.Info("Telemetry Initialized (fallback)", "name", fallbackName)
+					}
+				}
 			} else {
 				logger.Info("Resuming Session (Offline/Timeout)", "id", cfg.Rack.MachineID)
+				// Resuming from saved passport - init telemetry with saved identity
+				entityID := gen.NewEntityID(idgen.EntityRack, 0)
+
+				telCfg := telemetry.Config{
+					ServiceName:         cfg.Telemetry.ServiceName,
+					ServiceVersion:      version.Version,
+					EntityID:            entityID,
+					EntityName:          cfg.Rack.Name,
+					Component:           string(loggerPkg.TypeRack),
+					BatchIntervalString: cfg.Telemetry.BatchInterval,
+					BaseSubject:         cfg.Telemetry.BaseSubject,
+					MaxBatchSize:        cfg.Telemetry.MaxBatchSize,
+					Logging:             cfg.Logging,
+					Store:               cfg.Store,
+					Throttling:          cfg.Logging.Throttling,
+					StdoutEnabled:       true,
+					StdoutLevel:         "info",
+					Metrics: telemetry.MetricsConfig{
+						HostEnabled:    cfg.Telemetry.Metrics.HostEnabled,
+						RuntimeEnabled: cfg.Telemetry.Metrics.RuntimeEnabled,
+						BentoEnabled:   cfg.Telemetry.Metrics.BentoEnabled,
+					},
+				}
+
+				if os.Getenv("FLUXRIG_DISABLE_TELEMETRY") != "true" {
+					shutdownTel, errInit := telemetry.Init(context.Background(), telCfg, natsBus, logBuffer, gen)
+					if errInit != nil {
+						logger.Warn("Failed to init telemetry (resume)", "error", errInit)
+					} else {
+						defer func() {
+							shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+							defer cancel()
+							if errStop := shutdownTel(shutdownCtx); errStop != nil {
+								logger.Error("Telemetry shutdown error", "error", errStop)
+							}
+						}()
+						logger = slog.Default().With("component", string(loggerPkg.TypeRack), "name", cfg.Rack.Name)
+						slog.SetDefault(logger)
+						logger.Info("Telemetry Initialized (resume)", "id", cfg.Rack.MachineID, "name", cfg.Rack.Name)
+					}
+				}
 			}
 		}
 
@@ -338,9 +436,9 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 		// 1. Notifications (Status/Commands)
 		if mID > 0 {
 			notifyTopic := fmt.Sprintf("fluxrig.agent.notify.%d", mID)
-			_, err = natsBus.Subscribe(notifyTopic, func(msg *fluxmsg.FluxMsg) {
-				hbResp, err := fluxmsg.ParseHeartbeatResponse(msg.Data)
-				if err != nil {
+			_, err = managedBus.Subscribe(notifyTopic, func(msg *fluxmsg.FluxMsg) {
+				hbResp, errParse := fluxmsg.ParseHeartbeatResponse(msg.Data)
+				if errParse != nil {
 					return
 				}
 				// Handle Status/Command (Logic shared with enrollment response path?)
@@ -356,18 +454,18 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 				// Handle Passport Update (Adoption)
 				if len(hbResp.Passport) > 0 {
 					env := pki.StateEnvelope{}
-					if err := msgpack.Unmarshal(hbResp.Passport, &env); err != nil {
-						logger.Error("Adoption: Failed to unmarshal passport envelope", "error", err)
+					if errAdopt := msgpack.Unmarshal(hbResp.Passport, &env); errAdopt != nil {
+						logger.Error("Adoption: Failed to unmarshal passport envelope", "error", errAdopt)
 					} else {
 						// Verify
-						state, err := env.Verify()
-						if err != nil {
-							logger.Error("Adoption: Passport invalid", "error", err)
+						state, errVerify := env.Verify()
+						if errVerify != nil {
+							logger.Error("Adoption: Passport invalid", "error", errVerify)
 						} else {
 							// Save
 							statePath := filepath.Join(cfg.Store.Dir, cfg.Store.StateFile)
-							if err := env.Save(statePath); err != nil {
-								logger.Error("Adoption: Failed to save state.flux", "error", err)
+							if errSave := env.Save(statePath); errSave != nil {
+								logger.Error("Adoption: Failed to save state.flux", "error", errSave)
 							} else {
 								logger.Info("Received Updated Passport via Heartbeat", "id", state.MachineID, "name", state.Name)
 								logger.Info("Adoption: Passport Saved", "path", statePath)
@@ -378,14 +476,8 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 									currentStatus = state.Status
 								}
 
-								// Update Telemetry Identity
-								newGen, _ := idgen.New(state.MachineID)
-								newEntityID := newGen.NewEntityID(idgen.EntityRack, 0)
-								if err := telemetry.UpdateIdentity(context.Background(), newEntityID, state.Name); err != nil {
-									logger.Warn("Adoption: Failed to update telemetry identity", "error", err)
-								}
-								// Update local logger
-								logger = slog.Default()
+								// NOTE: Telemetry identity was set at init and doesn't need updating.
+								// The entity_id and entity_name are fixed for the lifetime of this process.
 								logger.Info("Adoption: Identity Updated", "name", state.Name)
 							}
 						}
@@ -403,10 +495,10 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 		// 2. Scenario Updates
 		// Topic: fluxrig.rack.{name}.scenario
 		scenarioTopic := fluxmsg.SubjectScenarioPrefix + helloName + fluxmsg.SubjectScenarioSuffix
-		_, err = natsBus.Subscribe(scenarioTopic, func(msg *fluxmsg.FluxMsg) {
-			payload, err := fluxmsg.ParseScenarioPayload(msg.Data)
-			if err != nil {
-				logger.Error("Failed to parse scenario payload", "error", err)
+		_, err = managedBus.Subscribe(scenarioTopic, func(msg *fluxmsg.FluxMsg) {
+			payload, errParse := fluxmsg.ParseScenarioPayload(msg.Data)
+			if errParse != nil {
+				logger.Error("Failed to parse scenario payload", "error", errParse)
 				return
 			}
 
@@ -418,13 +510,13 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 
 			// Parse and apply the scenario
 			var sc registry.Scenario
-			if err := yaml.Unmarshal(payload.Scenario, &sc); err != nil {
-				logger.Error("Failed to parse scenario YAML", "error", err)
+			if errParseSc := yaml.Unmarshal(payload.Scenario, &sc); errParseSc != nil {
+				logger.Error("Failed to unmarshal scenario from payload", "error", errParseSc)
 				return
 			}
 
-			if err := rtManager.ApplyScenario(context.Background(), &sc); err != nil {
-				logger.Error("Failed to apply scenario", "error", err)
+			if errApply := rtManager.ApplyScenario(context.Background(), &sc); errApply != nil {
+				logger.Error("Failed to apply scenario", "error", errApply)
 				return
 			}
 
@@ -444,8 +536,8 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 	// 4. Heartbeat Loop
 	// Initial heartbeat
 	if busConnected {
-		if err := sendHeartbeat(ctx, natsBus, mID, cfg, gen); err != nil {
-			logger.Warn("Failed to send initial heartbeat", "error", err)
+		if errHBInit := sendHeartbeat(ctx, managedBus, mID, cfg, gen); errHBInit != nil {
+			logger.Warn("Failed to send initial heartbeat", "error", errHBInit)
 		}
 	}
 
@@ -453,15 +545,6 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 
 	ticker := time.NewTicker(hbInterval)
 	defer ticker.Stop()
-
-	// Metrics
-	meter := otel.Meter("flux-rack")
-	hbCounter, err := meter.Int64Counter("heartbeats_sent", metric.WithDescription("Number of heartbeats sent"))
-	if err != nil {
-		logger.Warn("Failed to create heartbeat counter", "error", err)
-	} else {
-		logger.Info("Heartbeat metric counter created", "name", "heartbeats_sent")
-	}
 
 	// Block forever
 	// Heartbeat Loop (with reconnect handling)
@@ -475,12 +558,13 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 		case <-ticker.C:
 			if busConnected {
 				// We use current mID (might have changed after passport load)
-				if err := sendHeartbeat(ctx, natsBus, mID, cfg, gen); err != nil {
+				if err := sendHeartbeat(ctx, managedBus, mID, cfg, gen); err != nil {
 					logger.Warn("Failed to send heartbeat", "error", err)
 				} else {
 					logger.Debug("Sent Heartbeat", "mid", mID)
-					if hbCounter != nil {
-						hbCounter.Add(context.Background(), 1)
+					// INSTRUMENTATION: Heartbeat Sent
+					if ms := telemetry.GetMetrics(); ms != nil {
+						ms.HeartbeatsSent.Add(ctx, 1)
 						logger.Debug("Incremented heartbeats_sent metric")
 					}
 				}
@@ -489,7 +573,7 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 	}
 }
 
-func sendHello(b *bus.NatsBus, p *fluxmsg.HelloPayload, gen *idgen.IDGenerator) error {
+func sendHello(b bus.Bus, p *fluxmsg.HelloPayload, gen *idgen.IDGenerator) error {
 	data, err := p.ToData()
 	if err != nil {
 		return err
@@ -507,7 +591,7 @@ func sendHello(b *bus.NatsBus, p *fluxmsg.HelloPayload, gen *idgen.IDGenerator) 
 	return b.Publish(fluxmsg.SubjectAgentHello, msg)
 }
 
-func sendHeartbeat(ctx context.Context, b *bus.NatsBus, mid uint16, cfg *config.RackConfig, gen *idgen.IDGenerator) error {
+func sendHeartbeat(ctx context.Context, b bus.Bus, mid uint16, cfg *config.RackConfig, gen *idgen.IDGenerator) error {
 	stats := map[string]any{
 		"goroutines": runtime.NumGoroutine(),
 	}

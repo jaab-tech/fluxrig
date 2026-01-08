@@ -1,0 +1,15 @@
+[logging]
+level = "debug"
+filename = "logs/rack.log"
+
+[store]
+dir = "./data"
+state_file = "state.flux"
+
+[rack]
+name = "rack-e2e-01"
+heartbeat_interval = "1s"
+
+[rack.bus]
+url = "nats://localhost:4223"
+root_ca = "../certs/ca.crt"

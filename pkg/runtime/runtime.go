@@ -1,3 +1,17 @@
+// Copyright 2025 JAAB Tech SAS, Uruguay
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package runtime
 
 import (
@@ -16,6 +30,9 @@ import (
 	"github.com/jaab-tech/fluxrig/pkg/logger"
 	"github.com/jaab-tech/fluxrig/pkg/registry"
 	"github.com/jaab-tech/fluxrig/pkg/sdk"
+	"github.com/jaab-tech/fluxrig/pkg/telemetry"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 )
 
 // Manager orchestrates the lifecycle of Gears on a Rack.
@@ -25,6 +42,7 @@ type Manager struct {
 	factory   *gears.Factory
 	machineID uint64
 	rackName  string
+	timeout   time.Duration
 
 	activeGears map[string]sdk.NativeGear
 	gearPorts   map[string]map[string]uint64 // gear -> port -> entityID
@@ -33,13 +51,17 @@ type Manager struct {
 	mu          sync.Mutex
 }
 
-func NewManager(log *slog.Logger, b bus.Bus, ig *idgen.IDGenerator, mid uint64, name string) *Manager {
+func NewManager(log *slog.Logger, b bus.Bus, ig *idgen.IDGenerator, mid uint64, name string, timeout time.Duration) *Manager {
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
 	return &Manager{
 		bus:         b,
 		idGen:       ig,
 		factory:     gears.NewFactory(),
 		machineID:   mid,
 		rackName:    name,
+		timeout:     timeout,
 		activeGears: make(map[string]sdk.NativeGear),
 		gearPorts:   make(map[string]map[string]uint64),
 		gearIDs:     make(map[string]uint64),
@@ -189,6 +211,7 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) erro
 					"wire", wireLabel,
 					"port_id", fmt.Sprintf("0x%x", portID),
 					"gear", toGear,
+					"payload", string(msg.RawPayload),
 				)
 			} else if os.Getenv("FLUXRIG_DEBUG") == "true" {
 				m.logger().Debug("FluxMsg received",
@@ -198,10 +221,26 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) erro
 			}
 
 			// Delivery to Target Gear
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			timeoutCtx, cancel := context.WithTimeout(context.Background(), m.timeout)
 			defer cancel()
 
-			resp, err := targetGear.Process(ctx, msg)
+			start := time.Now()
+			resp, err := targetGear.Process(timeoutCtx, msg)
+			duration := time.Since(start).Seconds()
+
+			// INSTRUMENTATION: Gear Input
+			if tm := telemetry.GetMetrics(); tm != nil {
+				metricCtx := context.Background()
+				attrs := metric.WithAttributes(attribute.String("gear", toGear))
+
+				tm.GearMessagesIn.Add(metricCtx, 1, attrs)
+				tm.GearProcessingTime.Record(metricCtx, duration, attrs)
+
+				if err != nil {
+					tm.GearErrors.Add(metricCtx, 1, attrs)
+				}
+			}
+
 			if err != nil {
 				m.logger().Error("processing failed", "gear", toGear, "error", err)
 				return
@@ -253,10 +292,25 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) erro
 					"port_id", fmt.Sprintf("0x%x", portID),
 					"gear", name,
 					"subject", outSubject,
+					"payload", string(msg.RawPayload),
 				)
 			}
 
+			// INSTRUMENTATION: Gear Output
+			if tm := telemetry.GetMetrics(); tm != nil {
+				metricCtx := context.Background()
+				attrs := metric.WithAttributes(attribute.String("gear", name))
+				tm.GearMessagesOut.Add(metricCtx, 1, attrs)
+			}
+
 			if err := m.bus.Publish(outSubject, msg); err != nil {
+				if tm := telemetry.GetMetrics(); tm != nil {
+					metricCtx := context.Background()
+					attrs := metric.WithAttributes(attribute.String("gear", name))
+					tm.GearErrors.Add(metricCtx, 1, attrs) // Count emit errors as gear errors? or just log?
+					// Usually emit error is platform error, not gear logic error.
+					// But impact is gear failed to processing.
+				}
 				m.logger().Error("emit failed", "gear", name, "error", err)
 			}
 		}

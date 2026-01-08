@@ -1,3 +1,17 @@
+// Copyright 2025 JAAB Tech SAS, Uruguay
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package config
 
 import (
@@ -41,13 +55,13 @@ cluster_key_file = "custom.key"
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.Remove(tmpfile.Name())
+	defer func() { _ = os.Remove(tmpfile.Name()) }()
 
-	if _, err := tmpfile.Write([]byte(content)); err != nil {
-		t.Fatal(err)
+	if _, errWr := tmpfile.Write([]byte(content)); errWr != nil {
+		t.Fatal(errWr)
 	}
-	if err := tmpfile.Close(); err != nil {
-		t.Fatal(err)
+	if errClose := tmpfile.Close(); errClose != nil {
+		t.Fatal(errClose)
 	}
 
 	cfg, err := LoadMixer(tmpfile.Name())
@@ -67,10 +81,10 @@ cluster_key_file = "custom.key"
 }
 
 func TestLoadMixer_EnvOverride(t *testing.T) {
-	os.Setenv("FLUXRIG_LOGGING_LEVEL", "debug")
-	os.Setenv("FLUXRIG_API_PORT", "7777")
-	defer os.Unsetenv("FLUXRIG_LOGGING_LEVEL")
-	defer os.Unsetenv("FLUXRIG_API_PORT")
+	_ = os.Setenv("FLUXRIG_LOGGING_LEVEL", "debug")
+	_ = os.Setenv("FLUXRIG_API_PORT", "7777")
+	defer func() { _ = os.Unsetenv("FLUXRIG_LOGGING_LEVEL") }()
+	defer func() { _ = os.Unsetenv("FLUXRIG_API_PORT") }()
 
 	cfg, err := LoadMixer("")
 	if err != nil {

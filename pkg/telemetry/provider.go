@@ -1,3 +1,17 @@
+// Copyright 2025 JAAB Tech SAS, Uruguay
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package telemetry
 
 import (
@@ -18,6 +32,7 @@ import (
 	"github.com/jaab-tech/fluxrig/pkg/telemetry/wal"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -121,10 +136,22 @@ func (m *MultiHandler) WithGroup(name string) slog.Handler {
 // Global state
 var (
 	currentShutdown func(context.Context) error
-	currentBus      bus.Bus
-	currentConfig   Config
-	currentGen      *idgen.IDGenerator
+	currentMetrics  *Metrics
+	currentMP       *sdkmetric.MeterProvider
 )
+
+// GetMetrics returns the initialized OTel instruments.
+func GetMetrics() *Metrics {
+	return currentMetrics
+}
+
+// GetMeter returns a named meter from the active provider.
+func GetMeter(name string) metric.Meter {
+	if currentMP != nil {
+		return currentMP.Meter(name)
+	}
+	return otel.GetMeterProvider().Meter(name)
+}
 
 // Init initializes telemetry with Binary WAL + Shipper strategy.
 func Init(ctx context.Context, cfg Config, b bus.Bus, logBuffer *BufferHandler, gen *idgen.IDGenerator) (func(context.Context) error, error) {
@@ -132,14 +159,8 @@ func Init(ctx context.Context, cfg Config, b bus.Bus, logBuffer *BufferHandler, 
 		_ = currentShutdown(context.Background())
 	}
 
-	currentConfig = cfg
-	currentBus = b
 	if cfg.MaxBatchSize == 0 {
 		cfg.MaxBatchSize = 512
-	}
-	// MaxWALSizeMB is now in Store config
-	if gen != nil {
-		currentGen = gen
 	}
 
 	// 1. Resource (OTel)
@@ -164,8 +185,8 @@ func Init(ctx context.Context, cfg Config, b bus.Bus, logBuffer *BufferHandler, 
 	}
 	walDir := filepath.Join(storeDir, "wal")
 
-	if err := os.MkdirAll(walDir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create wal dir %s: %w", walDir, err)
+	if errMkdir := os.MkdirAll(walDir, 0750); errMkdir != nil {
+		return nil, fmt.Errorf("failed to create wal dir %s: %w", walDir, errMkdir)
 	}
 
 	// [WAL Configuration]
@@ -209,8 +230,8 @@ func Init(ctx context.Context, cfg Config, b bus.Bus, logBuffer *BufferHandler, 
 
 	// Ensure directory exists
 	if logDir := filepath.Dir(textPath); logDir != "." && logDir != "/" {
-		if err := os.MkdirAll(logDir, 0755); err != nil {
-			return nil, fmt.Errorf("failed to create log dir %s: %w", logDir, err)
+		if errMkdir := os.MkdirAll(logDir, 0750); errMkdir != nil {
+			return nil, fmt.Errorf("failed to create log dir %s: %w", logDir, errMkdir)
 		}
 	}
 
@@ -227,6 +248,21 @@ func Init(ctx context.Context, cfg Config, b bus.Bus, logBuffer *BufferHandler, 
 		Writer:     textRotator,
 	})
 	handlers = append(handlers, l.Handler())
+
+	// 3b. Stdout Logs (Compliant Format)
+	if cfg.StdoutEnabled {
+		level := cfg.StdoutLevel
+		if level == "" {
+			level = "info"
+		}
+		stdoutHandler := loggerPkg.New(loggerPkg.Config{
+			Level:      level,
+			EntityType: loggerPkg.EntityType(cfg.Component),
+			Name:       cfg.EntityName,
+			Writer:     os.Stdout,
+		}).Handler()
+		handlers = append(handlers, stdoutHandler)
+	}
 
 	// Combine Types
 	multi := NewMultiHandler(handlers...)
@@ -247,18 +283,20 @@ func Init(ctx context.Context, cfg Config, b bus.Bus, logBuffer *BufferHandler, 
 	logShipper.Start()
 
 	// 6. Traces & Metrics (Standard OTel via NATS)
-	writer := NewNatsWriter(b, cfg.EntityID, cfg.EntityName, cfg.BaseSubject)
+	writer := NewNatsWriter(b, cfg.EntityID, cfg.EntityName, cfg.BaseSubject, gen)
 	spanExporter := NewSpanExporter(writer)
 	metricExporter := NewMetricExporter(writer)
 
 	// ... OTel boilerplate ...
-	batchInterval := 5 * time.Second
-	// (cfg parsing logic removed for brevity, assume default)
+	batchInterval, _ := time.ParseDuration(cfg.BatchIntervalString)
+	if batchInterval == 0 {
+		batchInterval = 5 * time.Second // Final fallback if config missing
+	}
 
 	dualIDProcessor := NewDualIDSpanProcessor()
 	batchSpanProcessor := sdktrace.NewBatchSpanProcessor(spanExporter,
 		sdktrace.WithBatchTimeout(batchInterval),
-		sdktrace.WithMaxExportBatchSize(512),
+		sdktrace.WithMaxExportBatchSize(cfg.MaxBatchSize),
 	)
 
 	tp := sdktrace.NewTracerProvider(
@@ -276,6 +314,7 @@ func Init(ctx context.Context, cfg Config, b bus.Bus, logBuffer *BufferHandler, 
 		sdkmetric.WithReader(metricReader),
 	)
 	otel.SetMeterProvider(mp)
+	currentMP = mp
 
 	// Propagators
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
@@ -283,7 +322,24 @@ func Init(ctx context.Context, cfg Config, b bus.Bus, logBuffer *BufferHandler, 
 		propagation.Baggage{},
 	))
 
-	// 7. Flush Buffer (Replay early logs)
+	// 7. Initialize Instruments (Metrics Struct)
+	ms, err := NewMetrics(mp.Meter("fluxrig-telemetry"))
+	if err != nil {
+		// Log but don't fail entire init? Or fail?
+		// Fail implies no metrics.
+		// Let's return error.
+		return nil, fmt.Errorf("failed to create instruments: %w", err)
+	}
+	currentMetrics = ms
+
+	// 8. Initialize Host/Runtime Metrics (if enabled)
+	slog.Info("Initializing Host/Runtime Metrics", "host", cfg.Metrics.HostEnabled, "runtime", cfg.Metrics.RuntimeEnabled, "bento", cfg.Metrics.BentoEnabled)
+	if err := InitHostMetrics(ctx, cfg.Metrics); err != nil {
+		slog.Warn("Failed to initialize host/runtime metrics", "error", err)
+		// Don't fail the whole startup, just warn
+	}
+
+	// 8. Flush Buffer (Replay early logs)
 	if logBuffer != nil {
 		_ = logBuffer.FlushTo(ctx, sourceWrapped)
 	}
@@ -299,7 +355,7 @@ func Init(ctx context.Context, cfg Config, b bus.Bus, logBuffer *BufferHandler, 
 		// Prepare for shutdown
 		// Prepare for shutdown
 		logShipper.Stop()
-		walInstance.Close()
+		_ = walInstance.Close()
 
 		if err := tp.ForceFlush(shutdownCtx); err != nil {
 			errs = err
@@ -318,17 +374,4 @@ func Init(ctx context.Context, cfg Config, b bus.Bus, logBuffer *BufferHandler, 
 
 	currentShutdown = cleanup
 	return cleanup, nil
-}
-
-// UpdateIdentity restarts telemetry with new ID and Name
-func UpdateIdentity(ctx context.Context, id uint64, name string) error {
-	if currentBus == nil {
-		return fmt.Errorf("telemetry not initialized")
-	}
-	newConfig := currentConfig
-	newConfig.EntityID = id
-	newConfig.EntityName = name
-
-	_, err := Init(ctx, newConfig, currentBus, nil, currentGen)
-	return err
 }

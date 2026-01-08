@@ -1,3 +1,17 @@
+// Copyright 2025 JAAB Tech SAS, Uruguay
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package rotator
 
 import (
@@ -12,7 +26,7 @@ func TestRotator(t *testing.T) {
 	logPath := filepath.Join(tmpDir, "test.log")
 
 	// 1. Create Rotator (Small limit: 10 bytes)
-	r, err := New(logPath, 0, 2, false) // 0MB effectively 0 bytes?
+	_, _ = New(logPath, 0, 2, false) // 0MB effectively 0 bytes?
 	// maxSizeMB is int. 0 would mean 0 bytes.
 	// If I pass 0, size+writeLen > 0 always true?
 	// Let's check impl: maxSizeBytes = maxSizeMB * 1024 * 1024.
@@ -26,14 +40,14 @@ func TestRotator(t *testing.T) {
 	// But I can construct directly or write 1MB.
 	// Writing 1MB is fast.
 
-	r, err = New(logPath, 1, 2, false)
+	r, err := New(logPath, 1, 2, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Hack: adjust maxSize via reflection? No.
 	// Construct struct manually? r is pointer.
 	r.maxSize = 10 // 10 bytes
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 
 	// 2. Write 5 bytes
 	if _, err := r.Write([]byte("12345")); err != nil {
@@ -60,11 +74,14 @@ func TestCleanup(t *testing.T) {
 
 	// Create dummy backups
 	base := logPath
-	os.Create(base + ".1")
+	f1, _ := os.Create(filepath.Clean(base + ".1"))
+	_ = f1.Close()
 	time.Sleep(10 * time.Millisecond)
-	os.Create(base + ".2")
+	f2, _ := os.Create(filepath.Clean(base + ".2"))
+	_ = f2.Close()
 	time.Sleep(10 * time.Millisecond)
-	os.Create(base + ".3")
+	f3, _ := os.Create(filepath.Clean(base + ".3"))
+	_ = f3.Close()
 
 	r := &Rotator{
 		filename:   logPath,

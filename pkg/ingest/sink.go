@@ -1,3 +1,17 @@
+// Copyright 2025 JAAB Tech SAS, Uruguay
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package ingest
 
 import (
@@ -11,23 +25,55 @@ import (
 	"github.com/jaab-tech/fluxrig/pkg/bus"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/jaab-tech/fluxrig/pkg/store/duckdb"
+	"github.com/jaab-tech/fluxrig/pkg/telemetry"
+)
+
+const (
+	// Telemetry Message Types
+	TypeBatchSpans   = "telemetry.batch.spans"
+	TypeBatchLogs    = "telemetry.batch.logs"
+	TypeBatchMetrics = "telemetry.batch.metrics"
+	TypeMetric       = "telemetry.metric"
+	TypeLogJSON      = "telemetry.log.json"
+	TypeLog          = "telemetry.log"
+
+	// SQL Queries
+	queryInsertSpan = `
+		INSERT INTO telemetry_spans (trace_id, span_id, parent_span_id, name, start_time, end_time, entity_id, entity_name, attributes)
+		VALUES (?, ?, ?, ?, to_timestamp(?/1000000.0), to_timestamp(?/1000000.0), ?, ?, ?)
+	`
+	queryInsertLog = `
+		INSERT INTO telemetry_logs (timestamp, entity_id, entity_type, entity_name, trace_id, span_id, severity, source_file, source_line, source_func, body, attributes)
+		VALUES (to_timestamp(?/1000000.0), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`
+	queryInsertMetric = `
+		INSERT INTO telemetry_metrics (timestamp, entity_id, entity_name, name, description, unit, type, value, attributes)
+		VALUES (to_timestamp(?/1000000.0), ?, ?, ?, ?, ?, ?, ?, ?)
+	`
 )
 
 // TelemetrySink consumes telemetry batches from NATS and writes them to DuckDB.
 type TelemetrySink struct {
-	bus     bus.Bus
-	store   *duckdb.Store
-	sub     bus.Subscription
-	dataDir string
-	stopCh  chan struct{}
+	bus           bus.Bus
+	store         *duckdb.Store
+	sub           bus.Subscription
+	dataDir       string
+	stopCh        chan struct{}
+	flushInterval time.Duration
+	cache         *telemetry.MetricsCache
 }
 
-func NewTelemetrySink(b bus.Bus, s *duckdb.Store, dataDir string) *TelemetrySink {
+func NewTelemetrySink(b bus.Bus, s *duckdb.Store, dataDir string, interval time.Duration, cache *telemetry.MetricsCache) *TelemetrySink {
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
 	return &TelemetrySink{
-		bus:     b,
-		store:   s,
-		dataDir: dataDir,
-		stopCh:  make(chan struct{}),
+		bus:           b,
+		store:         s,
+		dataDir:       dataDir,
+		stopCh:        make(chan struct{}),
+		flushInterval: interval,
+		cache:         cache,
 	}
 }
 
@@ -40,9 +86,9 @@ func (s *TelemetrySink) Start() error {
 	}
 	s.sub = sub
 
-	// Start Flush Loop (5s)
+	// Start Flush Loop
 	go func() {
-		ticker := time.NewTicker(5 * time.Second)
+		ticker := time.NewTicker(s.flushInterval)
 		defer ticker.Stop()
 		for {
 			select {
@@ -80,19 +126,20 @@ func (s *TelemetrySink) handleMessage(msg *fluxmsg.FluxMsg) {
 
 	var err error
 	switch msgType {
-	case "telemetry.batch.spans":
+
+	case TypeBatchSpans:
 		err = s.persistSpans(msg)
-	case "telemetry.batch.logs":
+	case TypeBatchLogs:
 		err = s.persistLogs(msg)
-	case "telemetry.batch.metrics":
+	case TypeBatchMetrics:
 		err = s.persistMetrics(msg)
-	case "telemetry.metric":
+	case TypeMetric:
 		// Individual metric (not batched)
 		err = s.persistMetrics(msg)
-	case "telemetry.log.json":
+	case TypeLogJSON:
 		// Individual log from JSON handler
 		err = s.persistSingleLog(msg)
-	case "telemetry.log":
+	case TypeLog:
 		// Individual log from WAL (MsgPack)
 		err = s.persistMsgPackLog(msg)
 	default:
@@ -107,19 +154,18 @@ func (s *TelemetrySink) handleMessage(msg *fluxmsg.FluxMsg) {
 
 func (s *TelemetrySink) persistSpans(msg *fluxmsg.FluxMsg) error {
 	// Payload is msg.Data["batch"] -> []map[string]interface{}
-	batch, ok := msg.Data["batch"].([]interface{}) // JSON decoding often gives []interface{}
+	// Payload is msg.Data["batch"] -> []map[string]interface{}
+	batch, ok := msg.Data["batch"].([]interface{})
 	if !ok {
-		// If it came from internal Go code directly it might be []map[string]interface{}
-		// But msgpack unmarshal usually gives generic types.
-		// For now, let's assume it works or add robust check.
-		return fmt.Errorf("invalid batch format")
+		return fmt.Errorf("invalid batch format for spans: expected []interface{}, got %T", msg.Data["batch"])
 	}
 
-	// Prepare Statement (Bulk Insert optimization omitted for brevity/POC)
-	// We do row-by-row for simplicity in POC.
+	// Prepare Statement (Bulk Insert optimization deferred)
+	// We iterate row-by-row.
 	for _, item := range batch {
 		span, ok := item.(map[string]interface{})
 		if !ok {
+			// Skip invalid items instead of aborting
 			continue
 		}
 
@@ -147,10 +193,7 @@ func (s *TelemetrySink) persistSpans(msg *fluxmsg.FluxMsg) error {
 
 		attrJSON, _ := json.Marshal(span["attributes"])
 
-		_, err := s.store.DB().Exec(`
-			INSERT INTO telemetry_spans (trace_id, span_id, parent_span_id, name, start_time, end_time, entity_id, entity_name, attributes)
-			VALUES (?, ?, ?, ?, to_timestamp(?/1000000.0), to_timestamp(?/1000000.0), ?, ?, ?)
-		`,
+		_, err := s.store.DB().Exec(queryInsertSpan,
 			str("trace_id"), str("span_id"), str("parent_span_id"), str("name"),
 			//nolint:gosec // conversion safe for this context
 			int64(u64("start_time")),
@@ -188,7 +231,13 @@ func extractIdentityAndSource(defaultName string, log map[string]interface{}) (e
 			}
 
 			if n, ok := m["flux.name"].(string); ok && n != "" {
-				eName = n
+				// Only promote to Entity Name if it's a Gear or Snake.
+				// For Controllers/Scenarios, we want to preserve the Physical Entity (e.g. Mixer).
+				if eType == "GEAR" || eType == "SNAKE" {
+					eName = n
+					delete(m, "flux.name") // Remove if promoted
+				}
+				// If not promoted, it remains in m (attributes) for the DB.
 			}
 			// Note: We intentionally DO NOT fallback to "name" for EntityName
 			// because "name" is too common for metrics/events (e.g. "heartbeats_sent").
@@ -224,8 +273,6 @@ func extractIdentityAndSource(defaultName string, log map[string]interface{}) (e
 
 			// Clean up identity keys that were promoted to columns
 			delete(m, "flux.type")
-			delete(m, "component")
-			delete(m, "flux.name")
 			delete(m, "name")
 		}
 	}
@@ -235,7 +282,7 @@ func extractIdentityAndSource(defaultName string, log map[string]interface{}) (e
 func (s *TelemetrySink) persistLogs(msg *fluxmsg.FluxMsg) error {
 	batch, ok := msg.Data["batch"].([]interface{})
 	if !ok {
-		return fmt.Errorf("invalid batch format")
+		return fmt.Errorf("invalid batch format for logs: expected []interface{}, got %T", msg.Data["batch"])
 	}
 
 	for _, item := range batch {
@@ -271,10 +318,7 @@ func (s *TelemetrySink) persistLogs(msg *fluxmsg.FluxMsg) error {
 
 		attrJSON, _ := json.Marshal(log["attributes"])
 
-		_, err := s.store.DB().Exec(`
-			INSERT INTO telemetry_logs (timestamp, entity_id, entity_type, entity_name, trace_id, span_id, severity, source_file, source_line, source_func, body, attributes)
-			VALUES (to_timestamp(?/1000000.0), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`,
+		_, err := s.store.DB().Exec(queryInsertLog,
 			//nolint:gosec // timestamp conversion safe
 			int64(u64("timestamp")), u64("entity_id"), eType, eName, str("trace_id"), str("span_id"),
 			str("severity"), sFile, sLine, sFunc, str("body"), string(attrJSON))
@@ -290,14 +334,14 @@ func (s *TelemetrySink) persistMetrics(msg *fluxmsg.FluxMsg) error {
 	msgType := msg.Metadata["type"]
 	var metrics []map[string]any
 
-	if msgType == "telemetry.metric" {
+	if msgType == TypeMetric {
 		// Single metric - msg.Data is the metric itself
 		metrics = []map[string]any{msg.Data}
-	} else if msgType == "telemetry.batch.metrics" {
+	} else if msgType == TypeBatchMetrics {
 		// Batched metrics
 		batch, ok := msg.Data["batch"].([]interface{})
 		if !ok {
-			return fmt.Errorf("invalid batch format")
+			return fmt.Errorf("invalid batch format for metrics: expected []interface{}, got %T", msg.Data["batch"])
 		}
 		for _, item := range batch {
 			if m, ok := item.(map[string]interface{}); ok {
@@ -356,15 +400,24 @@ func (s *TelemetrySink) persistMetrics(msg *fluxmsg.FluxMsg) error {
 
 		attrJSON, _ := json.Marshal(metric["attributes"])
 
-		_, err := s.store.DB().Exec(`
-			INSERT INTO telemetry_metrics (timestamp, entity_id, entity_name, name, description, unit, type, value, attributes)
-			VALUES (to_timestamp(?/1000000.0), ?, ?, ?, ?, ?, ?, ?, ?)
-		`,
+		_, err := s.store.DB().Exec(queryInsertMetric,
 			ts, u64("entity_id"), str("entity_name"), str("name"),
 			str("description"), str("unit"), str("type"), f64("value"), string(attrJSON))
 
 		if err != nil {
 			return err
+		}
+
+		// Update In-Memory Cache
+		if s.cache != nil {
+			// Convert to int64 for cache (which uses Atomic/Gauge)
+			// Truncate float values
+			valFloat := f64("value")
+
+			// Try to extract type from attributes if possible, or leave empty
+			eType := "" // Default
+
+			s.cache.SetGauge(u64("entity_id"), str("name"), valFloat, str("entity_name"), eType)
 		}
 	}
 	return nil
@@ -409,10 +462,7 @@ func (s *TelemetrySink) persistSingleLog(msg *fluxmsg.FluxMsg) error {
 
 	attrJSON, _ := json.Marshal(log["attributes"])
 
-	_, err := s.store.DB().Exec(`
-		INSERT INTO telemetry_logs (timestamp, entity_id, entity_type, entity_name, trace_id, span_id, severity, source_file, source_line, source_func, body, attributes)
-		VALUES (to_timestamp(?/1000000.0), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`,
+	_, err := s.store.DB().Exec(queryInsertLog,
 		//nolint:gosec // timestamp conversion safe
 		int64(u64("timestamp")), u64("entity_id"), eType, eName, str("trace_id"), str("span_id"),
 		str("severity"), sFile, sLine, sFunc, str("body"), string(attrJSON))
@@ -455,10 +505,7 @@ func (s *TelemetrySink) persistMsgPackLog(msg *fluxmsg.FluxMsg) error {
 		attrJSON, _ = json.Marshal(attrs)
 	}
 
-	_, err := s.store.DB().Exec(`
-		INSERT INTO telemetry_logs (timestamp, entity_id, entity_type, entity_name, trace_id, span_id, severity, source_file, source_line, source_func, body, attributes)
-		VALUES (to_timestamp(?/1000000.0), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`,
+	_, err := s.store.DB().Exec(queryInsertLog,
 		//nolint:gosec // timestamp conversion safe
 		int64(u64("timestamp")), u64("entity_id"), eType, eName, str("trace_id"), str("span_id"),
 		str("severity"), sFile, sLine, sFunc, str("body"), string(attrJSON))

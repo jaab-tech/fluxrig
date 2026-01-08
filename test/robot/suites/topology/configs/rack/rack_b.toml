@@ -1,0 +1,10 @@
+[rack]
+name = "rack-b"
+
+[logging]
+level = "trace"
+filename = "logs/rack.log"
+
+[telemetry]
+export_interval = "100ms"
+batch_size = 1
