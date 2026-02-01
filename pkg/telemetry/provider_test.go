@@ -18,7 +18,6 @@ import (
 	"context"
 	"log/slog"
 	"testing"
-	"time"
 
 	"github.com/jaab-tech/fluxrig/pkg/bus"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
@@ -88,20 +87,16 @@ type MockBus struct{}
 func (m *MockBus) Connect(url string, opts bus.ConnectOptions) error {
 	return nil
 }
-func (m *MockBus) Publish(subject string, msg *fluxmsg.FluxMsg) error { return nil }
-func (m *MockBus) PublishWithContext(ctx context.Context, subject string, msg *fluxmsg.FluxMsg) error {
+func (m *MockBus) Publish(ctx context.Context, subject string, msg *fluxmsg.FluxMsg) error {
 	return nil
 }
-func (m *MockBus) PublishRaw(subject string, data []byte, fluxID uint64) error {
+func (m *MockBus) PublishRaw(ctx context.Context, subject string, data []byte, fluxID uint64) error {
 	return nil
 }
 func (m *MockBus) Subscribe(subject string, handler bus.Handler) (bus.Subscription, error) {
 	return nil, nil
 }
 func (m *MockBus) SubscribeDurable(subject, durableName string, handler bus.Handler) (bus.Subscription, error) {
-	return nil, nil
-}
-func (m *MockBus) Request(subject string, msg *fluxmsg.FluxMsg, timeout time.Duration) (*fluxmsg.FluxMsg, error) {
 	return nil, nil
 }
 func (m *MockBus) Close() {}

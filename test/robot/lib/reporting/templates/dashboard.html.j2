@@ -1,9 +1,78 @@
-{%- if title -%}
-<div class="fluxrig-dashboard" style="padding: 8px; background-color: #1a1a2e; border: 1px solid #3a3a5e; border-radius: 4px; margin: 2px 0;"><h2 style="margin: 0 0 5px 0; color: #ffffff; font-family: monospace; font-size: 13px; border-bottom: 1px solid #4a90d9; padding-bottom: 4px;">{{ title }}</h2>
-{%- else -%}
-<div class="fluxrig-dashboard" style="padding: 8px; background-color: #1a1a2e; border: 1px solid #3a3a5e; border-radius: 4px; margin: 2px 0;">
-{%- endif -%}
-{%- for component in components -%}
-{{ component | safe }}
-{%- endfor -%}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+    .fluxrig-dashboard {
+        font-family: 'Inter', system-ui, -apple-system, sans-serif;
+        background-color: #f9fafb;
+        color: #111827;
+        padding: 40px;
+        min-height: 100vh;
+    }
+    .report-container {
+        max-width: 1200px;
+        margin: 0 auto;
+    }
+    .fluxrig-header {
+        border-bottom: 2px solid #e5e7eb;
+        padding-bottom: 16px;
+        margin-bottom: 40px;
+    }
+    .fluxrig-header h1 {
+        margin: 0;
+        font-size: 32px;
+        font-weight: 800;
+        color: #111827;
+        letter-spacing: -0.025em;
+    }
+    .test-case-section {
+        background: #ffffff;
+        border: 1px solid #e5e7eb;
+        border-radius: 12px;
+        padding: 32px;
+        margin-bottom: 48px;
+        box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+    }
+    .grid-row {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 24px;
+        margin-top: 24px;
+    }
+    .full-row {
+        grid-column: 1 / -1;
+    }
+    .chart-card {
+        background: #ffffff;
+        border: 1px solid #e5e7eb;
+        border-radius: 8px;
+        padding: 16px;
+    }
+    .test-case-title {
+        font-size: 24px;
+        font-weight: 700;
+        margin-bottom: 12px;
+        color: #111827;
+    }
+    .test-case-description {
+        background: #eff6ff;
+        border-left: 4px solid #3b82f6;
+        padding: 16px;
+        border-radius: 0 8px 8px 0;
+        margin-bottom: 24px;
+        color: #1e40af;
+        font-size: 15px;
+    }
+</style>
+<div class="fluxrig-dashboard">
+    <div class="report-container">
+        {%- if title -%}
+        <div class="fluxrig-header">
+            <h1>{{ title }}</h1>
+        </div>
+        {%- endif -%}
+        <div id="components-root">
+            {%- for component in components -%}
+                {{ component | safe }}
+            {%- endfor -%}
+        </div>
+    </div>
 </div>

@@ -1,0 +1,28 @@
+[logging]
+level = "trace"
+filename = "logs/mixer.log"
+
+[store]
+dir = "./data"
+wal_max_size_mb = 500
+database_file = "fluxrig.duckdb"
+cluster_key_file = "cluster.key"
+
+[mixer]
+machine_id = 1
+mixer_name = "e2e-mixer"
+
+[api]
+port = 9120
+
+[snake]
+port = 4233
+url = "nats://127.0.0.1:4233"
+cluster_name = "e2e-iso8583"
+
+[observability]
+enabled = true
+tier = "embedded"
+
+[observability.embedded]
+flush_interval = "2s"

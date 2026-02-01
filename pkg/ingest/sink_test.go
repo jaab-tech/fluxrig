@@ -61,7 +61,7 @@ func TestTelemetrySink_Logs(t *testing.T) {
 		"batch": []interface{}{logData},
 	}
 
-	if err := mockBus.Publish("flux.telemetry.logs", logMsg); err != nil {
+	if err := mockBus.Publish(context.Background(), "flux.telemetry.logs", logMsg); err != nil {
 		t.Fatalf("Failed to publish logs: %v", err)
 	}
 
@@ -143,7 +143,7 @@ func TestTelemetrySink_Lifecycle(t *testing.T) {
 
 	// So we need to Publish and then wait/poll DB.
 
-	if err := mockBus.Publish("flux.telemetry.spans", traceMsg); err != nil {
+	if err := mockBus.Publish(context.Background(), "flux.telemetry.spans", traceMsg); err != nil {
 		t.Fatalf("Failed to publish trace: %v", err)
 	}
 
@@ -221,7 +221,7 @@ func TestTelemetrySink_Metrics(t *testing.T) {
 			},
 		},
 	}
-	_ = mockBus.Publish("flux.telemetry.metrics", batchMsg)
+	_ = mockBus.Publish(context.Background(), "flux.telemetry.metrics", batchMsg)
 
 	// 2. Single Metric
 	singleMsg := fluxmsg.New()
@@ -234,7 +234,7 @@ func TestTelemetrySink_Metrics(t *testing.T) {
 		"type":        "gauge",
 		"value":       1024,
 	}
-	_ = mockBus.Publish("flux.telemetry.metric", singleMsg)
+	_ = mockBus.Publish(context.Background(), "flux.telemetry.metric", singleMsg)
 
 	// Poll
 	deadline := time.Now().Add(2 * time.Second)
@@ -286,7 +286,7 @@ func TestTelemetrySink_MiscLogs(t *testing.T) {
 	jsonMsg.Data = map[string]interface{}{
 		"record": json.RawMessage(`{"entity_name":"json-log","body":"hello json","timestamp":1700000000000000}`),
 	}
-	_ = mockBus.Publish("flux.telemetry.log.json", jsonMsg)
+	_ = mockBus.Publish(context.Background(), "flux.telemetry.log.json", jsonMsg)
 
 	// 2. Single Log MsgPack (WAL style)
 	walMsg := fluxmsg.New()
@@ -297,7 +297,7 @@ func TestTelemetrySink_MiscLogs(t *testing.T) {
 		"body":        "hello wal",
 		"timestamp":   int64(1700000000000000),
 	}
-	_ = mockBus.Publish("flux.telemetry.log", walMsg)
+	_ = mockBus.Publish(context.Background(), "flux.telemetry.log", walMsg)
 
 	// Poll
 	deadline := time.Now().Add(2 * time.Second)

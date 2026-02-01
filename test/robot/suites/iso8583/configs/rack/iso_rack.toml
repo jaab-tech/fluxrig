@@ -1,0 +1,24 @@
+# Rack Configuration for ISO8583 Performance Tests
+[logging]
+level = "debug"
+filename = "logs/fluxrig.log"
+
+[logging.throttling]
+rate = 50000.0
+burst = 10000
+
+[rack]
+name = "iso-node-01"
+data_dir = "data"
+
+[rack.bus]
+url = "nats://localhost:4222"
+connect_timeout = "5s"
+
+[telemetry]
+export_interval = "1s"
+batch_size = 512
+
+[telemetry.metrics]
+host_enabled = true
+runtime_enabled = true

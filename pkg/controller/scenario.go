@@ -33,7 +33,7 @@ import (
 
 // ScenarioPublisher defines the interface for publishing scenarios to racks.
 type ScenarioPublisher interface {
-	Publish(subject string, msg *fluxmsg.FluxMsg) error
+	Publish(ctx context.Context, subject string, msg *fluxmsg.FluxMsg) error
 }
 
 // ScenarioController manages the lifecycle of the Active Scenario.
@@ -484,7 +484,7 @@ func (c *ScenarioController) pushScenarioToRacks(ctx context.Context, s *registr
 		msg.Data = data
 
 		subject := fluxmsg.SubjectScenarioPrefix + rack.Name + fluxmsg.SubjectScenarioSuffix
-		if err := c.bus.Publish(subject, msg); err != nil {
+		if err := c.bus.Publish(ctx, subject, msg); err != nil {
 			c.log.Warn("failed to publish scenario to rack", "rack", rack.Name, "subject", subject, "error", err)
 		} else {
 			c.log.Info("pushed scenario to rack", "rack", rack.Name, "version", s.Meta.Version)

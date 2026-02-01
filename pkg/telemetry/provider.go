@@ -86,6 +86,11 @@ func (h *SourceHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	return &SourceHandler{next: h.next.WithAttrs(attrs)}
 }
 
+// Next returns the underlying handler.
+func (h *SourceHandler) Next() slog.Handler {
+	return h.next
+}
+
 func (h *SourceHandler) WithGroup(name string) slog.Handler {
 	return &SourceHandler{next: h.next.WithGroup(name)}
 }
@@ -93,6 +98,11 @@ func (h *SourceHandler) WithGroup(name string) slog.Handler {
 // MultiHandler fan-out logs to multiple handlers.
 type MultiHandler struct {
 	handlers []slog.Handler
+}
+
+// Handlers returns the list of wrapped handlers.
+func (m *MultiHandler) Handlers() []slog.Handler {
+	return m.handlers
 }
 
 func NewMultiHandler(handlers ...slog.Handler) *MultiHandler {
@@ -283,7 +293,12 @@ func Init(ctx context.Context, cfg Config, b bus.Bus, logBuffer *BufferHandler, 
 	logShipper.Start()
 
 	// 6. Traces & Metrics (Standard OTel via NATS)
-	writer := NewNatsWriter(b, cfg.EntityID, cfg.EntityName, cfg.BaseSubject, gen)
+	// 6. Traces & Metrics (Standard OTel via NATS)
+	qosTimeout, _ := time.ParseDuration(cfg.QoSPublishTimeout)
+	if qosTimeout == 0 {
+		qosTimeout = 500 * time.Millisecond
+	}
+	writer := NewNatsWriter(b, cfg.EntityID, cfg.EntityName, cfg.BaseSubject, gen, qosTimeout)
 	spanExporter := NewSpanExporter(writer)
 	metricExporter := NewMetricExporter(writer)
 

@@ -161,7 +161,7 @@ func (s *Server) handleRacks(w http.ResponseWriter, r *http.Request) {
 
 // handleRackAction godoc
 // @Summary Rack Actions
-// @Description Perform actions on Racks (Approve, Suspend, Activate, Remove). Note: This single endpoint handles multiple actions for simplicity in this Alpha version.
+// @Description Perform actions on Racks (Approve, Suspend, Activate, Remove, Log-Level). Note: This single endpoint handles multiple actions for simplicity in this Alpha version.
 // @Tags registry
 // @Accept json
 // @Produce json
@@ -211,6 +211,11 @@ func (s *Server) handleRackAction(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			http.Error(w, "Invalid ID", http.StatusBadRequest)
 			return
+		}
+
+		// Definition of SetLogLevelRequest
+		type SetLogLevelRequest struct {
+			Level string `json:"level"`
 		}
 
 		if action == "approve" && r.Method == http.MethodPost {
@@ -316,6 +321,59 @@ func (s *Server) handleRackAction(w http.ResponseWriter, r *http.Request) {
 			s.publishStatus(uint16(id), "active", "activated", passportBytes)
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"status":"activated"}`))
+			return
+		}
+
+		if action == "log-level" && r.Method == http.MethodPost {
+			var req SetLogLevelRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, "Invalid JSON", http.StatusBadRequest)
+				return
+			}
+
+			// Validate Level
+			validLevels := map[string]bool{"debug": true, "info": true, "warn": true, "error": true, "trace": true}
+			if !validLevels[strings.ToLower(req.Level)] {
+				http.Error(w, "Invalid Log Level", http.StatusBadRequest)
+				return
+			}
+
+			// Get current rack to find status
+			rack, err := s.reg.Get(r.Context(), uint16(id))
+			if err != nil {
+				if err == registry.ErrNotFound {
+					http.Error(w, "Rack not found", http.StatusNotFound)
+					return
+				}
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+
+			// NOTIFY RACK
+			s.publishStatus(uint16(id), rack.Status, "set_log_level:"+req.Level, nil)
+
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "level": req.Level})
+			return
+		}
+
+		if action == "shutdown" && r.Method == http.MethodPost {
+			// Get current rack to find status
+			rack, err := s.reg.Get(r.Context(), uint16(id))
+			if err != nil {
+				if err == registry.ErrNotFound {
+					http.Error(w, "Rack not found", http.StatusNotFound)
+					return
+				}
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+
+			// NOTIFY RACK with "agent:shutdown" command
+			s.publishStatus(uint16(id), rack.Status, "agent:shutdown", nil)
+
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "shutdown_command_sent"})
 			return
 		}
 	}

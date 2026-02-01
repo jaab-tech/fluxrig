@@ -1,8 +1,65 @@
 {%- if title -%}
-<div class="fluxrig-chart" style="margin: 5px 0; padding: 8px; background-color: #ffffff; border-radius: 4px;"><h3 style="margin: 0 0 4px 0; color: #333333; font-family: sans-serif; font-size: 11px; font-weight: normal;">{{ title }}</h3>
+<div class="fluxrig-chart" style="margin: 0 0 16px 0;">
+    <h3 style="margin: 0 0 4px 0; color: #374151; font-family: sans-serif; font-size: 14px; font-weight: 600;">{{ title }}</h3>
+    {%- if subtitle -%}
+    <p style="margin: 0 0 8px 0; color: #6b7280; font-family: sans-serif; font-size: 11px; font-style: italic;">{{ subtitle }}</p>
+    {%- endif -%}
 {%- else -%}
-<div class="fluxrig-chart" style="margin: 5px 0; padding: 8px; background-color: #ffffff; border-radius: 4px;">
+<div class="fluxrig-chart" style="margin: 0 0 16px 0;">
 {%- endif -%}
-<div style="width: 100%; max-width: 450px; height: 180px;"><canvas id="{{ chart_id }}"></canvas></div></div>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-<script>(function initChart(){if(typeof Chart==='undefined'){setTimeout(initChart,100);return;}var ctx=document.getElementById('{{ chart_id }}');if(!ctx)return;new Chart(ctx,{type:'bar',data:{labels:{{ labels | tojson }},datasets:[{label:'{{ dataset_label }}',data:{{ data | tojson }},backgroundColor:'{{ color }}',borderWidth:1}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{y:{beginAtZero:true,ticks:{precision:0,font:{size:9}}},x:{ticks:{font:{size:9}}}}}});})();</script>
+<div style="margin: 0; padding: 16px; border: 1px solid #e5e7eb; border-radius: 8px; background-color: #ffffff; box-shadow: 0 1px 2px rgba(0,0,0,0.05);">
+    <div style="height: 300px; width: 100%;">
+        <canvas id="{{ chart_id }}"></canvas>
+    </div>
+</div>
+<script>
+(function() {
+    const ctx = document.getElementById('{{ chart_id }}');
+    new Chart(ctx, {
+        type: '{{ chart_type }}',
+        data: {
+            labels: {{ labels | tojson }},
+            datasets: {{ datasets | tojson }}
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: {
+                    position: 'bottom',
+                    labels: {
+                        color: '#4b5563',
+                        usePointStyle: true,
+                        padding: 20,
+                        font: { size: 11, family: 'Inter' }
+                    }
+                },
+                tooltip: {
+                    mode: 'index',
+                    intersect: false,
+                    backgroundColor: 'rgba(255, 255, 255, 0.9)',
+                    titleColor: '#111827',
+                    bodyColor: '#4b5563',
+                    borderColor: '#e5e7eb',
+                    borderWidth: 1,
+                    padding: 10
+                }
+            },
+            scales: {
+                x: {
+                    {% if stacked %}stacked: true,{% endif %}
+                    ticks: { color: '#6b7280', font: { size: 10, family: 'Inter' } },
+                    grid: { display: false }
+                },
+                y: {
+                    {% if stacked %}stacked: true,{% endif %}
+                    beginAtZero: true,
+                    ticks: { color: '#6b7280', font: { size: 10, family: 'Inter' } },
+                    grid: { color: '#f3f4f6' }
+                }
+            }
+        }
+    });
+})();
+</script>
+</div>

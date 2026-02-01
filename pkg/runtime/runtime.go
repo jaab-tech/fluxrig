@@ -31,8 +31,10 @@ import (
 	"github.com/jaab-tech/fluxrig/pkg/registry"
 	"github.com/jaab-tech/fluxrig/pkg/sdk"
 	"github.com/jaab-tech/fluxrig/pkg/telemetry"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Manager orchestrates the lifecycle of Gears on a Rack.
@@ -99,7 +101,7 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) erro
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.logger().Info("applying scenario", "version", sc.Meta.Version)
+	m.logger().Info("applying scenario", "name", sc.Meta.Name, "version", sc.Meta.Version)
 
 	// 1. Stop Existing
 	m.stopAll()
@@ -196,7 +198,7 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) erro
 			wireLabel = fmt.Sprintf("%x", wire.ID)
 		}
 
-		sub, err := m.bus.Subscribe(subject, func(msg *fluxmsg.FluxMsg) {
+		sub, err := m.bus.Subscribe(subject, func(ctx context.Context, msg *fluxmsg.FluxMsg) {
 			// Append Hop (Arrival at Target Port)
 			msg.Path = append(msg.Path, &fluxmsg.Hop{
 				GearID: m.gearIDs[toGear],
@@ -205,13 +207,15 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) erro
 			})
 
 			// TRACE Logging: Bus Receive (Port In)
-			if m.logger().Enabled(context.Background(), logger.LevelTrace) {
-				m.logger().Log(context.Background(), logger.LevelTrace, "Bus Receive",
+			if m.logger().Enabled(ctx, logger.LevelTrace) {
+				m.logger().Log(ctx, logger.LevelTrace, "Bus Receive",
 					"flux_id", fmt.Sprintf("0x%x", msg.FluxID),
 					"wire", wireLabel,
-					"port_id", fmt.Sprintf("0x%x", portID),
 					"gear", toGear,
-					"payload", string(msg.RawPayload),
+					"port_id", fmt.Sprintf("0x%x", portID),
+					"payload_hex", fmt.Sprintf("0x%x", msg.RawPayload),
+					"meta", fmt.Sprintf("%v", msg.Metadata),
+					"path", formatHops(msg.Path),
 				)
 			} else if os.Getenv("FLUXRIG_DEBUG") == "true" {
 				m.logger().Debug("FluxMsg received",
@@ -221,16 +225,17 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) erro
 			}
 
 			// Delivery to Target Gear
-			timeoutCtx, cancel := context.WithTimeout(context.Background(), m.timeout)
+			// Pass the INCOMING CONTEXT (carrying traces) to Process.
+			timeoutCtx, cancel := context.WithTimeout(ctx, m.timeout)
 			defer cancel()
 
 			start := time.Now()
 			resp, err := targetGear.Process(timeoutCtx, msg)
-			duration := time.Since(start).Seconds()
+			duration := float64(time.Since(start).Microseconds()) / 1000.0 // Record in ms for consistency with metric name
 
 			// INSTRUMENTATION: Gear Input
 			if tm := telemetry.GetMetrics(); tm != nil {
-				metricCtx := context.Background()
+				metricCtx := ctx
 				attrs := metric.WithAttributes(attribute.String("gear", toGear))
 
 				tm.GearMessagesIn.Add(metricCtx, 1, attrs)
@@ -289,10 +294,12 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) erro
 			if m.logger().Enabled(context.Background(), logger.LevelTrace) {
 				m.logger().Log(context.Background(), logger.LevelTrace, "Bus Emit",
 					"flux_id", fmt.Sprintf("0x%x", msg.FluxID),
-					"port_id", fmt.Sprintf("0x%x", portID),
 					"gear", name,
+					"port_id", fmt.Sprintf("0x%x", portID),
 					"subject", outSubject,
-					"payload", string(msg.RawPayload),
+					"payload_hex", fmt.Sprintf("0x%x", msg.RawPayload),
+					"meta", fmt.Sprintf("%v", msg.Metadata),
+					"path", formatHops(msg.Path),
 				)
 			}
 
@@ -303,7 +310,36 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) erro
 				tm.GearMessagesOut.Add(metricCtx, 1, attrs)
 			}
 
-			if err := m.bus.Publish(outSubject, msg); err != nil {
+			// Publish needs context. Where do we get it?
+			// EmitFunc is usually called from internal goroutines.
+			// We should probably encourage using context in EmitFunc or assume Background?
+			// Actually the Start(..., emit) signature does not provide ctx to emit.
+			// Ideally, emit should take context. But keeping SDK stable:
+			// We validly assume that a Source emit starts a NEW Trace (Root Span) or continues if the goroutine has one.
+			// Since we don't pass ctx to emit, we use Background().
+			// LIMITATION: Source Gears that are "Processors" calling emit() asynchronously lose context unless they capture it.
+			// BUT: NativeGear.Process returns *FluxMsg, so that path is synchronous/handled by runtime above.
+			// So Emit() is mostly for "Source" gears (Active I/O).
+			// Active Sources create ROOT spans. So Background is correct starting point.
+			// We can wrap it in a "Source Span" here.
+			// Start a Root Span for this emission (Source Gear)
+			// Since SDK emit signature doesn't support context, we start a new trace here.
+			// This handles Source Gears correctly. For processing gears using emit asynchronously,
+			// this will restart the trace (limitation of current SDK).
+			tracer := otel.GetTracerProvider().Tracer("fluxrig/runtime")
+			spanName := fmt.Sprintf("gear_output %s", name)
+
+			emitCtx, span := tracer.Start(context.Background(), spanName,
+				trace.WithSpanKind(trace.SpanKindProducer),
+				trace.WithAttributes(
+					attribute.String("gear.name", name),
+					attribute.String("messaging.system", "nats"),
+					attribute.String("messaging.destination", outSubject),
+				),
+			)
+			defer span.End()
+
+			if err := m.bus.Publish(emitCtx, outSubject, msg); err != nil {
 				if tm := telemetry.GetMetrics(); tm != nil {
 					metricCtx := context.Background()
 					attrs := metric.WithAttributes(attribute.String("gear", name))
@@ -331,6 +367,56 @@ func (m *Manager) Shutdown() {
 	m.stopAll()
 }
 
+// Drain signals all active gears to stop accepting new work and complete pending work.
+func (m *Manager) Drain(ctx context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.logger().Info("Draining Runtime Manager (Graceful Shutdown)")
+
+	var wg sync.WaitGroup
+	var errs []error
+	var errMu sync.Mutex
+
+	for name, g := range m.activeGears {
+		name := name
+		g := g
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// m.logger() is safe to call
+			if err := g.Drain(ctx); err != nil {
+				m.logger().Error("Drain Gear Failed", "name", name, "error", err)
+				errMu.Lock()
+				errs = append(errs, fmt.Errorf("%s: %w", name, err))
+				errMu.Unlock()
+			} else {
+				m.logger().Info("Gear Drained", "name", name)
+			}
+		}()
+	}
+
+	// Wait for all gears or context timeout
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		m.logger().Info("Runtime Manager Drained Successfully")
+	case <-ctx.Done():
+		m.logger().Warn("Runtime Manager Drain Timeout/Context Cancelled", "error", ctx.Err())
+		return ctx.Err()
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("drain errors: %v", errs)
+	}
+	return nil
+}
+
 func (m *Manager) stopAll() {
 	for _, sub := range m.activeSubs {
 		_ = sub.Unsubscribe()
@@ -351,4 +437,19 @@ func parsePortRef(ref string) (string, string) {
 		return ref[:idx], ref[idx+1:]
 	}
 	return ref, ""
+}
+
+func formatHops(path []*fluxmsg.Hop) string {
+	if len(path) == 0 {
+		return "[]"
+	}
+	res := "["
+	for i, h := range path {
+		if i > 0 {
+			res += ", "
+		}
+		res += fmt.Sprintf("{g:%x, p:%x}", h.GearID, h.PortID)
+	}
+	res += "]"
+	return res
 }

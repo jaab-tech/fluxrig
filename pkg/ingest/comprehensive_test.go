@@ -61,7 +61,7 @@ func TestTelemetrySink_Comprehensive(t *testing.T) {
 	}
 	metricMsg.Data = metricData // Not 'batch', direct payload
 
-	if err := mockBus.Publish("flux.telemetry.metrics", metricMsg); err != nil {
+	if err := mockBus.Publish(context.Background(), "flux.telemetry.metrics", metricMsg); err != nil {
 		t.Fatalf("Failed to publish metric: %v", err)
 	}
 
@@ -84,7 +84,7 @@ func TestTelemetrySink_Comprehensive(t *testing.T) {
 	// 3. Invalid Message Handling (Should not panic)
 	badMsg := fluxmsg.New()
 	badMsg.Metadata["type"] = "unknown.type"
-	if err := mockBus.Publish("flux.telemetry.metrics", badMsg); err != nil {
+	if err := mockBus.Publish(context.Background(), "flux.telemetry.metrics", badMsg); err != nil {
 		t.Errorf("Publishing invalid message shouldn't fail publisher: %v", err)
 	}
 	// Sink just logs warning, no DB change.
@@ -93,7 +93,7 @@ func TestTelemetrySink_Comprehensive(t *testing.T) {
 	brokenMsg := fluxmsg.New()
 	brokenMsg.Metadata["type"] = "telemetry.batch.spans"
 	brokenMsg.Data = map[string]any{"batch": "not-a-list"}
-	if err := mockBus.Publish("flux.telemetry.spans", brokenMsg); err != nil {
+	if err := mockBus.Publish(context.Background(), "flux.telemetry.spans", brokenMsg); err != nil {
 		t.Errorf("Publishing broken payload shouldn't fail publisher: %v", err)
 	}
 
@@ -116,7 +116,7 @@ func TestTelemetrySink_Comprehensive(t *testing.T) {
 			},
 		},
 	}
-	if err := mockBus.Publish("flux.telemetry.spans", spanMsg); err != nil {
+	if err := mockBus.Publish(context.Background(), "flux.telemetry.spans", spanMsg); err != nil {
 		t.Fatalf("Failed to publish spans: %v", err)
 	}
 
@@ -154,7 +154,7 @@ func TestTelemetrySink_Comprehensive(t *testing.T) {
 			},
 		},
 	}
-	if err := mockBus.Publish("flux.telemetry.logs", logBatch); err != nil {
+	if err := mockBus.Publish(context.Background(), "flux.telemetry.logs", logBatch); err != nil {
 		t.Fatalf("Failed to publish log batch: %v", err)
 	}
 
@@ -191,7 +191,7 @@ func TestTelemetrySink_Comprehensive(t *testing.T) {
 			},
 		},
 	}
-	if err := mockBus.Publish("flux.telemetry.metrics", metricBatchMsg); err != nil {
+	if err := mockBus.Publish(context.Background(), "flux.telemetry.metrics", metricBatchMsg); err != nil {
 		t.Fatalf("Failed to publish metric batch: %v", err)
 	}
 
@@ -234,7 +234,7 @@ func TestTelemetrySink_Comprehensive(t *testing.T) {
 		"record": json.RawMessage(logBytes),
 	}
 
-	if err := mockBus.Publish("flux.telemetry.logs", singleLogMsg); err != nil {
+	if err := mockBus.Publish(context.Background(), "flux.telemetry.logs", singleLogMsg); err != nil {
 		t.Fatalf("Failed to publish single log: %v", err)
 	}
 

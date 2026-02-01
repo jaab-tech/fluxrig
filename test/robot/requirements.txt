@@ -1,7 +1,8 @@
-robotframework==7.0
-nats-py==2.9.0
-toxiproxy-python
-requests==2.31.0
-tomli==2.0.1
-duckdb==1.1.3
-jinja2==3.1.2
+robotframework>=6.0
+paramiko
+scp
+paramiko
+scp
+tomli
+jinja2
+duckdb

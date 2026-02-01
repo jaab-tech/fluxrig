@@ -143,7 +143,7 @@ func (s *LogShipper) loop() {
 		}
 
 		// Process
-		if err := s.process(data); err != nil {
+		if err := s.process(ctx, data); err != nil {
 			slog.Error("Failed to process log", "error", err)
 			select {
 			case <-s.stopCh:
@@ -189,7 +189,7 @@ func (s *LogShipper) loop() {
 	}
 }
 
-func (s *LogShipper) process(payload []byte) error {
+func (s *LogShipper) process(ctx context.Context, payload []byte) error {
 	var msg fluxmsg.FluxMsg
 	if err := msgpack.Unmarshal(payload, &msg); err != nil {
 		return err
@@ -205,5 +205,5 @@ func (s *LogShipper) process(payload []byte) error {
 
 	// Optimization: Send already-serialized payload directly.
 	// We unmarshaled only to check type and get FluxID.
-	return s.bus.PublishRaw(s.baseSubject+suffix, payload, msg.FluxID)
+	return s.bus.PublishRaw(ctx, s.baseSubject+suffix, payload, msg.FluxID)
 }

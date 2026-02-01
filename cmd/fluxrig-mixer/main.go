@@ -43,12 +43,30 @@ import (
 func main() {
 	// 1. Parse Flags
 	var configPath string
-	if len(os.Args) > 2 && os.Args[1] == "-c" {
-		configPath = os.Args[2]
-	} else if os.Getenv("FLUXRIG_CONFIG") != "" {
-		configPath = os.Getenv("FLUXRIG_CONFIG")
-	} else {
-		configPath = "fluxrig-mixer.toml"
+	var scenarioPath string
+
+	args := os.Args[1:]
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "-c", "--config":
+			if i+1 < len(args) {
+				configPath = args[i+1]
+				i++
+			}
+		case "-s", "--scenario":
+			if i+1 < len(args) {
+				scenarioPath = args[i+1]
+				i++
+			}
+		}
+	}
+
+	if configPath == "" {
+		if os.Getenv("FLUXRIG_CONFIG") != "" {
+			configPath = os.Getenv("FLUXRIG_CONFIG")
+		} else {
+			configPath = "fluxrig-mixer.toml"
+		}
 	}
 
 	// 2. Load Configuration (to get Log Level)
@@ -71,8 +89,13 @@ func main() {
 	bufLogger := slog.New(bufHandler)
 	slog.SetDefault(bufLogger)
 
+	// Fallback to Config
+	if scenarioPath == "" && cfg.Mixer.StartupScenario != "" {
+		scenarioPath = cfg.Mixer.StartupScenario
+	}
+
 	// 4. Run Application
-	app := mixer.NewApp(cfg)
+	app := mixer.NewApp(cfg, scenarioPath)
 	if err := app.Run(); err != nil {
 		slog.Error("Mixer exited with error", "error", err)
 		os.Exit(1)

@@ -40,7 +40,7 @@ func TestMockBus(t *testing.T) {
 	// 2. Publish (Storage)
 	msg := fluxmsg.New()
 	msg.FluxID = 123
-	if err := mb.Publish("test.topic", msg); err != nil {
+	if err := mb.Publish(context.Background(), "test.topic", msg); err != nil {
 		t.Errorf("Mock publish failed: %v", err)
 	}
 
@@ -54,7 +54,7 @@ func TestMockBus(t *testing.T) {
 	wg.Add(1)
 	var received *fluxmsg.FluxMsg
 
-	sub, err := mb.Subscribe("test.async", func(m *fluxmsg.FluxMsg) {
+	sub, err := mb.Subscribe("test.async", func(ctx context.Context, m *fluxmsg.FluxMsg) {
 		received = m
 		wg.Done()
 	})
@@ -64,7 +64,7 @@ func TestMockBus(t *testing.T) {
 
 	msg2 := fluxmsg.New()
 	msg2.FluxID = 456
-	_ = mb.Publish("test.async", msg2)
+	_ = mb.Publish(context.Background(), "test.async", msg2)
 
 	// Wait for handler
 	done := make(chan struct{})
@@ -109,7 +109,7 @@ func TestNatsBus_Disconnected(t *testing.T) {
 	// Do not Connect()
 
 	msg := fluxmsg.New()
-	if err := nb.Publish("foo", msg); err == nil {
+	if err := nb.Publish(context.Background(), "foo", msg); err == nil {
 		t.Error("Expected error publishing on disconnected bus, got nil")
 	}
 
@@ -163,7 +163,7 @@ func TestNatsBus_Integration(t *testing.T) {
 	wg.Add(1)
 	var received *fluxmsg.FluxMsg
 
-	sub, err := nb.Subscribe("fluxrig.test.bus", func(m *fluxmsg.FluxMsg) {
+	sub, err := nb.Subscribe("fluxrig.test.bus", func(ctx context.Context, m *fluxmsg.FluxMsg) {
 		received = m
 		wg.Done()
 	})
@@ -175,7 +175,7 @@ func TestNatsBus_Integration(t *testing.T) {
 	// 5. Publish
 	msg := fluxmsg.New()
 	msg.FluxID = 789
-	if err := nb.Publish("fluxrig.test.bus", msg); err != nil {
+	if err := nb.Publish(context.Background(), "fluxrig.test.bus", msg); err != nil {
 		t.Fatalf("Publish failed: %v", err)
 	}
 

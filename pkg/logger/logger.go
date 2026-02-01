@@ -94,13 +94,41 @@ func New(cfg Config) *slog.Logger {
 	return slog.New(handler)
 }
 
+// wrapper interface for handlers that wrap another handler (e.g. BufferHandler)
+type wrapper interface {
+	Next() slog.Handler
+}
+
+// collection interface for handlers that manage multiple handlers (e.g. MultiHandler)
+type collection interface {
+	Handlers() []slog.Handler
+}
+
 // SetLevel updates the log level dynamically
 func SetLevel(logger *slog.Logger, level string) {
-	// 1. Unwrap handler
-	h := logger.Handler()
+	// Queue of handlers to visit (BFS)
+	queue := []slog.Handler{logger.Handler()}
+	newLevel := ParseLevel(level)
 
-	if fh, ok := h.(*FluxHandler); ok {
-		fh.level.Set(ParseLevel(level))
+	for len(queue) > 0 {
+		h := queue[0]
+		queue = queue[1:]
+
+		// Check for FluxHandler (Target)
+		if fh, ok := h.(*FluxHandler); ok {
+			fh.level.Set(newLevel)
+			continue
+		}
+
+		// Check for Wrapper (e.g., BufferHandler, SourceHandler)
+		if w, ok := h.(wrapper); ok {
+			queue = append(queue, w.Next())
+		}
+
+		// Check for Collection (e.g., MultiHandler)
+		if c, ok := h.(collection); ok {
+			queue = append(queue, c.Handlers()...)
+		}
 	}
 }
 

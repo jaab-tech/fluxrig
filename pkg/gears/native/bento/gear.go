@@ -225,7 +225,6 @@ func (g *Gear) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.Flux
 	// If we return nil, the SDK considers it "consumed".
 	// The Bento Output ('flux_out') will call Emit later.
 	// So we return nil, nil.
-
 	select {
 	case g.inChan <- msg:
 		return nil, nil // Consumed, result will come via Emit
@@ -244,6 +243,20 @@ func (g *Gear) Stop() error {
 	}
 	g.wg.Wait()
 	return nil
+}
+
+// Drain signals the gear to stop accepting new input.
+func (g *Gear) Drain(ctx context.Context) error {
+	// Bento is primarily a load generator (source) or sink.
+	// In source mode, we should stop generating.
+	// In sink mode, we could continue to accept until drain timeout?
+	// For now, we reuse Stop logic or simply wait.
+	// Given Bento's design, stopping the engine is the safest way to ensure no more traffic.
+	// However, Stop() is immediate. Drain implies "finish in-flight".
+	// Since Bento manages its own lifecycle, we will just wait for context or log.
+	g.logger.Info("Draining Bento Gear (No-op wrapper)") // Changed g.log to g.logger
+	<-ctx.Done()
+	return ctx.Err()
 }
 
 // --- Plugins ---

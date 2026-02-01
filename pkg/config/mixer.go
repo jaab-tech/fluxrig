@@ -74,6 +74,8 @@ type MixerSettings struct {
 	MachineID uint16 `koanf:"machine_id" example:"1"`
 	// MixerName is the human-readable name of the Mixer.
 	MixerName string `koanf:"mixer_name" example:"mixer-01"`
+	// StartupScenario path to a scenario YAML file to load on startup.
+	StartupScenario string `koanf:"startup_scenario"`
 }
 
 // ApiConfig settings for the Control Plane REST API.

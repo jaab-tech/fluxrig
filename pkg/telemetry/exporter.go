@@ -40,15 +40,20 @@ type NatsWriter struct {
 	entityName  string
 	baseSubject string
 	gen         *idgen.IDGenerator
+	timeout     time.Duration
 }
 
-func NewNatsWriter(b bus.Bus, entityID uint64, entityName, baseSubject string, gen *idgen.IDGenerator) *NatsWriter {
+func NewNatsWriter(b bus.Bus, entityID uint64, entityName, baseSubject string, gen *idgen.IDGenerator, timeout time.Duration) *NatsWriter {
+	if timeout == 0 {
+		timeout = 500 * time.Millisecond
+	}
 	return &NatsWriter{
 		bus:         b,
 		entityID:    entityID,
 		entityName:  entityName,
 		baseSubject: baseSubject,
 		gen:         gen,
+		timeout:     timeout,
 	}
 }
 
@@ -84,7 +89,7 @@ func (w *NatsWriter) Write(p []byte) (n int, err error) {
 	msg.Metadata["type"] = "telemetry.log.json"
 	msg.Metadata["scope"] = "telemetry"
 
-	if err := w.bus.Publish(w.baseSubject+".logs.json", msg); err != nil {
+	if err := w.bus.Publish(context.Background(), w.baseSubject+".logs.json", msg); err != nil {
 		return 0, err
 	}
 	return len(p), nil
@@ -104,20 +109,20 @@ func (e *SpanExporter) ExportSpans(ctx context.Context, spans []trace.ReadOnlySp
 	batchedPayload := make([]map[string]interface{}, 0, len(spans))
 	for _, span := range spans {
 		s := map[string]interface{}{
-			"type":        "span",
-			"trace_id":    span.SpanContext().TraceID().String(),
-			"span_id":     span.SpanContext().SpanID().String(),
-			"parent_id":   "",
-			"name":        span.Name(),
-			"start_time":  span.StartTime().UnixMicro(),
-			"end_time":    span.EndTime().UnixMicro(),
-			"status":      span.Status().Code.String(),
-			"kind":        span.SpanKind().String(),
-			"entity_id":   e.entityID,
-			"entity_name": e.entityName,
+			"type":           "span",
+			"trace_id":       span.SpanContext().TraceID().String(),
+			"span_id":        span.SpanContext().SpanID().String(),
+			"parent_span_id": "",
+			"name":           span.Name(),
+			"start_time":     span.StartTime().UnixMicro(),
+			"end_time":       span.EndTime().UnixMicro(),
+			"status":         span.Status().Code.String(),
+			"kind":           span.SpanKind().String(),
+			"entity_id":      e.entityID,
+			"entity_name":    e.entityName,
 		}
 		if span.Parent().IsValid() {
-			s["parent_id"] = span.Parent().SpanID().String()
+			s["parent_span_id"] = span.Parent().SpanID().String()
 		}
 		s["attributes"] = attributeToMap(span.Attributes())
 		batchedPayload = append(batchedPayload, s)
@@ -129,7 +134,11 @@ func (e *SpanExporter) ExportSpans(ctx context.Context, spans []trace.ReadOnlySp
 	msg.Metadata["type"] = "telemetry.batch.spans"
 	msg.Metadata["scope"] = "telemetry"
 
-	return e.bus.Publish(e.baseSubject+".spans", msg)
+	// QoS: Strict timeout for telemetry
+	exportCtx, cancel := context.WithTimeout(ctx, e.timeout)
+	err := e.bus.Publish(exportCtx, e.baseSubject+".spans", msg)
+	cancel()
+	return err
 }
 
 func (e *SpanExporter) Shutdown(ctx context.Context) error { return nil }
@@ -176,7 +185,11 @@ func (e *LogExporter) Export(ctx context.Context, records []sdklog.Record) error
 	msg.Metadata["type"] = "telemetry.batch.logs"
 	msg.Metadata["scope"] = "telemetry"
 
-	return e.bus.Publish(e.baseSubject+".logs", msg)
+	// QoS: Strict timeout for telemetry
+	exportCtx, cancel := context.WithTimeout(ctx, e.timeout)
+	err := e.bus.Publish(exportCtx, e.baseSubject+".logs", msg)
+	cancel()
+	return err
 }
 
 func (e *LogExporter) Shutdown(ctx context.Context) error   { return nil }
@@ -201,15 +214,11 @@ func (e *MetricExporter) Export(ctx context.Context, metrics *metricdata.Resourc
 			points := resolvePoints(m)
 			for _, p := range points {
 				payload := map[string]interface{}{
-					"name":        m.Name,
-					"description": m.Description,
-					"unit":        m.Unit,
-					"type":        p.Type,
-					"value":       p.Value,
-					"timestamp":   p.LinkTime,
 					"attributes":  p.Attributes,
 					"entity_id":   e.entityID,
 					"entity_name": e.entityName,
+					"name":        m.Name + p.Suffix,
+					"value":       p.Value,
 				}
 
 				// Fix: fluxmsg.NewFromData -> manual wrap
@@ -217,12 +226,17 @@ func (e *MetricExporter) Export(ctx context.Context, metrics *metricdata.Resourc
 				msg.FluxID, _ = e.gen.NextFluxID()
 				msg.Data = payload
 				msg.Metadata["type"] = "telemetry.metric"
+				msg.Metadata["metric.name"] = m.Name + p.Suffix // For easier filtering if needed
 				// fluxmsg.Data is map[string]any.
 				// Sink handles JSON marshaling if required.
 
-				if err := e.bus.PublishWithContext(ctx, e.baseSubject+".metrics", msg); err != nil {
-					// We still log errors but more cleanly
-					slog.Debug("Failed to publish metric", "name", m.Name, "error", err)
+				// QoS: Strict timeout for telemetry to avoid blocking the hot path
+				exportCtx, cancel := context.WithTimeout(ctx, e.timeout)
+				err := e.bus.Publish(exportCtx, e.baseSubject+".metrics", msg)
+				cancel()
+
+				if err != nil {
+					slog.Debug("Failed to publish metric (QoS Drop)", "name", m.Name, "error", err)
 				}
 			}
 		}
@@ -231,7 +245,22 @@ func (e *MetricExporter) Export(ctx context.Context, metrics *metricdata.Resourc
 }
 
 func (e *MetricExporter) Temporality(k sdkmetric.InstrumentKind) metricdata.Temporality {
-	return metricdata.CumulativeTemporality
+	switch k {
+	case sdkmetric.InstrumentKindCounter,
+		sdkmetric.InstrumentKindHistogram,
+		sdkmetric.InstrumentKindObservableCounter:
+		// These should be aggregated as deltas to simplify DuckDB logic
+		return metricdata.DeltaTemporality
+	case sdkmetric.InstrumentKindGauge,
+		sdkmetric.InstrumentKindObservableGauge,
+		sdkmetric.InstrumentKindUpDownCounter,
+		sdkmetric.InstrumentKindObservableUpDownCounter:
+		// These represent absolute point-in-time values or balances.
+		// Delta here would represent a "change in balance" which is confusing for our charts.
+		return metricdata.CumulativeTemporality
+	default:
+		return metricdata.DeltaTemporality
+	}
 }
 
 // Point helper structure
@@ -240,6 +269,7 @@ type simplePoint struct {
 	Value      float64
 	LinkTime   time.Time
 	Attributes map[string]interface{}
+	Suffix     string
 }
 
 func resolvePoints(m metricdata.Metrics) []simplePoint {
@@ -284,19 +314,23 @@ func resolvePoints(m metricdata.Metrics) []simplePoint {
 		}
 	case metricdata.Histogram[float64]:
 		for _, p := range data.DataPoints {
+			attrs := metricAttributeToMap(p.Attributes.ToSlice())
 			// Export Sum
 			points = append(points, simplePoint{
 				Type:       "histogram_sum",
 				Value:      p.Sum,
 				LinkTime:   p.Time,
-				Attributes: metricAttributeToMap(p.Attributes.ToSlice()),
+				Attributes: attrs,
+				Suffix:     ".sum",
 			})
-			// Export Count (as a separate point? Or rely on backend? For now just sum is enough to prove existence)
-			// But let's add count too with suffix in name?
-			// resolvePoints signature only returns points, caller uses m.Name.
-			// Caller iterates points and uses m.Name.
-			// We can't easily change name here unless simplePoint supports NameOverride.
-			// Let's just export Sum for now to satisfy "presence".
+			// Export Count
+			points = append(points, simplePoint{
+				Type:       "histogram_count",
+				Value:      float64(p.Count),
+				LinkTime:   p.Time,
+				Attributes: attrs,
+				Suffix:     ".count",
+			})
 		}
 	}
 	return points

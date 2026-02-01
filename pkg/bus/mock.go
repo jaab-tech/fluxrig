@@ -41,20 +41,16 @@ func (m *MockBus) Connect(url string, opts ConnectOptions) error {
 }
 
 // PublishRaw implements PublishRaw by unmarshaling and calling Publish (simulating wire).
-func (m *MockBus) PublishRaw(subject string, data []byte, fluxID uint64) error {
+func (m *MockBus) PublishRaw(ctx context.Context, subject string, data []byte, fluxID uint64) error {
 	var msg fluxmsg.FluxMsg
 	if err := msgpack.Unmarshal(data, &msg); err != nil {
 		return err
 	}
 	// Verify ID matches if needed, but for mock just publish
-	return m.Publish(subject, &msg)
+	return m.Publish(ctx, subject, &msg)
 }
 
-func (m *MockBus) PublishWithContext(ctx context.Context, subject string, msg *fluxmsg.FluxMsg) error {
-	return m.Publish(subject, msg)
-}
-
-func (m *MockBus) Publish(subject string, msg *fluxmsg.FluxMsg) error {
+func (m *MockBus) Publish(ctx context.Context, subject string, msg *fluxmsg.FluxMsg) error {
 	m.mu.Lock()
 	m.PublishedMessages[subject] = append(m.PublishedMessages[subject], msg)
 	handlers := make(map[string]Handler, len(m.Handlers))
@@ -66,7 +62,7 @@ func (m *MockBus) Publish(subject string, msg *fluxmsg.FluxMsg) error {
 	// Direct Loopback for testing handlers
 	// 1. Exact Match
 	if handler, ok := handlers[subject]; ok {
-		go handler(msg)
+		go handler(ctx, msg)
 		return nil
 	}
 
@@ -75,7 +71,7 @@ func (m *MockBus) Publish(subject string, msg *fluxmsg.FluxMsg) error {
 		if len(sub) > 1 && sub[len(sub)-1] == '>' {
 			prefix := sub[:len(sub)-1]
 			if len(subject) >= len(prefix) && subject[:len(prefix)] == prefix {
-				go handler(msg)
+				go handler(ctx, msg)
 			}
 		}
 	}

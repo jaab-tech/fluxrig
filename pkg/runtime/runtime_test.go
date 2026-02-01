@@ -37,11 +37,10 @@ type MockBus struct {
 func (m *MockBus) Connect(url string, opts bus.ConnectOptions) error {
 	return nil
 }
-func (m *MockBus) Publish(subject string, msg *fluxmsg.FluxMsg) error { return nil }
-func (m *MockBus) PublishRaw(subject string, data []byte, fluxID uint64) error {
+func (m *MockBus) Publish(ctx context.Context, subject string, msg *fluxmsg.FluxMsg) error {
 	return nil
 }
-func (m *MockBus) PublishWithContext(ctx context.Context, subject string, msg *fluxmsg.FluxMsg) error {
+func (m *MockBus) PublishRaw(ctx context.Context, subject string, data []byte, fluxID uint64) error {
 	return nil
 }
 func (m *MockBus) Subscribe(subject string, handler bus.Handler) (bus.Subscription, error) {
@@ -72,7 +71,13 @@ func (m *MockGear) Start(ctx context.Context, emit func(*fluxmsg.FluxMsg)) error
 func (m *MockGear) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.FluxMsg, error) {
 	return msg, nil
 }
-func (m *MockGear) Stop() error { return nil }
+func (m *MockGear) Stop() error {
+	return nil
+}
+
+func (m *MockGear) Drain(ctx context.Context) error {
+	return nil
+}
 
 func TestManager_Lifecycle(t *testing.T) {
 	// 1. Setup Dependencies

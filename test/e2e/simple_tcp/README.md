@@ -26,12 +26,19 @@ Verify the production readiness of the Native TCP Gear (`simple_tcp`) within the
 ### Registry Persistence
 - Gears, Ports, Wires registered in DuckDB.
 - Entity types correctly mapped.
+### Distributed Tracing (Observability)
+- **Context Propagation**: Verify that OTel spans are passed across the NATS bus.
+- **Span Linking**: Verify that the "Process" span has a valid `parent_span_id` linking back to the "Source" span.
+- **Validation**:
+    - Query Parquet `spans` table.
+    - Assert `count(parent_span_id != '') > 0`.
 
 ## Expected Results
 - ✅ Mixer is UP (Health API returns 200).
 - ✅ Topology synchronized (`sync_status: synchronized`).
 - ✅ I/O Verification PASSED (Echo receives `TEST_MSG`).
 - ✅ Registry contains Gear, Ports (In/Out), Wire, Snake, Scenario.
+- ✅ Distributed Tracing PASSED (Spans are linked via `parent_span_id`).
 
 ## Usage
 ```bash

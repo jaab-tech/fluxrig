@@ -71,7 +71,7 @@ func (n *NatsBus) Connect(url string, opts ConnectOptions) error {
 }
 
 // Publish serializes the FluxMsg to MsgPack bytes and sends it via JetStream.
-func (n *NatsBus) Publish(subject string, msg *fluxmsg.FluxMsg) error {
+func (n *NatsBus) Publish(ctx context.Context, subject string, msg *fluxmsg.FluxMsg) error {
 	if n.js == nil {
 		return errors.New("nats bus not connected")
 	}
@@ -88,35 +88,19 @@ func (n *NatsBus) Publish(subject string, msg *fluxmsg.FluxMsg) error {
 	// JetStream will identify it as a duplicate and discard it.
 	msgID := strconv.FormatUint(msg.FluxID, 10)
 
-	_, err = n.js.Publish(context.Background(), subject, data, jetstream.WithMsgID(msgID))
+	_, err = n.js.Publish(ctx, subject, data, jetstream.WithMsgID(msgID))
 	return err
 }
 
 // PublishRaw sends pre-serialized data (MsgPack) with a specific deduplication ID.
-func (n *NatsBus) PublishRaw(subject string, data []byte, fluxID uint64) error {
+func (n *NatsBus) PublishRaw(ctx context.Context, subject string, data []byte, fluxID uint64) error {
 	if n.js == nil {
 		return errors.New("nats bus not connected")
 	}
 
 	// Send Bytes (Persistent) with Deduplication ID
 	msgID := strconv.FormatUint(fluxID, 10)
-	_, err := n.js.Publish(context.Background(), subject, data, jetstream.WithMsgID(msgID))
-	return err
-}
-
-// PublishWithContext sends with specific context (useful for shutdowns).
-func (n *NatsBus) PublishWithContext(ctx context.Context, subject string, msg *fluxmsg.FluxMsg) error {
-	if n.js == nil {
-		return errors.New("nats bus not connected")
-	}
-	data, err := msgpack.Marshal(msg)
-	if err != nil {
-		return err
-	}
-
-	msgID := strconv.FormatUint(msg.FluxID, 10)
-
-	_, err = n.js.Publish(ctx, subject, data, jetstream.WithMsgID(msgID))
+	_, err := n.js.Publish(ctx, subject, data, jetstream.WithMsgID(msgID))
 	return err
 }
 
@@ -154,7 +138,9 @@ func (n *NatsBus) Subscribe(subject string, handler Handler) (Subscription, erro
 			return // Drop corrupt
 		}
 
-		handler(&fluxMsg)
+		// NATS doesn't provide a context per message, so we start with Background.
+		// Middleware (InstrumentedBus) will enrich this.
+		handler(context.Background(), &fluxMsg)
 	})
 
 	if err != nil {
@@ -203,7 +189,7 @@ func (n *NatsBus) SubscribeDurable(subject, durableName string, handler Handler)
 			return
 		}
 
-		handler(&fluxMsg)
+		handler(context.Background(), &fluxMsg)
 		_ = msg.Ack()
 	})
 
@@ -221,6 +207,8 @@ func (n *NatsBus) SubscribeDurable(subject, durableName string, handler Handler)
 
 func (n *NatsBus) Close() {
 	if n.conn != nil {
+		// Drain ensures all buffered messages are sent before closing.
+		_ = n.conn.Drain()
 		n.conn.Close()
 	}
 }

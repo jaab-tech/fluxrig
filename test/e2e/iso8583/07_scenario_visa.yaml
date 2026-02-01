@@ -1,0 +1,57 @@
+# Copyright 2025 JAAB Tech SAS, Uruguay
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+meta:
+  name: "iso8583_visa_validation"
+  version: "1.0.0"
+
+racks:
+  - name: "iso-node-01"
+    labels:
+      tier: "edge"
+
+gears:
+  - name: "visa-gateway"
+    type: "io_iso8583"
+    deploy: "iso-node-01"
+    config:
+      mode: "server"
+      bind: ":8583"
+      variant: "visa"
+      visa_src_id: "445566"
+      visa_dst_id: "112233"
+      # header_length_bytes defaults to 2
+      read_timeout: "30s"
+      write_timeout: "5s"
+
+  - name: "iso-client"
+    type: "io_iso8583"
+    deploy: "iso-node-01"
+    config:
+      mode: "client"
+      connect: "127.0.0.1:10000"
+      variant: "visa"
+      # Visa src/dst will be swapped by the traffic generator mock, the gear just passes it
+      visa_src_id: "112233" # Inverted from Server Gear to match flow? No, Gear config depends on its role.
+      visa_dst_id: "445566"
+      reconnect_wait: "1s"
+
+wires:
+  # Route Server Ingress -> Client Egress
+  - from: "visa-gateway.out"
+    to: "iso-client.in"
+
+  # Route Client Response -> Server Egress
+  - from: "iso-client.out"
+    to: "visa-gateway.in"

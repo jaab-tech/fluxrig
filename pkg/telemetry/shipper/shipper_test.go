@@ -31,11 +31,11 @@ type mockBus struct {
 
 func (m *mockBus) Connect(url string, opts bus.ConnectOptions) error { return nil }
 func (m *mockBus) Close()                                            {}
-func (m *mockBus) Publish(subject string, msg *fluxmsg.FluxMsg) error {
+func (m *mockBus) Publish(ctx context.Context, subject string, msg *fluxmsg.FluxMsg) error {
 	m.published = append(m.published, msg)
 	return nil
 }
-func (m *mockBus) PublishRaw(subject string, data []byte, fluxID uint64) error {
+func (m *mockBus) PublishRaw(ctx context.Context, subject string, data []byte, fluxID uint64) error {
 	var msg fluxmsg.FluxMsg
 	if err := msgpack.Unmarshal(data, &msg); err != nil {
 		return err
@@ -43,16 +43,10 @@ func (m *mockBus) PublishRaw(subject string, data []byte, fluxID uint64) error {
 	m.published = append(m.published, &msg)
 	return nil
 }
-func (m *mockBus) PublishWithContext(ctx context.Context, subject string, msg *fluxmsg.FluxMsg) error {
-	return m.Publish(subject, msg)
-}
 func (m *mockBus) Subscribe(subject string, handler bus.Handler) (bus.Subscription, error) {
 	return nil, nil
 }
 func (m *mockBus) SubscribeDurable(subject, durableName string, handler bus.Handler) (bus.Subscription, error) {
-	return nil, nil
-}
-func (m *mockBus) Request(subject string, data []byte, timeout time.Duration) ([]byte, error) {
 	return nil, nil
 }
 

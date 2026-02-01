@@ -6,8 +6,11 @@ import (
 
 	"github.com/jaab-tech/fluxrig/pkg/bus"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // InstrumentedBus wraps a bus.Bus to capture telemetry metrics.
@@ -31,15 +34,27 @@ func (ib *InstrumentedBus) Close() {
 	ib.next.Close()
 }
 
-func (ib *InstrumentedBus) Publish(subject string, msg *fluxmsg.FluxMsg) error {
+func (ib *InstrumentedBus) Publish(ctx context.Context, subject string, msg *fluxmsg.FluxMsg) error {
 	start := time.Now()
 
-	// Record size approximation (best effort)
-	// We don't have serialized size here easily unless we marshal.
-	// But NATS bus marshals internally.
-	// We'll count '1' message for now.
+	// 1. Inject Tracing Context
+	// If the context contains a Span, we inject it into the message Metadata (W3C TraceContext)
+	// and also set the explicit FluxMsg fields for convenience.
+	span := trace.SpanFromContext(ctx)
+	if span.SpanContext().IsValid() {
+		// Field Mapping (Explicit)
+		msg.TraceID = span.SpanContext().TraceID().String()
+		msg.RefFluxID = 0 // Optional: Could put SpanID here if needed, keeping 0 for now as per logic
 
-	err := ib.next.Publish(subject, msg)
+		// W3C Header Injection (Interoperability)
+		if msg.Metadata == nil {
+			msg.Metadata = make(map[string]string)
+		}
+		otel.GetTextMapPropagator().Inject(ctx, propagation.MapCarrier(msg.Metadata))
+	}
+
+	// 2. Publish
+	err := ib.next.Publish(ctx, subject, msg)
 	duration := time.Since(start).Milliseconds()
 
 	// Fetch metrics dynamically to use current identity
@@ -48,7 +63,7 @@ func (ib *InstrumentedBus) Publish(subject string, msg *fluxmsg.FluxMsg) error {
 		return err
 	}
 
-	ctx := context.Background()
+	// Use the context for recording if possible, but metrics usually use Background or independent context
 	attrs := metric.WithAttributes(attribute.String("subject", subject))
 
 	m.BusPublishCount.Add(ctx, 1)
@@ -63,40 +78,13 @@ func (ib *InstrumentedBus) Publish(subject string, msg *fluxmsg.FluxMsg) error {
 	return err
 }
 
-func (ib *InstrumentedBus) PublishRaw(subject string, data []byte, fluxID uint64) error {
+func (ib *InstrumentedBus) PublishRaw(ctx context.Context, subject string, data []byte, fluxID uint64) error {
 	start := time.Now()
 
-	err := ib.next.PublishRaw(subject, data, fluxID)
+	err := ib.next.PublishRaw(ctx, subject, data, fluxID)
 	duration := time.Since(start).Milliseconds()
 
 	// Fetch metrics dynamically to use current identity
-	m := GetMetrics()
-	if m == nil {
-		return err
-	}
-
-	ctx := context.Background()
-	attrs := metric.WithAttributes(attribute.String("subject", subject))
-
-	m.BusPublishCount.Add(ctx, 1)
-	m.NatsMessagesPublished.Add(ctx, 1, attrs)
-	m.NatsPublishLatency.Record(ctx, float64(duration), attrs)
-
-	if err != nil {
-		m.BusPublishErrors.Add(ctx, 1)
-		m.NatsPublishErrors.Add(ctx, 1, attrs)
-	}
-
-	return err
-}
-
-func (ib *InstrumentedBus) PublishWithContext(ctx context.Context, subject string, msg *fluxmsg.FluxMsg) error {
-	start := time.Now()
-
-	err := ib.next.PublishWithContext(ctx, subject, msg)
-	duration := time.Since(start).Milliseconds()
-
-	// Fetch metrics dynamically
 	m := GetMetrics()
 	if m == nil {
 		return err
@@ -117,32 +105,67 @@ func (ib *InstrumentedBus) PublishWithContext(ctx context.Context, subject strin
 }
 
 func (ib *InstrumentedBus) Subscribe(subject string, handler bus.Handler) (bus.Subscription, error) {
-	// Wrap handler to measure RX metrics?
-	// The handler runs in NATS callback goroutine.
-	wrappedHandler := func(msg *fluxmsg.FluxMsg) {
+	// Wrap handler to measure RX metrics & Extract Traces
+	wrappedHandler := func(ctx context.Context, msg *fluxmsg.FluxMsg) {
+		// 1. Extract Tracing Context
+		// NATS doesn't pass context over wire natively as header in our wrapper (msgpack setup),
+		// so we rely on msg.Metadata carrying the W3C traceparent.
+		carrier := propagation.MapCarrier(msg.Metadata)
+		extractedCtx := otel.GetTextMapPropagator().Extract(ctx, carrier)
+
+		// 2. Start a Span for the handling of this message
+		// This links the consumer to the producer in the distributed trace.
+		// We use a new context derived from the extracted one.
+		tracer := otel.GetTracerProvider().Tracer("fluxrig/bus")
+		spanName := "handle_msg " + subject
+		handlerCtx, span := tracer.Start(extractedCtx, spanName,
+			trace.WithSpanKind(trace.SpanKindConsumer),
+			trace.WithAttributes(
+				attribute.String("messaging.system", "nats"),
+				attribute.String("messaging.destination", subject),
+				attribute.String("messaging.flux_id", msg.TraceID),
+			),
+		)
+		defer span.End()
+
 		m := GetMetrics()
 		if m != nil {
-			ctx := context.Background()
 			attrs := metric.WithAttributes(attribute.String("subject", subject))
-			m.NatsMessagesReceived.Add(ctx, 1, attrs)
+			m.NatsMessagesReceived.Add(handlerCtx, 1, attrs)
 		}
 
-		// Call original
-		handler(msg)
+		// Call original handler with the TRACED context
+		handler(handlerCtx, msg)
 	}
 	return ib.next.Subscribe(subject, wrappedHandler)
 }
 
 func (ib *InstrumentedBus) SubscribeDurable(subject, durableName string, handler bus.Handler) (bus.Subscription, error) {
-	wrappedHandler := func(msg *fluxmsg.FluxMsg) {
+	wrappedHandler := func(ctx context.Context, msg *fluxmsg.FluxMsg) {
+		// 1. Extract Tracing Context
+		carrier := propagation.MapCarrier(msg.Metadata)
+		extractedCtx := otel.GetTextMapPropagator().Extract(ctx, carrier)
+
+		// 2. Start Span
+		tracer := otel.GetTracerProvider().Tracer("fluxrig/bus")
+		spanName := "handle_msg " + subject
+		handlerCtx, span := tracer.Start(extractedCtx, spanName,
+			trace.WithSpanKind(trace.SpanKindConsumer),
+			trace.WithAttributes(
+				attribute.String("messaging.system", "nats"),
+				attribute.String("messaging.destination", subject),
+				attribute.String("messaging.durable", durableName),
+			),
+		)
+		defer span.End()
+
 		m := GetMetrics()
 		if m != nil {
-			ctx := context.Background()
 			attrs := metric.WithAttributes(attribute.String("subject", subject), attribute.String("durable", durableName))
-			m.NatsMessagesReceived.Add(ctx, 1, attrs)
+			m.NatsMessagesReceived.Add(handlerCtx, 1, attrs)
 		}
 
-		handler(msg)
+		handler(handlerCtx, msg)
 	}
 	return ib.next.SubscribeDurable(subject, durableName, wrappedHandler)
 }

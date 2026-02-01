@@ -47,12 +47,12 @@ func setupBus(t *testing.T) (*snake.Server, *bus.NatsBus, string) {
 	// 2. Connect Bus
 	b := bus.NewNatsBus("flux")
 	url := s.ClientURL()
-	if err := b.Connect(url, bus.ConnectOptions{
+	if errCon := b.Connect(url, bus.ConnectOptions{
 		Name:           "test-runner",
 		ConnectTimeout: 2 * time.Second,
 		ReconnectWait:  1 * time.Second,
-	}); err != nil {
-		t.Fatalf("Bus connect failed: %v", err)
+	}); errCon != nil {
+		t.Fatalf("Bus connect failed: %v", errCon)
 	}
 
 	// 3. Create Stream (Required for JS Publish)
@@ -149,8 +149,8 @@ func TestSendHeartbeat(t *testing.T) {
 
 	gen, _ := idgen.New(1)
 	hbCfg := &config.RackConfig{}
-	if err := sendHeartbeat(context.Background(), b, 456, hbCfg, gen); err != nil {
-		t.Fatal(err)
+	if errHB := sendHeartbeat(context.Background(), b, 456, hbCfg, gen); errHB != nil {
+		t.Fatal(errHB)
 	}
 
 	msg, err := sub.NextMsg(5 * time.Second) // Increased timeout for CI

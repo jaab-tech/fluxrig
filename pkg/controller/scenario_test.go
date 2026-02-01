@@ -145,7 +145,7 @@ type MockScenarioBus struct {
 	PublishedMsg   *fluxmsg.FluxMsg
 }
 
-func (m *MockScenarioBus) Publish(subject string, msg *fluxmsg.FluxMsg) error {
+func (m *MockScenarioBus) Publish(ctx context.Context, subject string, msg *fluxmsg.FluxMsg) error {
 	m.PublishedTopic = subject
 	m.PublishedMsg = msg
 	return nil

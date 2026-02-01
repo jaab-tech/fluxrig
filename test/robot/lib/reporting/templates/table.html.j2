@@ -1,18 +1,46 @@
 {%- if title -%}
-<div class="fluxrig-table" style="margin: 5px 0 8px 0;"><h3 style="margin: 0 0 2px 0; color: #cccccc; font-family: monospace; font-size: 11px; font-weight: normal;">{{ title }}</h3>
+<div class="fluxrig-table" style="margin: 0 0 16px 0;">
+    <h3 style="margin: 0 0 8px 0; color: #374151; font-family: sans-serif; font-size: 14px; font-weight: 600;">{{ title }}</h3>
 {%- else -%}
-<div class="fluxrig-table" style="margin: 5px 0 8px 0;">
+<div class="fluxrig-table" style="margin: 0 0 16px 0;">
 {%- endif -%}
-<table border="0" style="border-collapse: collapse; width: {{ width }}; font-family: monospace; font-size: 11px; background-color: #1e1e1e;"><thead><tr style="background-color: #0066cc;">
-{%- for header in headers -%}
-<th style="padding: 4px 8px; text-align: left; color: #ffffff; border-bottom: 1px solid #0088ff;">{{ header }}</th>
-{%- endfor -%}
-</tr></thead><tbody>
-{%- for row in rows -%}
-<tr style="background-color: {% if loop.index is odd %}#2d2d2d{% else %}#252525{% endif %};">
-{%- for cell in row -%}
-<td style="padding: 3px 8px; color: #e0e0e0; border-bottom: 1px solid #383838;">{{ cell }}</td>
-{%- endfor -%}
-</tr>
-{%- endfor -%}
-</tbody></table></div>
+<table id="{{ table_id }}" border="0" style="border-collapse: collapse; width: {{ width }}; font-family: sans-serif; font-size: 12px; border: 1px solid #e5e7eb; box-shadow: 0 1px 2px rgba(0,0,0,0.05); border-radius: 6px; overflow: hidden;">
+    <thead>
+        <tr style="background-color: #f9fafb; border-bottom: 1px solid #e5e7eb;">
+        {%- for header in headers -%}
+            <th style="padding: 10px 12px; text-align: left; color: #4b5563; font-weight: 600; text-transform: uppercase; font-size: 11px; letter-spacing: 0.05em;">{{ header }}</th>
+        {%- endfor -%}
+        </tr>
+    </thead>
+    <tbody>
+    {%- for row in rows -%}
+        <tr style="background-color: #ffffff; border-bottom: 1px solid #f3f4f6; transition: background-color 0.2s;" onmouseover="this.style.backgroundColor='#f9fafb'" onmouseout="this.style.backgroundColor='#ffffff'">
+        {%- for cell in row -%}
+            <td style="padding: 8px 12px; color: #111827;">{{ cell }}</td>
+        {%- endfor -%}
+        </tr>
+    {%- endfor -%}
+    </tbody>
+</table>
+{%- if rows|length > 10 -%}
+<div style="padding: 8px 12px;">
+    <button onclick="
+        var table = document.getElementById('{{ table_id }}');
+        var rows = table.tBodies[0].rows; 
+        var expanded = this.getAttribute('data-expanded') === 'true';
+        for(var i=10; i<rows.length; i++) { rows[i].style.display = expanded ? 'none' : 'table-row'; }
+        this.innerText = expanded ? 'Show More (' + (rows.length-10) + ')' : 'Show Less';
+        this.setAttribute('data-expanded', !expanded);
+    " data-expanded="false" style="background: #f3f4f6; border: 1px solid #e5e7eb; color: #4b5563; cursor: pointer; border-radius: 4px; padding: 4px 12px; font-family: sans-serif; font-size: 11px; font-weight: 500;">Show More ({{ rows|length - 10 }})</button>
+    <script>
+    (function() {
+        var table = document.getElementById('{{ table_id }}');
+        if(table) {
+            var rows = table.tBodies[0].rows;
+            for(var i=10; i<rows.length; i++) { rows[i].style.display = 'none'; }
+        }
+    })();
+    </script>
+</div>
+{%- endif -%}
+</div>

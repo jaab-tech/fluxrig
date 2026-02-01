@@ -1,0 +1,28 @@
+# Copyright 2025 JAAB Tech SAS, Uruguay
+meta:
+  name: "iso8583_server_loopback"
+  version: "1.0.0"
+
+racks:
+  - name: "iso-node-01"
+    labels:
+      tier: "edge"
+
+gears:
+  - name: "iso-input"
+    type: "io_iso8583"
+    deploy: "iso-node-01"
+    config:
+      mode: "server"
+      bind: ":8583"
+      frame_length_size: 2
+      strict_connection_routing: true
+      frame_length_endian: "big"
+      encoding: "bcd"
+      protocol_header_size: 12
+      preserve_headers: true
+
+wires:
+  # Internal Loopback: Ingress -> Bus -> Egress (Echo back to sender)
+  - from: "iso-input.out"
+    to: "iso-input.in"

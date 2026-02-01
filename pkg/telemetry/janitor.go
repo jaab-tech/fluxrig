@@ -67,10 +67,12 @@ func (j *Janitor) clean() error {
 	var deletedCount int
 	var reclaimedBytes int64
 
+	// Ensure directory exists to avoid walk error on fresh installations
+	if _, err := os.Stat(j.dataDir); os.IsNotExist(err) {
+		return nil
+	}
+
 	err := filepath.Walk(j.dataDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
 		if info.IsDir() {
 			return nil
 		}
