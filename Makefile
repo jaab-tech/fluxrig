@@ -21,7 +21,7 @@ LDFLAGS := -w -s \
 
 all: lint test build
 
-build: lint catalog ## Build fluxrig binary
+build: lint catalog iso8583-tool ## Build fluxrig binary
 	@echo "--------------------------------------------------"
 	@echo "Building fluxrig..."
 	@echo "  Version:  $(VERSION)"
@@ -35,9 +35,20 @@ build: lint catalog ## Build fluxrig binary
 # Mixer (Requires CGO)
 	go build $(GO_FLAGS) -ldflags "$(LDFLAGS)" -o bin/fluxrig-mixer ./cmd/fluxrig-mixer
 
+build-bin: catalog ## Build fluxrig binary without linting
+	@echo "--------------------------------------------------"
+	@echo "Building fluxrig (No Lint)..."
+	@echo "--------------------------------------------------"
+	mkdir -p bin
+	go build $(GO_FLAGS) -ldflags "$(LDFLAGS)" -o bin/fluxrig ./cmd/fluxrig
+	go build $(GO_FLAGS) -ldflags "$(LDFLAGS)" -o bin/fluxrig-mixer ./cmd/fluxrig-mixer
+
+# Ops Directory (Default to sibling repo)
+OPS_DIR ?= ../fluxrig-ops
+
 catalog: ## Generate log message catalog
 	@echo "Generating log catalog..."
-	@go run scripts/catalog_logs.go > ops/docs/internal/log_catalog.csv
+	@go run scripts/catalog_logs.go > $(OPS_DIR)/docs/internal/log_catalog.csv
 
 test: ## Run unit tests with race detection and coverage
 	@echo "Running tests..."
@@ -93,7 +104,7 @@ clean: ## Remove build artifacts and temporary files
 	rm -f fluxrig_test.toml
 	rm -f cluster.key
 	rm -f cluster.key.pub
-	rm -f ops/docs/internal/log_catalog.csv
+	rm -f $(OPS_DIR)/docs/internal/log_catalog.csv
 	go clean -cache
 
 # Python / Test Automation
@@ -135,19 +146,43 @@ robot: build ## Run Robot Framework validation suite
 
 
 
+
 .PHONY: clean-robot
 clean-robot: ## Clean Robot Framework artifacts
 	@rm -rf test/robot/.venv
-	@rm -rf test/robot/results
+	@rm -rf test/robot/results # Legacy symlink
 	@rm -f test/robot/log.html test/robot/report.html test/robot/output.xml
+	@find test/robot -name "results" -type l -delete
+	@find test/robot -name "work" -type l -delete
 
 .PHONY: openapi
 openapi: ## Generate OpenAPI specification
 	@echo "Generating OpenAPI spec..."
 	@if command -v swag >/dev/null; then \
-		swag init -g cmd/fluxrig-mixer/main.go -o ops/docs/public/5_reference --outputTypes yaml; \
+		swag init -g cmd/fluxrig-mixer/main.go -o $(OPS_DIR)/docs/public/5_reference --outputTypes yaml; \
 	else \
-		$(shell go env GOPATH)/bin/swag init -g cmd/fluxrig-mixer/main.go -o ops/docs/public/5_reference --outputTypes yaml; \
+		$(shell go env GOPATH)/bin/swag init -g cmd/fluxrig-mixer/main.go -o $(OPS_DIR)/docs/public/5_reference --outputTypes yaml; \
 	fi
-	@mv ops/docs/public/5_reference/swagger.yaml ops/docs/public/5_reference/openapi.yaml
-	@echo "Spec generated at ops/docs/public/5_reference/openapi.yaml"
+	@mv $(OPS_DIR)/docs/public/5_reference/swagger.yaml $(OPS_DIR)/docs/public/5_reference/openapi.yaml
+	@echo "Spec generated at $(OPS_DIR)/docs/public/5_reference/openapi.yaml"
+
+.PHONY: iso8583-tool
+iso8583-tool: ## Build iso8583-tool (Load Gen & Echo Server)
+	@echo "Building iso8583-tool..."
+	@go build -o bin/iso8583-tool ./cmd/iso8583-tool
+
+test-robot-perf: iso8583-tool ## Run Robot Performance Suite
+	@echo "Running Robot Performance Suite..."
+	@cd test/robot && ./run.sh suites/iso8583/performance.robot
+
+test-robot-staged: build ## Run Robot Staged Load Suite (QoS Validation)
+	@echo "Running Staged Load Test..."
+	@cd test/robot && ./run.sh suites/iso8583/server_staged_load.robot
+
+test-robot-resilience: build ## Run Robot Resilience Suite
+	@echo "Running Resilience Test..."
+	@cd test/robot && ./run.sh suites/iso8583/resilience.robot
+
+test-robot-validation: build ## Run Robot Server Validation
+	@echo "Running Server Validation..."
+	@cd test/robot && ./run.sh suites/iso8583/server_validation.robot

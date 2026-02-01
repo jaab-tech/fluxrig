@@ -62,6 +62,10 @@ type Config struct {
 
 	// Throttling configuration
 	Throttling config.ThrottlingConfig
+
+	// QoS: Max time to wait for NATS publish (Metrics/Spans).
+	// Default: "500ms"
+	QoSPublishTimeout string `koanf:"qos_publish_timeout"`
 }
 
 type MetricsConfig struct {

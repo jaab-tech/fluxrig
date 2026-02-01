@@ -47,13 +47,15 @@ import (
 
 // App encapsulates the FluxRig Mixer control plane application.
 type App struct {
-	cfg *config.MixerConfig
+	cfg          *config.MixerConfig
+	scenarioPath string
 }
 
 // NewApp creates a new Mixer application instance.
-func NewApp(cfg *config.MixerConfig) *App {
+func NewApp(cfg *config.MixerConfig, scenarioPath string) *App {
 	return &App{
-		cfg: cfg,
+		cfg:          cfg,
+		scenarioPath: scenarioPath,
 	}
 }
 
@@ -234,8 +236,32 @@ func (a *App) Run() error {
 		sc.SetBus(scenarioBus)
 		enrollment.SetScenario(sc)
 	}
+	// 10. Bootstrap Scenario (if configured)
+	if a.scenarioPath != "" {
+		slog.Info("Bootstrapping Scenario", "path", a.scenarioPath)
+		content, errRead := os.ReadFile(a.scenarioPath)
+		if errRead != nil {
+			slog.Error("Failed to read bootstrap scenario", "path", a.scenarioPath, "error", errRead)
+			// Decide: Should we exit? Probably yes, as this was explicit intent.
+			return fmt.Errorf("bootstrap scenario read failed: %w", errRead)
+		}
 
-	// 10. Start Janitor (Retention)
+		// Import (Validate & Persist)
+		safeName, errImport := sc.Import(context.Background(), content, false)
+		if errImport != nil {
+			slog.Error("Failed to import bootstrap scenario", "error", errImport)
+			return fmt.Errorf("bootstrap scenario import failed: %w", errImport)
+		}
+
+		// Activate
+		if errActivate := sc.Activate(context.Background(), safeName); errActivate != nil {
+			slog.Error("Failed to activate bootstrap scenario", "name", safeName, "error", errActivate)
+			return fmt.Errorf("bootstrap scenario activation failed: %w", errActivate)
+		}
+		slog.Info("Bootstrap Scenario Activated", "name", safeName)
+	}
+
+	// 11. Start Janitor (Retention)
 	janitorLogger := loggerPkg.WithComponent(slog.Default(), loggerPkg.TypeMixer, "janitor")
 	janitor := telemetry.NewJanitor(janitorLogger, filepath.Join(storeDir, "telemetry"), cfg.Observability.Embedded.RetentionDays)
 	janitorContext, cancelJanitor := context.WithCancel(context.Background())
@@ -258,9 +284,11 @@ func (a *App) Run() error {
 	// Graceful Shutdown
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
-	<-stop
+	sig := <-stop
+	slog.Info("Received signal (ignored)", "signal", sig)
 
-	slog.Info("Shutting down Mixer...")
+	sig2 := <-stop
+	slog.Info("Shutting down Mixer...", "signal", sig2)
 	return nil
 }
 

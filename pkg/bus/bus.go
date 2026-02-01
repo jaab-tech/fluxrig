@@ -36,14 +36,11 @@ type Bus interface {
 	Connect(url string, opts ConnectOptions) error
 
 	// Publish sends a FluxMsg to a specific subject (topic).
-	// It should handle serialization internally.
-	Publish(subject string, msg *fluxmsg.FluxMsg) error
+	// It must respect the context for cancellation and tracing propagation.
+	Publish(ctx context.Context, subject string, msg *fluxmsg.FluxMsg) error
 
 	// PublishRaw sends pre-serialized data (MsgPack) with a specific deduplication ID.
-	PublishRaw(subject string, data []byte, fluxID uint64) error
-
-	// PublishWithContext sends a FluxMsg with context for cancellation.
-	PublishWithContext(ctx context.Context, subject string, msg *fluxmsg.FluxMsg) error
+	PublishRaw(ctx context.Context, subject string, data []byte, fluxID uint64) error
 
 	// Subscribe listens for messages on a subject.
 	// It returns a subscription object (to allow Unsubscribe) and an error.
@@ -58,7 +55,8 @@ type Bus interface {
 }
 
 // Handler is the function signature for processing incoming messages.
-type Handler func(msg *fluxmsg.FluxMsg)
+// The context contains tracing information extracted from the message.
+type Handler func(ctx context.Context, msg *fluxmsg.FluxMsg)
 
 // Subscription represents an active listener.
 type Subscription interface {

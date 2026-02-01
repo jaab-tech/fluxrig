@@ -193,6 +193,24 @@ if [ -d "${TELEMETRY_DIR}" ]; then
       log_warn "Metrics directory not found"
     fi
     
+    # Validation: Distributed Tracing (Context Propagation)
+    # We expect the loopback traffic (gateway.out -> gateway.in) to create linked spans.
+    # Span A (Ingress/Emit) -> Span B (Process/Handler). Span B should have parent_id = Span A.
+    TRACING_CHECK=$(duckdb -noheader -csv -c "SELECT count(*) FROM read_parquet('${SPANS_DIR}/**/*.parquet') WHERE parent_span_id != '' AND parent_span_id IS NOT NULL" 2>/dev/null || echo 0)
+    
+    if [ "$TRACING_CHECK" -gt 0 ]; then
+         log_success "Distributed Tracing Verified ($TRACING_CHECK linked spans found)."
+         # Optional debug: show them
+         # duckdb -c "SELECT trace_id, span_id, parent_id, name FROM read_parquet('${SPANS_DIR}/**/*.parquet') WHERE parent_id != ''"
+    else
+         # Fallback: Maybe we didn't generate enough traffic or export batching missed it?
+         # But we waited 10s.
+         log_warn "No linked spans found (parent_id is empty). Context Propagation might be failing."
+         # We won't fail the whole test yet as users might run this without the new binary logic?
+         # Actually, force strictness if we want to confirm the fix.
+         fail "Distributed Tracing Verification Failed! No spans with parent_id found."
+    fi
+
     log_success "Telemetry Pipeline Validated"
   else
     log_warn "No Parquet files found in ${TELEMETRY_DIR}. Telemetry may not have flushed yet."

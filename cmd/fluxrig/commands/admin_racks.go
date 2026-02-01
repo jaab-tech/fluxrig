@@ -190,6 +190,64 @@ var racksRemoveCmd = &cobra.Command{
 	},
 }
 
+var racksSetLogLevelCmd = &cobra.Command{
+	Use:   "set-log-level [id] [level]",
+	Short: "Set log level for a rack (debug, info, warn, error, trace)",
+	Args:  cobra.ExactArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		id := args[0]
+		level := args[1]
+		apiURL, _ := cmd.Flags().GetString("api-url")
+
+		body := map[string]string{"level": level}
+		jsonBody, _ := json.Marshal(body)
+
+		resp, err := http.Post(
+			fmt.Sprintf("%s/api/v1/racks/%s/log-level", apiURL, id),
+			"application/json",
+			bytes.NewBuffer(jsonBody),
+		)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("set-log-level failed: %s", resp.Status)
+		}
+
+		fmt.Printf("Rack %s log level set to '%s'\n", id, level)
+		return nil
+	},
+}
+
+var racksShutdownCmd = &cobra.Command{
+	Use:   "shutdown [id]",
+	Short: "Shutdown a rack gracefully (flushes telemetry)",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		id := args[0]
+		apiURL, _ := cmd.Flags().GetString("api-url")
+
+		resp, err := http.Post(
+			fmt.Sprintf("%s/api/v1/racks/%s/shutdown", apiURL, id),
+			"application/json",
+			nil,
+		)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("shutdown failed: %s", resp.Status)
+		}
+
+		fmt.Printf("Rack %s shutdown command sent\n", id)
+		return nil
+	},
+}
+
 func init() {
 	adminCmd.AddCommand(adminRacksCmd)
 	adminRacksCmd.AddCommand(racksListCmd)
@@ -197,6 +255,9 @@ func init() {
 	adminRacksCmd.AddCommand(racksRemoveCmd)
 	adminRacksCmd.AddCommand(racksSuspendCmd)
 	adminRacksCmd.AddCommand(racksActivateCmd)
+	adminRacksCmd.AddCommand(racksActivateCmd)
+	adminRacksCmd.AddCommand(racksSetLogLevelCmd)
+	adminRacksCmd.AddCommand(racksShutdownCmd)
 
 	racksApproveCmd.Flags().String("name", "", "New name for the rack")
 	// Mark flag required?

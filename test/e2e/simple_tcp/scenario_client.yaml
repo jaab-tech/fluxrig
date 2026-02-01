@@ -23,7 +23,7 @@ racks:
 
 gears:
   - name: "gateway-client"
-    type: "simple_tcp"
+    type: "io_tcp"
     deploy: "comp-node-01"
     config:
       mode: "client"

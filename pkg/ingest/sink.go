@@ -121,7 +121,7 @@ func (s *TelemetrySink) Stop() error {
 }
 
 // handleMessage dispatches the batch to the appropriate handler based on type.
-func (s *TelemetrySink) handleMessage(msg *fluxmsg.FluxMsg) {
+func (s *TelemetrySink) handleMessage(ctx context.Context, msg *fluxmsg.FluxMsg) {
 	msgType := msg.Metadata["type"]
 
 	var err error
@@ -233,7 +233,7 @@ func extractIdentityAndSource(defaultName string, log map[string]interface{}) (e
 			if n, ok := m["flux.name"].(string); ok && n != "" {
 				// Only promote to Entity Name if it's a Gear or Snake.
 				// For Controllers/Scenarios, we want to preserve the Physical Entity (e.g. Mixer).
-				if eType == "GEAR" || eType == "SNAKE" {
+				if eType == "GEAR" || eType == "SNAKE" || eType == "SCENARIO" {
 					eName = n
 					delete(m, "flux.name") // Remove if promoted
 				}
@@ -274,6 +274,7 @@ func extractIdentityAndSource(defaultName string, log map[string]interface{}) (e
 			// Clean up identity keys that were promoted to columns
 			delete(m, "flux.type")
 			delete(m, "name")
+			delete(m, "component")
 		}
 	}
 	return

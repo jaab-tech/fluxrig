@@ -29,7 +29,13 @@ func (m *MockGear) Start(ctx context.Context, emit func(*fluxmsg.FluxMsg)) error
 func (m *MockGear) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.FluxMsg, error) {
 	return msg, nil
 }
-func (m *MockGear) Stop() error { return nil }
+func (m *MockGear) Stop() error {
+	return nil
+}
+
+func (m *MockGear) Drain(ctx context.Context) error {
+	return nil
+}
 
 func TestFactory(t *testing.T) {
 	f := NewFactory()

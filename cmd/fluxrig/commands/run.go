@@ -219,17 +219,20 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 	enrollTopic := fmt.Sprintf("fluxrig.agent.enrollment.%s", helloName)
 	logger.Info("Waiting for Passport...", "topic", enrollTopic)
 
+	// Channel to signal graceful shutdown from callbacks
+	shutdownCh := make(chan struct{}, 1)
+
 	if busConnected {
 		passportCh := make(chan *fluxmsg.HelloResponse, 1)
 
-		sub, errSub := managedBus.Subscribe(enrollTopic, func(msg *fluxmsg.FluxMsg) {
+		sub, errSub := managedBus.Subscribe(enrollTopic, func(ctx context.Context, msg *fluxmsg.FluxMsg) {
 			// Parse HelloResponse
 			resp, errParse := fluxmsg.ParseHelloResponse(msg.Data)
 			if errParse != nil {
 				logger.Error("Failed to parse enrollment response", "error", errParse)
 				return
 			}
-			logger.Info(resp.Message, "status", resp.Status)
+			logger.Info("Received Enrollment Response", "message", resp.Message, "status", resp.Status)
 
 			select {
 			case passportCh <- resp:
@@ -311,7 +314,7 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 						logger.Warn("Failed to init telemetry", "error", errInit)
 					} else {
 						defer func() {
-							shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+							shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 							defer cancel()
 							if errStop := shutdownTel(shutdownCtx); errStop != nil {
 								logger.Error("Telemetry shutdown error", "error", errStop)
@@ -372,7 +375,7 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 						logger.Warn("Failed to init telemetry (fallback)", "error", errInit)
 					} else {
 						defer func() {
-							shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+							shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 							defer cancel()
 							if errStop := shutdownTel(shutdownCtx); errStop != nil {
 								logger.Error("Telemetry shutdown error", "error", errStop)
@@ -415,7 +418,7 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 						logger.Warn("Failed to init telemetry (resume)", "error", errInit)
 					} else {
 						defer func() {
-							shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+							shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 							defer cancel()
 							if errStop := shutdownTel(shutdownCtx); errStop != nil {
 								logger.Error("Telemetry shutdown error", "error", errStop)
@@ -436,7 +439,7 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 		// 1. Notifications (Status/Commands)
 		if mID > 0 {
 			notifyTopic := fmt.Sprintf("fluxrig.agent.notify.%d", mID)
-			_, err = managedBus.Subscribe(notifyTopic, func(msg *fluxmsg.FluxMsg) {
+			_, err = managedBus.Subscribe(notifyTopic, func(ctx context.Context, msg *fluxmsg.FluxMsg) {
 				hbResp, errParse := fluxmsg.ParseHeartbeatResponse(msg.Data)
 				if errParse != nil {
 					return
@@ -449,6 +452,24 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 						level := strings.TrimPrefix(hbResp.Command, "set_log_level:")
 						loggerPkg.SetLevel(logger, level)
 						logger.Info("Log Level Dynamically Updated", "level", level)
+					}
+					if hbResp.Command == "agent:shutdown" {
+						logger.Info("Received Shutdown Command via Heartbeat - Initiating Graceful Drain")
+						// 1. Drain Gears (Stop accepting new work, finish pending)
+						drainCtx, drainCancel := context.WithTimeout(context.Background(), 5*time.Second)
+						defer drainCancel()
+						if errDrain := rtManager.Drain(drainCtx); errDrain != nil {
+							logger.Error("Drain Error", "error", errDrain)
+						} else {
+							logger.Info("All Gears Drained Successfully")
+						}
+
+						// 2. Signal Main Loop to Exit (triggers defer cleanup)
+						select {
+						case shutdownCh <- struct{}{}:
+						default:
+						}
+						return
 					}
 				}
 				// Handle Passport Update (Adoption)
@@ -495,7 +516,7 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 		// 2. Scenario Updates
 		// Topic: fluxrig.rack.{name}.scenario
 		scenarioTopic := fluxmsg.SubjectScenarioPrefix + helloName + fluxmsg.SubjectScenarioSuffix
-		_, err = managedBus.Subscribe(scenarioTopic, func(msg *fluxmsg.FluxMsg) {
+		_, err = managedBus.Subscribe(scenarioTopic, func(ctx context.Context, msg *fluxmsg.FluxMsg) {
 			payload, errParse := fluxmsg.ParseScenarioPayload(msg.Data)
 			if errParse != nil {
 				logger.Error("Failed to parse scenario payload", "error", errParse)
@@ -515,7 +536,7 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 				return
 			}
 
-			if errApply := rtManager.ApplyScenario(context.Background(), &sc); errApply != nil {
+			if errApply := rtManager.ApplyScenario(ctx, &sc); errApply != nil {
 				logger.Error("Failed to apply scenario", "error", errApply)
 				return
 			}
@@ -553,6 +574,9 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 		case <-ctx.Done():
 			logger.Info("Signal Received. Shutting down Agent...", "signal", "SIGTERM/SIGINT")
 			return nil
+		case <-shutdownCh:
+			logger.Info("Shutdown Command Received. Exiting Main Loop.")
+			return nil
 		case <-reconnectCh:
 			return ErrReconnect
 		case <-ticker.C:
@@ -588,7 +612,10 @@ func sendHello(b bus.Bus, p *fluxmsg.HelloPayload, gen *idgen.IDGenerator) error
 	id, _ := gen.NextFluxID()
 	msg.FluxID = id
 
-	return b.Publish(fluxmsg.SubjectAgentHello, msg)
+	// Hello is root span usually? Use Background or passed ctx?
+	// Note: sendHello signature has no context. We can update it or use Background.
+	// Since it's helper, let's use Background for now.
+	return b.Publish(context.Background(), fluxmsg.SubjectAgentHello, msg)
 }
 
 func sendHeartbeat(ctx context.Context, b bus.Bus, mid uint16, cfg *config.RackConfig, gen *idgen.IDGenerator) error {
@@ -613,7 +640,7 @@ func sendHeartbeat(ctx context.Context, b bus.Bus, mid uint16, cfg *config.RackC
 	msg.Data = data
 	msg.SrcGearID = uint64(mid)
 
-	return b.PublishWithContext(ctx, fluxmsg.SubjectAgentHeartbeat, msg)
+	return b.Publish(ctx, fluxmsg.SubjectAgentHeartbeat, msg)
 }
 
 // Config Path for Flag

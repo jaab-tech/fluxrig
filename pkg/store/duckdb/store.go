@@ -665,7 +665,7 @@ func (s *Store) QueryMetricsFiltered(ctx context.Context, q MetricQuery) ([]Tele
 	whereClause := "WHERE " + strings.Join(conditions, " AND ")
 
 	query := ""
-	metricsDir := filepath.Join(s.dataDir, "metrics")
+	metricsDir := filepath.Join(s.dataDir, "telemetry", "metrics")
 	if hasParquetFiles(metricsDir) {
 		// Query both active table AND parquet files
 		parquetPath := filepath.Join(metricsDir, "**", "*.parquet")

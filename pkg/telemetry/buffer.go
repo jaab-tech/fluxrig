@@ -40,6 +40,11 @@ func NewBufferHandler(next slog.Handler) *BufferHandler {
 	}
 }
 
+// Next returns the underlying handler (for unwrapping).
+func (h *BufferHandler) Next() slog.Handler {
+	return h.next
+}
+
 func (h *BufferHandler) Enabled(ctx context.Context, level slog.Level) bool {
 	return h.next.Enabled(ctx, level)
 }

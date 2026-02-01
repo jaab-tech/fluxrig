@@ -22,7 +22,7 @@ racks:
 
 gears:
   - name: "gateway"
-    type: "simple_tcp"
+    type: "io_tcp"
     deploy: "comp-node-01" # Target the Rack Name
     config:
       mode: "server"

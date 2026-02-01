@@ -73,6 +73,10 @@ type NativeGear interface {
 	// - msg: The message to process (Do NOT modify in place if sharing, but here we own it)
 	Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.FluxMsg, error)
 
+	// Drain signals the gear to stop accepting new input but complete pending work.
+	// It should block until drained or ctx is canceled.
+	Drain(ctx context.Context) error
+
 	// Stop acts as the cleanup hook.
 	// Called when the Rack is shutting down or the Scenario is disabled.
 	// Should close listener sockets, file handles, etc.
