@@ -96,10 +96,14 @@ func (m *MockBus) PublishRaw(ctx context.Context, subject string, data []byte, f
 func (m *MockBus) Subscribe(subject string, handler bus.Handler) (bus.Subscription, error) {
 	return nil, nil
 }
+func (m *MockBus) SubscribeRaw(subject string, streamName string, handler bus.RawHandler) (bus.Subscription, error) {
+	return nil, nil
+}
 func (m *MockBus) SubscribeDurable(subject, durableName string, handler bus.Handler) (bus.Subscription, error) {
 	return nil, nil
 }
-func (m *MockBus) Close() {}
+func (m *MockBus) Close()           {}
+func (m *MockBus) KV() bus.KeyValue { return nil }
 
 func TestInit_Validation(t *testing.T) {
 	// 1. Nil Config -> Init requires struct, not pointer, so can't pass nil.

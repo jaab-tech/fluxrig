@@ -90,7 +90,19 @@ func (m *MockBus) SubscribeDurable(subject, durableName string, handler Handler)
 	return m.Subscribe(subject, handler)
 }
 
+func (m *MockBus) SubscribeRaw(subject string, streamName string, handler RawHandler) (Subscription, error) {
+	// For mock, we can assume normal subscribe behavior, ignoring streamName
+	// But we need to adapt implementation since RawHandler != Handler
+	// Mock implementation likely doesn't support Raw dispatch logic fully yet.
+	// We'll return a no-op subscription for now to satisfy interface.
+	return &MockSubscription{}, nil
+}
+
 func (m *MockBus) Close() {}
+
+func (m *MockBus) KV() KeyValue {
+	return nil // Return nil or a mock KV implementation if needed
+}
 
 // GetMessages safely retrieves messages for a subject
 func (m *MockBus) GetMessages(subject string) []*fluxmsg.FluxMsg {

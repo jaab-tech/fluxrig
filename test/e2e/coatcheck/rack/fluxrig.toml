@@ -1,0 +1,20 @@
+# Coat Check E2E Rack Configuration
+[logging]
+level = "trace"
+filename = "logs/rack.log"
+
+[store]
+dir = "./data"
+state_file = "state.flux"
+
+[rack]
+name = "proxy-rack"
+machine_id = 100
+heartbeat_interval = "1s"
+
+[rack.bus]
+url = "nats://127.0.0.1:4233"
+stream_name = "flux-msg"
+
+[rack.telemetry]
+enabled = true

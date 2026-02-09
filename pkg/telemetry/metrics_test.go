@@ -27,7 +27,7 @@ import (
 func TestMetricExporter_Export(t *testing.T) {
 	mockBus := bus.NewMockBus()
 	gen, _ := idgen.New(1)
-	writer := telemetry.NewNatsWriter(mockBus, 12345, "test-machine", "flux.telemetry", gen)
+	writer := telemetry.NewNatsWriter(mockBus, 12345, "test-machine", "flux.telemetry", gen, 1) // 1s flush
 	exporter := telemetry.NewMetricExporter(writer)
 
 	// Helper to create dummy metrics

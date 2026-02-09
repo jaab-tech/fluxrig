@@ -20,7 +20,7 @@ set -e
 # Simple TCP Gear Regression Test
 # ==============================================================================
 # Objectives:
-# 1. Validate 'simple_tcp' I/O (Server/Client/Mode/Delimiters)
+# 1. Validate 'io_tcp' I/O (Server/Client/Mode/Delimiters)
 # 2. Validate Infrastructure Persistence (Port availability for Mixer/Snake)
 # 3. Validate structured Logs and Traces
 # ==============================================================================
@@ -30,7 +30,7 @@ ROOT_DIR="$(cd "${BASE_DIR}/../../.." && pwd)"
 
 source "${BASE_DIR}/../utils/e2e_utils.sh"
 
-setup_workspace "simple_tcp" "$BASE_DIR"
+setup_workspace "io_tcp" "$BASE_DIR"
 
 # Infrastructure Ports
 MIXER_API_PORT=9110

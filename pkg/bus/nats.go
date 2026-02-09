@@ -17,8 +17,8 @@ package bus
 import (
 	"context"
 	"errors"
-	"strconv"
 
+	"fmt"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -86,7 +86,9 @@ func (n *NatsBus) Publish(ctx context.Context, subject string, msg *fluxmsg.Flux
 	// Use FluxMsg.FluxID as unique Nats-Msg-Id
 	// This ensures that if the LogShipper re-sends the same log (e.g., after crash/restart),
 	// JetStream will identify it as a duplicate and discard it.
-	msgID := strconv.FormatUint(msg.FluxID, 10)
+	// Use FluxMsg.FluxID + HopCount (len(Path)) as unique Nats-Msg-Id
+	// This supports Forwarding (DAGs) AND Loops (A -> B -> A), as Path grows on every hop.
+	msgID := fmt.Sprintf("%d-%d", msg.FluxID, len(msg.Path))
 
 	_, err = n.js.Publish(ctx, subject, data, jetstream.WithMsgID(msgID))
 	return err
@@ -99,7 +101,8 @@ func (n *NatsBus) PublishRaw(ctx context.Context, subject string, data []byte, f
 	}
 
 	// Send Bytes (Persistent) with Deduplication ID
-	msgID := strconv.FormatUint(fluxID, 10)
+	// Send Bytes (Persistent) with Deduplication ID
+	msgID := fmt.Sprintf("%d-%s", fluxID, subject)
 	_, err := n.js.Publish(ctx, subject, data, jetstream.WithMsgID(msgID))
 	return err
 }
@@ -134,6 +137,7 @@ func (n *NatsBus) Subscribe(subject string, handler Handler) (Subscription, erro
 
 		// Deserialize
 		var fluxMsg fluxmsg.FluxMsg
+
 		if errUnmarshal := msgpack.Unmarshal(msg.Data(), &fluxMsg); errUnmarshal != nil {
 			return // Drop corrupt
 		}
@@ -141,6 +145,45 @@ func (n *NatsBus) Subscribe(subject string, handler Handler) (Subscription, erro
 		// NATS doesn't provide a context per message, so we start with Background.
 		// Middleware (InstrumentedBus) will enrich this.
 		handler(context.Background(), &fluxMsg)
+	})
+
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+
+	return &natsSubscription{
+		cc:     cc,
+		cancel: cancel,
+		ctx:    cancelCtx,
+	}, nil
+}
+
+// SubscribeRaw listens for raw messages using a JetStream Consumer bound to a specific stream.
+func (n *NatsBus) SubscribeRaw(subject string, streamName string, handler RawHandler) (Subscription, error) {
+	if n.js == nil {
+		return nil, errors.New("nats bus not connected")
+	}
+
+	ctx := context.Background()
+
+	// 1. Create Ordered Consumer (Ephemeral)
+	// We MUST specify the stream name because $KV events are in KV_<bucket>, not flux-msg.
+	cons, err := n.js.CreateOrUpdateConsumer(ctx, streamName, jetstream.ConsumerConfig{
+		Name:          "", // Ephemeral
+		FilterSubject: subject,
+		DeliverPolicy: jetstream.DeliverNewPolicy,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// 2. Consume Messages
+	cancelCtx, cancel := context.WithCancel(ctx)
+
+	cc, err := cons.Consume(func(msg jetstream.Msg) {
+		_ = msg.Ack()
+		handler(context.Background(), msg.Subject(), msg.Data())
 	})
 
 	if err != nil {
@@ -224,4 +267,11 @@ func (s *natsSubscription) Unsubscribe() error {
 	s.cc.Stop()
 	s.cancel()
 	return nil
+}
+
+// KV returns the KeyValue interface for distributed state management.
+func (n *NatsBus) KV() KeyValue {
+	return &natsKV{
+		js: n.js,
+	}
 }

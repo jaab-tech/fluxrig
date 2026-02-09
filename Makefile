@@ -173,7 +173,17 @@ iso8583-tool: ## Build iso8583-tool (Load Gen & Echo Server)
 
 test-robot-perf: iso8583-tool ## Run Robot Performance Suite
 	@echo "Running Robot Performance Suite..."
-	@cd test/robot && ./run.sh suites/iso8583/performance.robot
+	@./test/robot/run.sh test/robot/suites/iso8583/performance.robot
+
+test-robot-iso: iso8583-tool ## Run Robot ISO8583 Suite
+	@echo "Running Robot ISO8583 Suite..."
+	@./test/robot/run.sh test/robot/suites/iso8583/performance.robot
+
+test-robot-coatcheck: build ## Run Robot Coatcheck Suite
+	@echo "Running Robot Coatcheck Suite..."
+	@./test/robot/run.sh test/robot/suites/iso8583/coatcheck_loop.robot
+
+test-robot: test-robot-iso test-robot-coatcheck ## Run all Robot Framework suites
 
 test-robot-staged: build ## Run Robot Staged Load Suite (QoS Validation)
 	@echo "Running Staged Load Test..."

@@ -1,0 +1,16 @@
+# Coat Check E2E Mixer Configuration
+[logging]
+level = "trace"
+filename = "logs/mixer.log"
+
+[api]
+port = 9120
+
+[snake]
+port = 4233
+url = "nats://127.0.0.1:4233"
+
+[store]
+dir = "./data"
+database_file = "coatcheck_e2e.duckdb"
+cluster_key_file = "cluster.key"

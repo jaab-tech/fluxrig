@@ -34,6 +34,10 @@ func (ib *InstrumentedBus) Close() {
 	ib.next.Close()
 }
 
+func (ib *InstrumentedBus) KV() bus.KeyValue {
+	return ib.next.KV()
+}
+
 func (ib *InstrumentedBus) Publish(ctx context.Context, subject string, msg *fluxmsg.FluxMsg) error {
 	start := time.Now()
 
@@ -138,6 +142,12 @@ func (ib *InstrumentedBus) Subscribe(subject string, handler bus.Handler) (bus.S
 		handler(handlerCtx, msg)
 	}
 	return ib.next.Subscribe(subject, wrappedHandler)
+}
+
+func (ib *InstrumentedBus) SubscribeRaw(subject string, streamName string, handler bus.RawHandler) (bus.Subscription, error) {
+	// For Raw, we just delegate for now (tracing requires unmarshal)
+	// TODO: Add metrics for raw subscription
+	return ib.next.SubscribeRaw(subject, streamName, handler)
 }
 
 func (ib *InstrumentedBus) SubscribeDurable(subject, durableName string, handler bus.Handler) (bus.Subscription, error) {

@@ -1,0 +1,98 @@
+# Coat Check E2E Test Scenario: TCP Custom Protocol Proxy
+#
+# Use Case: TCP Reverse Proxy where internal routing metadata (conn_id)
+#           is NOT forwarded to backend, but must be restored for response routing.
+#
+# Topology:
+#   [Client] --> [tcp_gateway] --> [ctx_store] --> [tcp_client] --> [Backend API]
+#                      ^                                                    |
+#                      |                                                    v
+#                      +--- [ctx_restore] <-- [tcp_client] <----- [Response]
+#
+# Key Insight:
+#   - conn_id: Internal FluxRig routing metadata (which TCP connection to respond to)
+#   - txn_id: Correlation ID (in this case: Payload)
+#   - ctx_store saves conn_id keyed by payload BEFORE forwarding to backend
+#   - Backend response contains payload
+#   - ctx_restore retrieves conn_id using payload from response
+
+meta:
+  name: "coatcheck_e2e_tcp_proxy"
+  version: "1.0.0"
+
+racks:
+  - name: "proxy-rack"
+    labels:
+      tier: "edge"
+
+wires:
+  # --- Request Path ---
+  # Gateway receives TCP request, FluxRig assigns conn_id internally
+  - from: "tcp_gateway.out"
+    to: "ctx_store.in"
+
+  # Store saves {conn_id, session_id} keyed by payload, then forwards to backend client
+  - from: "ctx_store.out"
+    to: "tcp_client.in"
+
+  # --- Response Path ---
+  # Backend response comes back via tcp_client
+  - from: "tcp_client.out"
+    to: "ctx_restore.in"
+
+  # Restore looks up conn_id using payload, merges into message for routing
+  - from: "ctx_restore.out"
+    to: "tcp_gateway.in"
+
+gears:
+  # --- Coat Check Gears ---
+  - name: "ctx_store"
+    type: "coatcheck"
+    deploy: "proxy-rack"
+    config:
+      mode: "store"
+      bucket: "proxy_sessions"
+      key_fields: ["payload"] # Use full payload "tx001" as key
+      value_fields: ["meta.conn.id"]
+      on_missing: "error"
+
+  - name: "ctx_restore"
+    type: "coatcheck"
+    deploy: "proxy-rack"
+    config:
+      mode: "restore"
+      bucket: "proxy_sessions"
+      key_fields: ["payload"] # Restore using same payload from Echo
+      on_missing: "drop"
+      merge_strategy: "overwrite"
+
+  - name: "ctx_daemon"
+    type: "coatcheck"
+    deploy: "proxy-rack"
+    config:
+      mode: "daemon"
+      bucket: "proxy_sessions"
+      storage: "memory"
+      replicas: 1
+      default_ttl: "30s"
+
+  # --- TCP Gateway (Inbound) ---
+  - name: "tcp_gateway"
+    type: "io_tcp"
+    deploy: "proxy-rack"
+    config:
+      mode: "server"
+      bind: ":9180"
+      delimiter: "\n"
+      delimiter_include: false # Strip newline, payload is "tx001"
+
+  # --- TCP Client (Outbound to Backend) ---
+  - name: "tcp_client"
+    type: "io_tcp"
+    deploy: "proxy-rack"
+    config:
+      mode: "client"
+      connect: "localhost:9000" # TCP Echo Server
+      reconnect_wait: "1s"
+      delimiter: "\n"
+      delimiter_append: true # Append same delimiter to outgoing echo request

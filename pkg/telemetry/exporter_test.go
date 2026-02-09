@@ -30,7 +30,7 @@ import (
 func TestSpanExporter_ExportSpans(t *testing.T) {
 	mockBus := bus.NewMockBus()
 	gen, _ := idgen.New(1)
-	writer := telemetry.NewNatsWriter(mockBus, 12345, "test-machine", "flux.telemetry", gen)
+	writer := telemetry.NewNatsWriter(mockBus, 12345, "test-machine", "flux.telemetry", gen, 1)
 	exporter := telemetry.NewSpanExporter(writer)
 
 	tp := trace.NewTracerProvider(
@@ -80,7 +80,7 @@ func TestSpanExporter_ExportSpans(t *testing.T) {
 func TestLogExporter_Export(t *testing.T) {
 	mockBus := bus.NewMockBus()
 	gen, _ := idgen.New(1)
-	writer := telemetry.NewNatsWriter(mockBus, 12345, "test-machine", "flux.telemetry", gen)
+	writer := telemetry.NewNatsWriter(mockBus, 12345, "test-machine", "flux.telemetry", gen, 1)
 	exporter := telemetry.NewLogExporter(writer)
 
 	// Create detailed Record

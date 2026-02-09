@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package simple_tcp
+package io_tcp
 
 import (
 	"context"
@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jaab-tech/fluxrig/pkg/bus"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/jaab-tech/fluxrig/pkg/idgen"
 	"github.com/jaab-tech/fluxrig/pkg/sdk"
@@ -43,6 +44,7 @@ func (m *MockCtx) GearName() string         { return "test-gear" }
 func (m *MockCtx) MachineID() uint64        { return 1 }
 func (m *MockCtx) Logger() *slog.Logger     { return slog.Default() }
 func (m *MockCtx) IDGen() sdk.IDGenerator   { return &MockIDGen{} }
+func (m *MockCtx) Bus() bus.Bus             { return nil }
 
 func TestGear_Init_Validation(t *testing.T) {
 	g := &Gear{}
@@ -108,7 +110,7 @@ func TestGear_Loopback(t *testing.T) {
 	select {
 	case msg := <-serverMsgs:
 		assert.Equal(t, "hello server", string(msg.RawPayload))
-		assert.Equal(t, "simple_tcp", msg.Metadata["flux.source"])
+		assert.Equal(t, "io_tcp_client", msg.Metadata["flux.source"])
 	case <-time.After(1 * time.Second):
 		t.Fatal("Server did not receive message")
 	}

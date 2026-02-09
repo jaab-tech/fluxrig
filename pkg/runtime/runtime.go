@@ -87,6 +87,7 @@ type GearContextImpl struct {
 	machineID uint64
 	logger    *slog.Logger
 	idGen     sdk.IDGenerator
+	bus       bus.Bus
 }
 
 func (g *GearContextImpl) Context() context.Context { return g.ctx }
@@ -95,6 +96,7 @@ func (g *GearContextImpl) GearName() string         { return g.name }
 func (g *GearContextImpl) MachineID() uint64        { return g.machineID }
 func (g *GearContextImpl) Logger() *slog.Logger     { return g.logger }
 func (g *GearContextImpl) IDGen() sdk.IDGenerator   { return g.idGen }
+func (g *GearContextImpl) Bus() bus.Bus             { return g.bus }
 
 // ApplyScenario diffs and applies the scenario.
 func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) error {
@@ -163,6 +165,7 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) erro
 			// Override component to GEAR and name to gear name
 			logger: logger.WithComponent(m.logger(), logger.TypeGear, gSpec.Name),
 			idGen:  m.idGen,
+			bus:    m.bus,
 		}
 
 		if err := gear.Init(gCtx); err != nil {
@@ -182,7 +185,7 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) erro
 		}
 
 		// Get Port ID for "in" (assuming toPort maps to "in" for simple gears, or verify)
-		// For simple_tcp, "in" is implicit listener or Process target.
+		// For io_tcp, "in" is implicit listener or Process target.
 		// If wire.To is "gateway.in", we use "in" ID.
 		portID := m.gearPorts[toGear]["in"]
 		// If explicit port logic exists, lookup by toPort.

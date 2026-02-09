@@ -4,7 +4,7 @@
 # Simple TCP Gear E2E Test
 
 ## Objective
-Verify the production readiness of the Native TCP Gear (`simple_tcp`) within the FluxRig Runtime.
+Verify the production readiness of the Native TCP Gear (`io_tcp`) within the FluxRig Runtime.
 
 ## Verifications
 
@@ -42,7 +42,7 @@ Verify the production readiness of the Native TCP Gear (`simple_tcp`) within the
 
 ## Usage
 ```bash
-./test/e2e_simple_tcp/run.sh
+./test/e2e_io_tcp/run.sh
 ```
 
 ## Files

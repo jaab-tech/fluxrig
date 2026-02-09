@@ -18,6 +18,7 @@ import (
 	"context"
 	"log/slog"
 
+	"github.com/jaab-tech/fluxrig/pkg/bus"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/jaab-tech/fluxrig/pkg/idgen"
 )
@@ -48,6 +49,9 @@ type GearContext interface {
 
 	// IDGen returns the Rack's ID generator
 	IDGen() IDGenerator
+
+	// Bus returns the message bus interface (for advanced features like KV/Streams)
+	Bus() bus.Bus
 }
 
 // NativeGear defines the contract for Go-based components (Internal/Native Gears).

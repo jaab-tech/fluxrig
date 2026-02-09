@@ -99,7 +99,7 @@ racks:
   - name: "rack-1"
 gears:
   - name: "gear-1"
-    type: "simple_tcp"
+    type: "io_tcp"
     deploy: "rack-1"
 wires:
   - from: "gear-1.out"

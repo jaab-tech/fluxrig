@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package simple_tcp
+package io_tcp
 
 import (
 	"context"
@@ -23,15 +23,21 @@ import (
 	"github.com/jaab-tech/fluxrig/pkg/sdk"
 )
 
+// ModeImpl defines the interface for server/client implementations.
+type ModeImpl interface {
+	Start(ctx context.Context) error
+	Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.FluxMsg, error)
+	Stop() error
+}
+
 // Gear implements sdk.NativeGear for Simple TCP
 type Gear struct {
 	config *Config
 	log    *slog.Logger
 	ctx    sdk.GearContext
+	emit   func(*fluxmsg.FluxMsg)
 
-	// Mode implementations
-	server *Server
-	client *Client
+	impl ModeImpl
 }
 
 // Ensure interface compliance
@@ -44,11 +50,11 @@ func (g *Gear) Init(ctx sdk.GearContext) error {
 
 	cfg, err := ParseConfig(ctx.Config())
 	if err != nil {
-		return fmt.Errorf("simple_tcp: invalid config: %w", err)
+		return fmt.Errorf("io_tcp: invalid config: %w", err)
 	}
 
 	if err := cfg.Validate(); err != nil {
-		return fmt.Errorf("simple_tcp: validation failed: %w", err)
+		return fmt.Errorf("io_tcp: validation failed: %w", err)
 	}
 	g.config = cfg
 
@@ -59,59 +65,58 @@ func (g *Gear) Init(ctx sdk.GearContext) error {
 // Start begins the active lifecycle (Listener/Dialer).
 func (g *Gear) Start(ctx context.Context, emit func(*fluxmsg.FluxMsg)) error {
 	g.log.Info("starting gear")
+	g.emit = emit
 
-	switch g.config.Mode {
-	case ModeServer:
-		g.server = NewServer(g.config, g.log, emit, g.ctx.IDGen())
-		if err := g.server.Start(ctx); err != nil {
-			return err
-		}
-	case ModeClient:
-		g.client = NewClient(g.config, g.log, emit, g.ctx.IDGen())
-		if err := g.client.Start(ctx); err != nil {
-			return err
-		}
+	// Validate
+	if g.config.Mode == "" {
+		return fmt.Errorf("io_tcp: missing mode")
 	}
 
-	return nil
+	switch g.config.Mode {
+	case "server":
+		if g.config.Bind == "" {
+			return fmt.Errorf("io_tcp: missing bind address")
+		}
+		g.impl = NewServer(g.config, g.ctx.Logger(), g.emit, g.ctx.IDGen())
+	case "client":
+		if g.config.Connect == "" {
+			return fmt.Errorf("io_tcp: missing connect address")
+		}
+		g.impl = NewClient(g.config, g.ctx.Logger(), g.emit, g.ctx.IDGen())
+	default:
+		return fmt.Errorf("io_tcp: unknown mode %q", g.config.Mode)
+	}
+
+	return g.impl.Start(ctx)
 }
 
 // Process handles egress messages (writing to TCP).
 func (g *Gear) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.FluxMsg, error) {
-	if g.server != nil {
-		return g.server.Process(ctx, msg)
+	if g.impl == nil {
+		return nil, fmt.Errorf("io_tcp: not initialized")
 	}
-	if g.client != nil {
-		return g.client.Process(ctx, msg)
-	}
-	return nil, nil
+	return g.impl.Process(ctx, msg)
 }
 
-// Stop closes the gear resources.
+// Stop closes the gear resources. (Renamed to Close in diff, but keeping original name for interface compliance)
 func (g *Gear) Stop() error {
 	g.log.Info("stopping gear")
-	var err error
-	if g.server != nil {
-		if e := g.server.Stop(); e != nil {
-			err = e
-		}
+	if g.impl != nil {
+		// For io_tcp, we can reuse Stop() or just close listener.
+		// Ideally we would implement proper Drain in io_tcp server too.
+		return g.impl.Stop()
 	}
-	if g.client != nil {
-		if e := g.client.Stop(); e != nil {
-			err = e
-		}
-	}
-	return err
+	return nil
 }
 
 // Drain signals the gear to stop accepting new input.
 func (g *Gear) Drain(ctx context.Context) error {
 	// Simple implementation: Just stop accepting (if server)
-	// For simple_tcp, we can reuse Stop() or just close listener.
+	// For io_tcp, we can reuse Stop() or just close listener.
 	// Reusing Stop() is imperfect as it kills connections, but for this reference gear it's acceptable fallback.
-	// Ideally we would implement proper Drain in simple_tcp server too.
+	// Ideally we would implement proper Drain in io_tcp server too.
 	// For now, satisfy interface:
-	if g.server != nil {
+	if g.impl != nil { // Changed from g.server to g.impl
 		// Just wait for context
 		<-ctx.Done()
 	}

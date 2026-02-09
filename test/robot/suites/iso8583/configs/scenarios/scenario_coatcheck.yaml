@@ -1,0 +1,99 @@
+# Copyright 2025 JAAB Tech SAS, Uruguay
+meta:
+  name: "coatcheck_full_loop"
+  version: "1.0.0"
+
+racks:
+  - name: "iso-node-01"
+    labels:
+      tier: "edge"
+
+wires:
+  # --- Outbound Flow ---
+  # 1. ISO Listener (Gateway) -> Store Context
+  # This simulates traffic coming INTO the Gateway from POS/ATM (Source)
+  # But technically usage is: Gateway (Server) -> Store -> Client (Upstream)
+  # Let's mirror the "server_staged_load" loopback but insert CoatCheck.
+
+  # Flow:
+  # LoadGen -> [Gateway:8583] --(fluxmsg)--> [Store] --(fluxmsg)--> [Client] --(iso)--> [EchoServer]
+  #                                                                      |
+  # [Gateway] <--(fluxmsg)-- [Restore] <--(fluxmsg)-- [Client] <--(iso)--+
+
+  # 1. Gateway Out (Request) -> Store In
+  - from: "iso-gateway.out"
+    to: "ctx_store.in"
+
+  # 2. Store Out -> Client In (Upstream)
+  - from: "ctx_store.out"
+    to: "iso-client.in"
+
+  # 3. Client Out (Response) -> Restore In
+  - from: "iso-client.out"
+    to: "ctx_restore.in"
+
+  # 4. Restore Out -> Gateway In (Response Routing)
+  - from: "ctx_restore.out"
+    to: "iso-gateway.in"
+
+gears:
+  # --- The "Coat Check" Gears ---
+  - name: "ctx_store"
+    type: "coatcheck"
+    deploy: "iso-node-01"
+    config:
+      mode: "store"
+      bucket: "iso_loop_txns"
+      key_fields: ["meta.iso8583.raw_header"] # Correlate by RTT Header
+      value_fields: ["meta.conn.id"] # Partial Coat: Session Only
+      on_missing: "error"
+
+  - name: "ctx_restore"
+    type: "coatcheck"
+    deploy: "iso-node-01"
+    config:
+      mode: "restore"
+      bucket: "iso_loop_txns"
+      key_fields: ["meta.iso8583.raw_header"]
+      on_missing: "drop"
+      merge_strategy: "overwrite"
+
+  - name: "ctx_daemon"
+    type: "coatcheck"
+    deploy: "iso-node-01"
+    config:
+      mode: "daemon"
+      bucket: "iso_loop_txns"
+      storage: "memory"
+      replicas: 1
+      default_ttl: "10s"
+
+  # --- The ISO Gears (Standard Loopback) ---
+  - name: "iso-gateway"
+    type: "io_iso8583"
+    deploy: "iso-node-01"
+    config:
+      mode: "server"
+      bind: ":8583"
+      # Encoding & Framing (Match Reference)
+      encoding: "bcd"
+      frame_length_size: 2
+      frame_length_endian: "big"
+      # Enable Header Preservation for Correlation
+      protocol_header_size: 12
+      preserve_headers: true
+
+  - name: "iso-client"
+    type: "io_iso8583"
+    deploy: "iso-node-01"
+    config:
+      mode: "client"
+      connect: "localhost:54321"
+      reconnect_wait: "1s"
+      # Encoding & Framing
+      encoding: "bcd"
+      frame_length_size: 2
+      frame_length_endian: "big"
+      # Enable Header Preservation for Correlation
+      protocol_header_size: 12
+      preserve_headers: true

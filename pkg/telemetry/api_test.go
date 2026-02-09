@@ -76,7 +76,7 @@ func TestLog(t *testing.T) {
 	mockBus := bus.NewMockBus()
 	// Test Writer directly
 	gen, _ := idgen.New(1)
-	_ = telemetry.NewNatsWriter(mockBus, 12345, "test-name", "flux.test", gen)
+	_ = telemetry.NewNatsWriter(mockBus, 12345, "test-name", "flux.test", gen, 1)
 	cfg := telemetry.Config{
 		ServiceName: "test-service",
 		EntityID:    12345,
