@@ -46,9 +46,16 @@ type Bus interface {
 	// It returns a subscription object (to allow Unsubscribe) and an error.
 	Subscribe(subject string, handler Handler) (Subscription, error)
 
+	// SubscribeRaw listens for raw messages (bytes) on a subject.
+	// Useful for integrating with non-FluxMsg streams (e.g. NATS KV, distinct protocols).
+	SubscribeRaw(subject string, streamName string, handler RawHandler) (Subscription, error)
+
 	// SubscribeDurable listens for messages using a persistent consumer (durableName).
 	// This ensures messages are not lost/duplicated across restarts.
 	SubscribeDurable(subject, durableName string, handler Handler) (Subscription, error)
+
+	// KV returns the KeyValue interface for distributed state management.
+	KV() KeyValue
 
 	// Close cleans up the connection.
 	Close()
@@ -57,6 +64,9 @@ type Bus interface {
 // Handler is the function signature for processing incoming messages.
 // The context contains tracing information extracted from the message.
 type Handler func(ctx context.Context, msg *fluxmsg.FluxMsg)
+
+// RawHandler is the function signature for processing raw incoming messages.
+type RawHandler func(ctx context.Context, subject string, data []byte)
 
 // Subscription represents an active listener.
 type Subscription interface {

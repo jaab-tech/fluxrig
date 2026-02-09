@@ -1,0 +1,91 @@
+# Coat Check E2E: Restore After TTL Expiry Test (TC54)
+# Tests restore behavior when key has expired
+
+meta:
+  name: "coatcheck_e2e_ttl_expiry"
+  version: "1.0.0"
+
+racks:
+  - name: "proxy-rack"
+    labels:
+      tier: "edge"
+
+wires:
+  - from: "tcp_gateway.out"
+    to: "bento_ttl.in"
+  - from: "bento_ttl.out"
+    to: "ctx_store.in"
+  - from: "ctx_store.out"
+    to: "tcp_client.in"
+  - from: "tcp_client.out"
+    to: "ctx_restore.in"
+  - from: "ctx_restore.out"
+    to: "tcp_gateway.in"
+
+gears:
+  - name: "bento_ttl"
+    type: "bento"
+    deploy: "proxy-rack"
+    config:
+      ports:
+        inputs: ["bento_ttl.in"]
+        outputs: ["bento_ttl.out"]
+      bento:
+        pipeline:
+          processors:
+            - bloblang: |
+                meta "coatcheck.ttl" = if content().string().contains("short") { "3s" } else { "10s" }
+                root = content()
+
+  - name: "ctx_store"
+    type: "coatcheck"
+    deploy: "proxy-rack"
+    config:
+      mode: "store"
+      bucket: "coatcheck"
+      key_fields: ["payload"]
+      value_fields: ["meta.conn.id", "meta.coatcheck.ttl"]
+      on_missing: "error"
+
+  - name: "ctx_restore"
+    type: "coatcheck"
+    deploy: "proxy-rack"
+    config:
+      mode: "restore"
+      bucket: "coatcheck"
+      key_fields: ["payload"]
+      on_missing: "error" # Should return error when key expired
+      merge_strategy: "overwrite"
+
+  # Daemon with MaxTTL safety and Value Inspection
+  - name: "ctx_daemon"
+    type: "coatcheck"
+    deploy: "proxy-rack"
+    config:
+      mode: "daemon"
+      bucket: "coatcheck"
+      storage: "file"
+      replicas: 1
+      default_ttl: "2s" # Fallback (Short)
+      max_ttl: "1m" # Safety Net
+      include_values: true # Required to read metadata overrides
+
+  - name: "tcp_gateway"
+    type: "io_tcp"
+    deploy: "proxy-rack"
+    config:
+      mode: "server"
+      bind: ":9180"
+      delimiter: "|"
+      delimiter_include: false # Strip delimiter, payload is "delay:..."
+
+  # --- TCP Client (Outbound to Backend) ---
+  - name: "tcp_client"
+    type: "io_tcp"
+    deploy: "proxy-rack"
+    config:
+      mode: "client"
+      connect: "localhost:9000" # TCP Echo Server
+      reconnect_wait: "1s"
+      delimiter: "|"
+      delimiter_append: true # Append same delimiter to outgoing echo request

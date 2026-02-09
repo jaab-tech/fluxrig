@@ -49,13 +49,17 @@ func (m *MockBus) Subscribe(subject string, handler bus.Handler) (bus.Subscripti
 	}
 	return &MockSub{}, nil
 }
+func (m *MockBus) SubscribeRaw(subject string, streamName string, handler bus.RawHandler) (bus.Subscription, error) {
+	return &MockSub{}, nil
+}
 func (m *MockBus) SubscribeDurable(subject, durableName string, handler bus.Handler) (bus.Subscription, error) {
 	return nil, nil
 }
 func (m *MockBus) Request(subject string, msg *fluxmsg.FluxMsg, timeout time.Duration) (*fluxmsg.FluxMsg, error) {
 	return nil, nil
 }
-func (m *MockBus) Close() {}
+func (m *MockBus) Close()           {}
+func (m *MockBus) KV() bus.KeyValue { return nil }
 
 type MockSub struct{}
 
@@ -90,7 +94,7 @@ func TestManager_Lifecycle(t *testing.T) {
 	sc := &registry.Scenario{
 		Meta: registry.ScenarioMeta{Name: "test", Version: "1.0"},
 		Gears: []registry.GearSpec{
-			{Name: "g1", Type: "simple_tcp", Deploy: "test-rack"},
+			{Name: "g1", Type: "io_tcp", Deploy: "test-rack"},
 		},
 		Wires: []registry.WireSpec{
 			{From: "g1.in", To: "g1.out"}, // Loopbackish, just to test wire logic
@@ -153,7 +157,7 @@ func TestManager_Errors(t *testing.T) {
 	sc2 := &registry.Scenario{
 		Meta: registry.ScenarioMeta{Name: "test", Version: "1.0"},
 		Gears: []registry.GearSpec{
-			{Name: "g1", Type: "simple_tcp", Deploy: "test-rack"},
+			{Name: "g1", Type: "io_tcp", Deploy: "test-rack"},
 		},
 		Wires: []registry.WireSpec{
 			{From: "g1.in", To: "g1.out"},

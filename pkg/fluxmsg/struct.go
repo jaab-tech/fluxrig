@@ -17,6 +17,8 @@ package fluxmsg
 // FluxMsg is the atomic unit of data in the system.
 // Matches definition in docs/public/2_architecture/data.md
 // and ops/docs/public/5_reference/protocols.md
+const MetaCoatCheckTTL = "coatcheck.ttl"
+
 type FluxMsg struct {
 	// --- Identity & Tracing ---
 	FluxID    uint64 `msgpack:"id"`     // Global Unique ID (Sonyflake)

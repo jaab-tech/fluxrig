@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package simple_tcp
+package io_tcp
 
 import (
 	"bufio"
@@ -42,7 +42,7 @@ type Client struct {
 func NewClient(cfg *Config, log *slog.Logger, emit func(*fluxmsg.FluxMsg), idGen sdk.IDGenerator) *Client {
 	return &Client{
 		config: cfg,
-		log:    log.With("impl", "simple_tcp_client"),
+		log:    log.With("impl", "io_tcp_client"),
 		emit:   emit,
 		idGen:  idGen,
 		done:   make(chan struct{}),
@@ -102,8 +102,11 @@ func (c *Client) handleConn(conn net.Conn) {
 		msg.TsInit = time.Now().UnixNano()
 		msg.RawPayload = payload
 
-		msg.Metadata["peer.ip"] = c.config.Connect // Or resolved IP
-		msg.Metadata["flux.source"] = "simple_tcp_client"
+		host, port, _ := net.SplitHostPort(conn.RemoteAddr().String())
+		msg.Metadata["peer.ip"] = host
+		msg.Metadata["peer.port"] = port
+		msg.Metadata["conn.id"] = connection.id
+		msg.Metadata["flux.source"] = "io_tcp_client"
 
 		// TRACE Logging
 		if c.log.Enabled(context.Background(), loggerPkg.LevelTrace) {

@@ -18,8 +18,9 @@ import (
 	"fmt"
 
 	"github.com/jaab-tech/fluxrig/pkg/gears/native/bento"
+	"github.com/jaab-tech/fluxrig/pkg/gears/native/coatcheck"
+	"github.com/jaab-tech/fluxrig/pkg/gears/native/io_tcp"
 	iso8583io "github.com/jaab-tech/fluxrig/pkg/gears/native/iso8583/io"
-	"github.com/jaab-tech/fluxrig/pkg/gears/native/simple_tcp"
 	"github.com/jaab-tech/fluxrig/pkg/sdk"
 )
 
@@ -33,9 +34,10 @@ func NewFactory() *Factory {
 		constructors: make(map[string]func() sdk.NativeGear),
 	}
 	// Register Built-ins
-	f.Register("io_tcp", func() sdk.NativeGear { return &simple_tcp.Gear{} })
+	f.Register("io_tcp", func() sdk.NativeGear { return &io_tcp.Gear{} })
 	f.Register("bento", func() sdk.NativeGear { return bento.New() })
 	f.Register("io_iso8583", func() sdk.NativeGear { return &iso8583io.Gear{} })
+	f.Register("coatcheck", func() sdk.NativeGear { return coatcheck.New() })
 
 	return f
 }

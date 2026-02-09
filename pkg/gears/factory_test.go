@@ -41,9 +41,9 @@ func TestFactory(t *testing.T) {
 	f := NewFactory()
 
 	// 1. Built-in
-	g, err := f.Create("simple_tcp")
+	g, err := f.Create("io_tcp")
 	if err != nil {
-		t.Errorf("Create(simple_tcp) failed: %v", err)
+		t.Errorf("Create(io_tcp) failed: %v", err)
 	}
 	if g == nil {
 		t.Error("Returned nil gear")

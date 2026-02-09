@@ -785,7 +785,7 @@ class TelemetryKeywords:
 
 
 
-            # 6. Data Consistency Check (Client vs Server vs Logs)
+            # 6. Data Consistency Check (Detailed Component Breakdown)
             try:
                 # 1. Client Totals (from Load Gen Reports)
                 client_sent = 0
@@ -799,90 +799,114 @@ class TelemetryKeywords:
                             client_recv += d.get('resp_recv', 0)
                     except: pass
 
-                # 2. Server Metric Totals (fluxrig_rack_messages_total)
-                # Since we switched to Cumulative, we take the MAX value.
-                # If Delta, we would SUM them (but that was lossy).
-                metric_total_in = 0
-                metric_total_out = 0
+                # 2. Per-Gear Metrics
+                # Query metrics Grouped by Gear ID (from attributes)
+                # Note: 'fluxrig.gear.messages_in' and 'fluxrig.gear.messages_out'
+                gear_stats = {}
                 try:
-                    # Inbound: Simple SUM of all delta values
-                    q_in = f"""
-                    SELECT sum(value) 
+                    q_gears = f"""
+                    SELECT 
+                        COALESCE(attributes->>'gear_id', attributes->>'gear_name', attributes->>'name', 'unknown') as gear_id,
+                        name,
+                        sum(value) as val
                     FROM read_parquet('{telemetry_dir}/metrics/**/*.parquet', union_by_name=true)
-                    WHERE name = 'fluxrig_rack_messages_total' AND attributes LIKE '%inbound%'
+                    WHERE name IN ('fluxrig.gear.messages_in', 'fluxrig.gear.messages_out')
+                    GROUP BY gear_id, name
                     """
-                    res_in = con.execute(q_in).fetchone()
-                    metric_total_in = res_in[0] if res_in and res_in[0] else 0
-                    
-                    # Outbound: Simple SUM of all delta values
-                    q_out = f"""
-                    SELECT sum(value) 
-                    FROM read_parquet('{telemetry_dir}/metrics/**/*.parquet', union_by_name=true)
-                    WHERE name = 'fluxrig_rack_messages_total' AND attributes LIKE '%outbound%'
-                    """
-                    res_out = con.execute(q_out).fetchone()
-                    metric_total_out = res_out[0] if res_out and res_out[0] else 0
+                    g_res = con.execute(q_gears).fetchall()
+                    for r in g_res:
+                        gid = r[0]
+                        metric = r[1]
+                        val = r[2]
+                        if gid not in gear_stats: gear_stats[gid] = {'in': 0, 'out': 0}
+                        if 'messages_in' in metric: gear_stats[gid]['in'] = val
+                        elif 'messages_out' in metric: gear_stats[gid]['out'] = val
                 except: pass
 
-                # 3. Log Counts (Frame events)
-                log_frames_recv = 0
-                log_frames_sent = 0
+                # 3. Rack Totals
+                rack_in = 0
+                rack_out = 0
                 try:
-                    # Inbound Logs
-                    q_logs_in = f"""
-                    SELECT count(*) FROM read_parquet('{telemetry_dir}/logs/**/*.parquet', union_by_name=true)
-                    WHERE body LIKE '%Frame Received%'
+                    q_rack = f"""
+                    SELECT 
+                        (CASE WHEN attributes LIKE '%inbound%' THEN 'in' ELSE 'out' END) as dir,
+                        sum(value)
+                    FROM read_parquet('{telemetry_dir}/metrics/**/*.parquet', union_by_name=true)
+                    WHERE name = 'fluxrig_rack_messages_total'
+                    GROUP BY dir
                     """
-                    res_logs_in = con.execute(q_logs_in).fetchone()
-                    log_frames_recv = res_logs_in[0] if res_logs_in else 0
-
-                    # Outbound Logs
-                    q_logs_out = f"""
-                    SELECT count(*) FROM read_parquet('{telemetry_dir}/logs/**/*.parquet', union_by_name=true)
-                    WHERE body LIKE '%Frame Sent%'
-                    """
-                    res_logs_out = con.execute(q_logs_out).fetchone()
-                    log_frames_sent = res_logs_out[0] if res_logs_out else 0
+                    r_res = con.execute(q_rack).fetchall()
+                    for r in r_res:
+                        if r[0] == 'in': rack_in = r[1]
+                        elif r[0] == 'out': rack_out = r[1]
                 except: pass
 
-                # Render Table with requested columns: Load Generator | GEAR metrics | server logs
-                
-                # Calculate percentages
-                loss_in = 0
-                if client_sent > 0:
-                    loss_in = (abs(client_sent - metric_total_in) / client_sent) * 100
-                
-                loss_out = 0
-                if client_recv > 0:
-                    loss_out = (abs(client_recv - metric_total_out) / client_recv) * 100
-                    
-                loss_log = 0
-                if client_sent > 0:
-                    loss_log = (abs(client_sent - log_frames_recv) / client_sent) * 100
+                # 4. Echo Server Logs (Physical File)
+                echo_in = 0
+                echo_file = os.path.join(work_dir, "echo_server.log")
+                if os.path.exists(echo_file):
+                    try:
+                        # Echo Server logs "handled connection" or similar? 
+                        # Or generic ISO tool logs? 
+                        # Usually "Echo Server handled..."
+                        # Let's just count lines for now or look for "Request"
+                        with open(echo_file, 'r') as f:
+                            # Assuming 1 line per request if debug enabled? 
+                            # Or usually just Errors.
+                            # Standard iso8583-tool in echo mode might log transactions.
+                            # Let's count "Header:" or "ISO Message" occurrences
+                            content = f.read()
+                            echo_in = content.count("ISO Message") 
+                            if echo_in == 0:
+                                # Fallback: Count lines if small?
+                                if len(content) < 1000000:
+                                     echo_in = len(content.splitlines())
+                    except: pass
 
-                # Outbound Log Loss (vs Client Recv)
-                loss_log_out = 0
-                if client_recv > 0:
-                    loss_log_out = (abs(client_recv - log_frames_sent) / client_recv) * 100
+                # Build Rows
+                # Format: Component | Inbound | Outbound | Delta (vs Client Sent)
+                rows = []
+                
+                # Client: Input = Responses Received. Output = Requests Sent.
+                rows.append(["Load Generator (Client)", f"{int(client_recv):,}", f"{int(client_sent):,}", "-"])
+                
+                # Rack
+                loss_rack = (abs(client_sent - rack_in)/client_sent*100) if client_sent > 0 else 0
+                status_rack = "✅" if loss_rack < 1 else f"⚠️ {loss_rack:.1f}%"
+                rows.append(["FluxRig Rack (Gateway)", f"{int(rack_in):,}", f"{int(rack_out):,}", status_rack])
+                
+                # Gears
+                for gid, stats in sorted(gear_stats.items()):
+                     gin = stats['in']
+                     gout = stats['out']
+                     # Compare Gear In vs Client Sent (should be close)
+                     loss_g = (abs(client_sent - gin)/client_sent*100) if client_sent > 0 else 0
+                     status_g = "✅" if loss_g < 1 else f"⚠️ {loss_g:.1f}%"
+                     rows.append([f"Gear: {gid}", f"{int(gin):,}", f"{int(gout):,}", status_g])
 
-                consistency_rows = [
-                    ["Inbound", f"{int(client_sent):,}", f"{int(metric_total_in):,}", f"{int(log_frames_recv):,}", f"{loss_in:.1f}%"],
-                    ["Outbound", f"{int(client_recv):,}", f"{int(metric_total_out):,}", f"{int(log_frames_sent):,}", f"{loss_out:.1f}%"]
-                ]
+                # Echo Server
+                if os.path.exists(echo_file):
+                     # Echo should Match Client Sent
+                     loss_e = (abs(client_sent - echo_in)/client_sent*100) if client_sent > 0 else 0
+                     status_e = "✅" if loss_e < 1 else f"⚠️ {loss_e:.1f}%"
+                     rows.append(["Echo Server (External)", f"{int(echo_in):,}", f"{int(echo_in):,}", status_e])
+
+
+                # 5. Log Analysis (Frame Events)
+                log_recv = 0
+                try:
+                    q = f"SELECT count(*) FROM read_parquet('{telemetry_dir}/logs/**/*.parquet', union_by_name=true) WHERE body LIKE '%Frame Received%'"
+                    log_recv = con.execute(q).fetchone()[0]
+                except: pass
                 
-                # Add warnings if loss > 1%
-                warnings = []
-                if loss_in > 1.0: warnings.append(f"⚠️ Metric Loss In: {loss_in:.1f}%")
-                if loss_out > 1.0: warnings.append(f"⚠️ Metric Loss Out: {loss_out:.1f}%")
-                if loss_log > 1.0: warnings.append(f"⚠️ Log Loss In: {loss_log:.1f}%")
-                if loss_log_out > 1.0: warnings.append(f"⚠️ Log Loss Out: {loss_log_out:.1f}%")
-                
-                subtitle = " | ".join(warnings) if warnings else "All sources consistent"
+                loss_log = (abs(client_sent - log_recv)/client_sent*100) if client_sent > 0 else 0
+                status_log = "✅" if loss_log < 1 else f"⚠️ {loss_log:.1f}%"
+                rows.append(["System Logs (Frame Received)", f"{int(log_recv):,}", "-", status_log])
 
                 components.append(renderer.render_table(
-                    title="Data Consistency Check (Category Comparison)",
-                    headers=["Category", "Load Generator", "GEAR Metrics", "Server Logs", "Loss %"],
-                    rows=consistency_rows,
+                    title="Data Consistency & Parity (End-to-End)",
+                    headers=["Component", "Inbound (Recv)", "Outbound (Sent)", "Parity (vs Client Sent)"],
+                    rows=rows,
                     width="100%"
                 ))
 

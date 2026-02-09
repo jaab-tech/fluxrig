@@ -72,6 +72,11 @@ if [ -z "$TARGETS" ]; then
     TARGETS="${BASE_DIR}/suites"
 fi
 
+# Verify VENV
+echo "[ROBOT] Using Python Environment: $VENV_DIR"
+"$VENV_DIR/bin/python3" --version
+"$VENV_DIR/bin/python3" -c "import sys; print(f'Python Executable: {sys.executable}')"
+
 "$VENV_DIR/bin/robot" \
     --outputdir "$RESULTS_DIR" \
     --pythonpath "${BASE_DIR}/lib" \

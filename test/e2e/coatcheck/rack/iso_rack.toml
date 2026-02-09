@@ -1,0 +1,14 @@
+[logging]
+level = "debug"
+filename = "logs/rack.log"
+
+[store]
+dir = "./data"
+state_file = "state.flux"
+
+[rack]
+name = "proxy-rack"
+heartbeat_interval = "1s"
+
+[rack.bus]
+url = "nats://localhost:4223"

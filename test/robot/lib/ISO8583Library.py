@@ -149,15 +149,15 @@ class ISO8583Library:
 
     # --- TCP Echo/Sink Server (High Performance) ---
 
-    def start_echo_server(self, port=8590):
+    def start_echo_server(self, port=8590, log_file=None):
         """Starts the Go TCP Echo Server (Non-blocking)."""
-        self._start_go_server(port, sink=False)
+        self._start_go_server(port, sink=False, log_file=log_file)
 
-    def start_sink_server(self, port=8590):
+    def start_sink_server(self, port=8590, log_file=None):
         """Starts the Go TCP Sink Server (Blackhole, Non-blocking)."""
-        self._start_go_server(port, sink=True)
+        self._start_go_server(port, sink=True, log_file=log_file)
 
-    def _start_go_server(self, port, sink=False):
+    def _start_go_server(self, port, sink=False, log_file=None):
         cmd = [self._bin_tool, "-mode", "echo", "-port", str(port)]
         mode = "Echo"
         if sink:
@@ -166,20 +166,54 @@ class ISO8583Library:
 
         logger.info(f"Starting Go {mode} Server: {' '.join(cmd)}")
         
+        stdout_dest = subprocess.PIPE
+        stderr_dest = subprocess.PIPE
+        self._echo_log_fh = None
+        
+        if log_file:
+            log_dir = os.path.dirname(log_file)
+            if log_dir and not os.path.exists(log_dir):
+                os.makedirs(log_dir, exist_ok=True)
+            self._echo_log_fh = open(log_file, 'w')
+            stdout_dest = self._echo_log_fh
+            stderr_dest = subprocess.STDOUT
+            logger.info(f"redirecting stdout to {log_file}")
+
         self._echo_process = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, preexec_fn=os.setsid
+            cmd, stdout=stdout_dest, stderr=stderr_dest, preexec_fn=os.setsid
         )
         time.sleep(1) # Fast startup
+        
+        # Check if failed immediately
         if self._echo_process.poll() is not None:
-             out, err = self._echo_process.communicate()
-             raise RuntimeError(f"{mode} Server failed to start: {err.decode() if err else out.decode()}")
+             err_msg = "Process Exited"
+             if log_file:
+                 self._echo_log_fh.flush() # ensure written
+                 with open(log_file, 'r') as f:
+                     err_msg = f.read()
+             else:
+                 out, err = self._echo_process.communicate()
+                 err_msg = err.decode() if err else out.decode()
+                 
+             raise RuntimeError(f"{mode} Server failed to start: {err_msg}")
+             
         logger.info(f"{mode} Server running on {port} (PID: {self._echo_process.pid})")
 
     def stop_echo_server(self):
         if hasattr(self, '_echo_process') and self._echo_process:
             logger.info("Stopping Go Echo Server...")
-            os.killpg(os.getpgid(self._echo_process.pid), signal.SIGTERM)
-            self._echo_process.wait()
+            try:
+                os.killpg(os.getpgid(self._echo_process.pid), signal.SIGTERM)
+                self._echo_process.wait(timeout=5)
+            except:
+                try:
+                    os.killpg(os.getpgid(self._echo_process.pid), signal.SIGKILL)
+                except: pass
+            
+            if hasattr(self, '_echo_log_fh') and self._echo_log_fh:
+                self._echo_log_fh.close()
+                self._echo_log_fh = None
+                
             logger.info("Echo Server stopped.")
 
     # --- Tool Server (Functional / Legacy) ---

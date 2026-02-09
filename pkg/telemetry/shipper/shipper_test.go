@@ -46,9 +46,13 @@ func (m *mockBus) PublishRaw(ctx context.Context, subject string, data []byte, f
 func (m *mockBus) Subscribe(subject string, handler bus.Handler) (bus.Subscription, error) {
 	return nil, nil
 }
+func (m *mockBus) SubscribeRaw(subject string, streamName string, handler bus.RawHandler) (bus.Subscription, error) {
+	return nil, nil
+}
 func (m *mockBus) SubscribeDurable(subject, durableName string, handler bus.Handler) (bus.Subscription, error) {
 	return nil, nil
 }
+func (m *mockBus) KV() bus.KeyValue { return nil }
 
 func TestShipper(t *testing.T) {
 	tmpDir := t.TempDir()

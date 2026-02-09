@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package simple_tcp
+package io_tcp
 
 import (
 	"bufio"
@@ -49,7 +49,7 @@ type Connection struct {
 func NewServer(cfg *Config, log *slog.Logger, emit func(*fluxmsg.FluxMsg), idGen sdk.IDGenerator) *Server {
 	return &Server{
 		config: cfg,
-		log:    log.With("impl", "simple_tcp_server"),
+		log:    log.With("impl", "io_tcp_server"),
 		emit:   emit,
 		idGen:  idGen,
 		done:   make(chan struct{}),
@@ -57,104 +57,91 @@ func NewServer(cfg *Config, log *slog.Logger, emit func(*fluxmsg.FluxMsg), idGen
 }
 
 func (s *Server) Start(ctx context.Context) error {
-	lc := net.ListenConfig{
-		Control: func(network, address string, c syscall.RawConn) error {
-			var opErr error
-			if err := c.Control(func(fd uintptr) {
-				opErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
-			}); err != nil {
-				return err
-			}
-			return opErr
-		},
-	}
-	l, err := lc.Listen(ctx, "tcp", s.config.Bind)
+	listenConfig := net.ListenConfig{Control: reusePortControl}
+	listener, err := listenConfig.Listen(ctx, "tcp", s.config.Bind)
 	if err != nil {
-		return fmt.Errorf("failed to bind %s: %w", s.config.Bind, err)
+		return fmt.Errorf("bind failed: %w", err)
 	}
-	s.listener = l
-	s.log.Info("listening", "addr", s.config.Bind)
 
-	// Spawn accept loop
+	s.log.Info("listening", "addr", s.config.Bind)
+	s.listener = listener
+
 	go s.acceptLoop()
 	return nil
 }
 
 func (s *Server) acceptLoop() {
-	defer func() { _ = s.listener.Close() }()
-
 	for {
-		select {
-		case <-s.done:
-			return
-		default:
-		}
-
 		conn, err := s.listener.Accept()
 		if err != nil {
-			if isActive(s.done) {
-				s.log.Error("accept error", "error", err)
+			if isActive(s.done) { // Assuming s.ctx was a typo and should be s.done
+				s.log.Error("accept failed", "error", err)
 			}
-			continue
+			return
 		}
-
 		go s.handleConn(conn)
 	}
 }
 
 func (s *Server) handleConn(conn net.Conn) {
-	// Generate unique connection ID using Rack's EntityID service (Session Type)
+	// Generate persistent Connection Wrapper
 	id := s.idGen.NextEntityID(idgen.EntitySession)
-	connID := fmt.Sprintf("0x%x", id) // Use Hex for shorter/cleaner IDs
+	connID := fmt.Sprintf("%x", id)
+	connection := &Connection{id: connID, conn: conn}
 
-	c := &Connection{id: connID, conn: conn}
-	s.conns.Store(connID, c)
+	s.conns.Store(connID, connection)
 	defer func() {
 		s.conns.Delete(connID)
-		defer func() { _ = conn.Close() }()
+		_ = conn.Close()
 	}()
 
-	s.log.Debug("connection accepted", "conn_id", connID, "remote", conn.RemoteAddr())
+	s.log.Info("connected", "remote", conn.RemoteAddr(), "conn_id", connID)
 
 	scanner := bufio.NewScanner(conn)
 	scanner.Split(MakeSplitter(s.config))
-
 	for scanner.Scan() {
 		data := scanner.Bytes()
-		// Copy data to avoid buffer reuse issues
 		payload := make([]byte, len(data))
-		copy(payload, data)
+		copy(payload, data) // Copy because buffer is reused
 
 		msg := fluxmsg.New()
 		msg.FluxID, _ = s.idGen.NextFluxID()
 		msg.TsInit = time.Now().UnixNano()
 		msg.RawPayload = payload
 
+		msg.Metadata["conn.id"] = connID
+		msg.Metadata["flux.source"] = "io_tcp" // Should be actual gear name
+		// Extract Peer IP/Port for metadata
 		host, port, _ := net.SplitHostPort(conn.RemoteAddr().String())
 		msg.Metadata["peer.ip"] = host
 		msg.Metadata["peer.port"] = port
-		msg.Metadata["flux.source"] = "simple_tcp" // Should be actual gear name
-		msg.Metadata["conn.id"] = connID           // Crucial for routing back
 
-		// TRACE Logging (Full Dump)
-		if s.log.Enabled(context.Background(), logger.LevelTrace) {
-			s.log.Log(context.Background(), logger.LevelTrace, "FluxMsg received",
+		// TRACE Logging
+		// Use loggerpkg.LevelTrace if available, or Debug
+		if s.log.Enabled(context.Background(), logger.LevelTrace) { // Changed loggerPkg.LevelTrace to logger.LevelTrace
+			s.log.Log(context.Background(), logger.LevelTrace, "received message",
 				"flux_id", fmt.Sprintf("0x%x", msg.FluxID),
-				"ts_init", msg.TsInit,
-				"metadata", fmt.Sprintf("%v", msg.Metadata),
-				"payload_hex", fmt.Sprintf("0x%x", payload),
-				"payload_str", string(payload),
+				"conn_id", connID,
+				"size", len(payload),
+				"payload", string(payload),
+				"hex", fmt.Sprintf("%x", payload),
 			)
 		} else if s.log.Enabled(context.Background(), slog.LevelDebug) {
-			// DEBUG Logging (Summary)
-			s.log.Debug("received message", "conn_id", connID, "size", len(payload))
+			s.log.Debug("received message",
+				"conn_id", connID,
+				"size", len(payload),
+				"payload", string(payload),
+				"hex", fmt.Sprintf("%x", payload),
+			)
 		}
 
 		s.emit(msg)
 	}
 
 	if err := scanner.Err(); err != nil {
-		s.log.Debug("read error", "conn_id", connID, "error", err)
+		s.log.Warn("connection error", "error", err, "conn_id", connID)
+	} else {
+		s.log.Info("connection closed", "conn_id", connID)
 	}
 }
 
@@ -232,4 +219,18 @@ func isActive(c chan struct{}) bool {
 	default:
 		return true
 	}
+}
+
+func reusePortControl(network, address string, c syscall.RawConn) error {
+	var err error
+	if err2 := c.Control(func(fd uintptr) {
+		err = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
+		if err != nil {
+			return
+		}
+		err = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEPORT, 1)
+	}); err2 != nil {
+		return err2
+	}
+	return err
 }

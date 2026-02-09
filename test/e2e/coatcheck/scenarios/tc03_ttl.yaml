@@ -1,0 +1,68 @@
+# Coat Check E2E: TTL Expiry Test (TC03)
+# Tests that keys are automatically expired after TTL
+
+meta:
+  name: "coatcheck_e2e_ttl"
+  version: "1.0.0"
+
+racks:
+  - name: "proxy-rack"
+    labels:
+      tier: "edge"
+
+wires:
+  - from: "tcp_gateway.out"
+    to: "ctx_store.in"
+  - from: "ctx_store.out"
+    to: "tcp_client.in"
+  - from: "tcp_client.out"
+    to: "ctx_restore.in"
+  - from: "ctx_restore.out"
+    to: "tcp_gateway.in"
+
+gears:
+  - name: "ctx_store"
+    type: "coatcheck"
+    deploy: "proxy-rack"
+    config:
+      mode: "store"
+      bucket: "proxy_sessions"
+      key_fields: ["meta.txn_id"]
+      value_fields: ["meta.conn_id"]
+      on_missing: "error"
+
+  - name: "ctx_restore"
+    type: "coatcheck"
+    deploy: "proxy-rack"
+    config:
+      mode: "restore"
+      bucket: "proxy_sessions"
+      key_fields: ["meta.txn_id"]
+      on_missing: "drop"
+      merge_strategy: "overwrite"
+
+  # Daemon with SHORT TTL for testing (5 seconds)
+  - name: "ctx_daemon"
+    type: "coatcheck"
+    deploy: "proxy-rack"
+    config:
+      mode: "daemon"
+      bucket: "proxy_sessions"
+      storage: "memory"
+      replicas: 1
+      default_ttl: "5s" # Short TTL for testing
+
+  - name: "tcp_gateway"
+    type: "io_tcp"
+    deploy: "proxy-rack"
+    config:
+      mode: "server"
+      bind: ":9180"
+
+  - name: "tcp_client"
+    type: "io_tcp"
+    deploy: "proxy-rack"
+    config:
+      mode: "client"
+      connect: "localhost:9000"
+      reconnect_wait: "1s"

@@ -159,7 +159,7 @@ func TestExporterConstructors(t *testing.T) {
 
 	gen, _ := idgen.New(1)
 	// 1. NatsWriter
-	w := telemetry.NewNatsWriter(mockBus, 1, "test-entity", "flux.telemetry", gen)
+	w := telemetry.NewNatsWriter(mockBus, 1, "test-entity", "flux.telemetry", gen, 1)
 	if w == nil {
 		t.Error("NewNatsWriter returned nil")
 	}

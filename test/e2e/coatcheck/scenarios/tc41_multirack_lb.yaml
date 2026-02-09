@@ -1,0 +1,163 @@
+# Coat Check E2E Test Scenario: Multi-Rack with Bento Load Balancer
+#
+# Use Case: Load balancer with round-robin distribution across multiple worker racks.
+#           Context (conn_id) is stored on LB rack, restored on worker rack.
+#
+# Topology:
+#   [Client] --> [LB Rack: http_gateway → ctx_store → bento_lb] --> [NATS Bus]
+#                                                                        |
+#                          +----------------+----------------+-----------+
+#                          |                |                |
+#                          v                v                v
+#                    [Worker A]      [Worker B]       [Worker C]
+#                     ctx_restore     ctx_restore      ctx_restore
+#                         |               |                |
+#                         v               v                v
+#                    [Backend A]    [Backend B]     [Backend C]
+#
+# Key Insight:
+#   - LB Rack: Receives request, stores context (conn_id), LB distributes to workers
+#   - Worker Racks: Restore context using shared NATS KV, process request
+#   - All racks share same NATS KV bucket for context correlation
+
+meta:
+  name: "coatcheck_e2e_multirack_lb"
+  version: "1.0.0"
+
+racks:
+  - name: "lb-rack"
+    labels:
+      role: "loadbalancer"
+  - name: "worker-a"
+    labels:
+      role: "worker"
+  - name: "worker-b"
+    labels:
+      role: "worker"
+
+wires:
+  # --- LB Rack: Inbound ---
+  - from: "tcp_gateway.out"
+    to: "ctx_store.in"
+
+  - from: "ctx_store.out"
+    to: "bento_lb.in"
+
+  # Bento LB outputs are wired via NATS to worker racks
+  # (Bento publishes to flux.gear.bento_lb.out, workers subscribe)
+
+  # --- Worker A: Restore context and process ---
+  - from: "worker_a_restore.out"
+    to: "backend_client_a.in"
+
+  # --- Worker B: Restore context and process ---
+  - from: "worker_b_restore.out"
+    to: "backend_client_b.in"
+
+  # --- Response routing back to LB ---
+  # Responses use conn_id (restored) to route back to correct gateway connection
+
+gears:
+  # ========== LB RACK ==========
+
+  # HTTP Gateway (Inbound)
+  - name: "tcp_gateway"
+    type: "io_tcp"
+    deploy: "lb-rack"
+    config:
+      mode: "server"
+      bind: ":8080"
+
+  # Context Store - saves conn_id before load balancing
+  - name: "ctx_store"
+    type: "coatcheck"
+    deploy: "lb-rack"
+    config:
+      mode: "store"
+      bucket: "lb_sessions" # Shared across all racks!
+      key_fields: ["meta.txn_id"]
+      value_fields: ["meta.conn_id", "meta.lb_rack_id"]
+      on_missing: "error"
+
+  # Bento Load Balancer - Round Robin to workers
+  - name: "bento_lb"
+    type: "bento"
+    deploy: "lb-rack"
+    config:
+      mode: "router"
+      # Bento pipeline config
+      bento_config: |
+        pipeline:
+          processors:
+            - switch:
+                # Round-robin using message count modulo
+                - check: 'meta("_lb_counter").number() % 2 == 0'
+                  output:
+                    label: worker_a
+                - output:
+                    label: worker_b
+        output:
+          fallback:
+            - label: worker_a
+              nats:
+                urls: [ "${NATS_URL}" ]
+                subject: flux.worker.a.in
+            - label: worker_b
+              nats:
+                urls: [ "${NATS_URL}" ]
+                subject: flux.worker.b.in
+
+  # Daemon for KV bucket management
+  - name: "ctx_daemon"
+    type: "coatcheck"
+    deploy: "lb-rack"
+    config:
+      mode: "daemon"
+      bucket: "lb_sessions"
+      storage: "memory"
+      replicas: 1
+      default_ttl: "60s"
+
+  # ========== WORKER A ==========
+
+  # Context Restore - retrieves conn_id from shared KV
+  - name: "worker_a_restore"
+    type: "coatcheck"
+    deploy: "worker-a"
+    config:
+      mode: "restore"
+      bucket: "lb_sessions" # Same bucket as LB!
+      key_fields: ["meta.txn_id"]
+      on_missing: "drop"
+      merge_strategy: "overwrite"
+
+  # Backend Client
+  - name: "backend_client_a"
+    type: "io_tcp"
+    deploy: "worker-a"
+    config:
+      mode: "client"
+      connect: "localhost:9001" # Backend for Worker A
+      reconnect_wait: "1s"
+
+  # ========== WORKER B ==========
+
+  # Context Restore - retrieves conn_id from shared KV
+  - name: "worker_b_restore"
+    type: "coatcheck"
+    deploy: "worker-b"
+    config:
+      mode: "restore"
+      bucket: "lb_sessions" # Same bucket as LB!
+      key_fields: ["meta.txn_id"]
+      on_missing: "drop"
+      merge_strategy: "overwrite"
+
+  # Backend Client
+  - name: "backend_client_b"
+    type: "io_tcp"
+    deploy: "worker-b"
+    config:
+      mode: "client"
+      connect: "localhost:9002" # Backend for Worker B
+      reconnect_wait: "1s"

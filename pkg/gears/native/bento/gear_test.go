@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jaab-tech/fluxrig/pkg/bus"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/jaab-tech/fluxrig/pkg/sdk"
 	"github.com/stretchr/testify/assert"
@@ -85,6 +86,7 @@ func (m *MockContext) GearName() string         { return "test-gear" }
 func (m *MockContext) MachineID() uint64        { return 1 }
 func (m *MockContext) Logger() *slog.Logger     { return slog.Default() }
 func (m *MockContext) IDGen() sdk.IDGenerator   { return nil }
+func (m *MockContext) Bus() bus.Bus             { return nil }
 
 func TestStrictValidation(t *testing.T) {
 	g := New()
