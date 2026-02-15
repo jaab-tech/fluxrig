@@ -105,6 +105,14 @@ func (c *Client) runLoop() {
 		}
 
 		c.handleConn(conn)
+
+		// Wait before reconnecting to avoid spin loop if peer closes immediately
+		select {
+		case <-c.done:
+			return
+		case <-time.After(time.Duration(c.config.ReconnectWait)):
+			continue
+		}
 	}
 }
 
@@ -187,6 +195,19 @@ func (c *Client) handleConn(conn net.Conn) {
 		msg.Metadata["iso8583.mti"] = frameInfo.MTI
 		msg.Metadata["iso8583.bitmaps"] = fmt.Sprintf("%d", frameInfo.BitmapCount)
 		msg.Metadata["iso8583.fields"] = formatFieldList(frameInfo.ActiveFields)
+
+		// TRACE logging
+		if c.log.Enabled(ctx, loggerPkg.LevelTrace) {
+			c.log.Log(ctx, loggerPkg.LevelTrace, "FluxMsg received",
+				"flux_id", fmt.Sprintf("0x%x", msg.FluxID),
+				"conn_id", connID,
+				"mti", frameInfo.MTI,
+				"variant", c.config.Variant,
+				"src_id", msg.Metadata["iso8583.src_id"],
+				"dst_id", msg.Metadata["iso8583.dst_id"],
+				"payload_hex", fmt.Sprintf("0x%x", payload),
+			)
+		}
 
 		c.emit(msg)
 
@@ -286,9 +307,14 @@ func (c *Client) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.Fl
 
 	// TRACE logging
 	if c.log.Enabled(ctx, loggerPkg.LevelTrace) {
+		// Layer 1.5 inspection to provide MTI/Fields in trace even on egress
+		info := c.inspect(msg.RawPayload, msg.Metadata)
 		c.log.Log(ctx, loggerPkg.LevelTrace, "sending message",
 			"flux_id", fmt.Sprintf("0x%x", msg.FluxID),
 			"target", c.config.Connect,
+			"variant", c.config.Variant,
+			"mti", info.MTI,
+			"fields", formatFieldList(info.ActiveFields),
 			"size", len(msg.RawPayload),
 			"hex", fmt.Sprintf("%x", msg.RawPayload),
 		)

@@ -21,6 +21,7 @@ import (
 	"github.com/jaab-tech/fluxrig/pkg/bus"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/jaab-tech/fluxrig/pkg/idgen"
+	"github.com/jaab-tech/fluxrig/pkg/manager"
 )
 
 // IDGenerator defines the contract for generating unique IDs.
@@ -52,6 +53,9 @@ type GearContext interface {
 
 	// Bus returns the message bus interface (for advanced features like KV/Streams)
 	Bus() bus.Bus
+
+	// Manager returns the Spec/Scenario Manager
+	Manager() manager.Manager
 }
 
 // NativeGear defines the contract for Go-based components (Internal/Native Gears).

@@ -58,6 +58,7 @@ func (g *Gear) Init(ctx sdk.GearContext) error {
 		"bind", cfg.Bind,
 		"connect", cfg.Connect,
 		"frame_length_size", cfg.FrameLengthSize,
+		"frame_length_endian", cfg.FrameLengthEndian,
 		"protocol_header_size", cfg.ProtocolHeaderSize,
 		"encoding", cfg.Encoding,
 		"tpdu", cfg.TPDUEnabled,

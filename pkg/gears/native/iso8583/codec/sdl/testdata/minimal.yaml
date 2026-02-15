@@ -1,0 +1,21 @@
+meta:
+  name: "minimal"
+  version: "1.0.0"
+spec:
+fields:
+  0:
+    label: "MTI"
+    type: "numeric"
+    length: 4
+    enc: "bcd"
+  1:
+    label: "Bitmap"
+    type: "binary"
+    length: 8
+    enc: "binary"
+  39:
+    label: "Response Code"
+    type: "alpha"
+    length: 2
+    alias: "response_code"
+    enc: "ascii"

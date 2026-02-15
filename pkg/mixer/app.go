@@ -35,6 +35,7 @@ import (
 	"github.com/jaab-tech/fluxrig/pkg/idgen"
 	"github.com/jaab-tech/fluxrig/pkg/ingest"
 	loggerPkg "github.com/jaab-tech/fluxrig/pkg/logger"
+	"github.com/jaab-tech/fluxrig/pkg/manager"
 	fluxapi "github.com/jaab-tech/fluxrig/pkg/mixer/api"
 	"github.com/jaab-tech/fluxrig/pkg/pki"
 	"github.com/jaab-tech/fluxrig/pkg/registry"
@@ -47,15 +48,17 @@ import (
 
 // App encapsulates the FluxRig Mixer control plane application.
 type App struct {
-	cfg          *config.MixerConfig
-	scenarioPath string
+	cfg         *config.MixerConfig
+	scenarioRef string // Scenario reference: file path, name:tag URN, or empty (resume)
 }
 
 // NewApp creates a new Mixer application instance.
-func NewApp(cfg *config.MixerConfig, scenarioPath string) *App {
+// scenarioRef accepts a file path ("/path/to/file.yaml"), a stored scenario
+// URN ("payment-flow:v1.0.0"), or an empty string to resume the last active.
+func NewApp(cfg *config.MixerConfig, scenarioRef string) *App {
 	return &App{
-		cfg:          cfg,
-		scenarioPath: scenarioPath,
+		cfg:         cfg,
+		scenarioRef: scenarioRef,
 	}
 }
 
@@ -213,7 +216,7 @@ func (a *App) Run() error {
 
 	// 9. Start API Server
 	scenarioLogger := loggerPkg.WithComponent(slog.Default(), loggerPkg.TypeScenario, "scenario-ctrl")
-	sc := controller.NewScenarioController(scenarioLogger, "./data", store, idGen, mixerEntityID)
+	sc := controller.NewScenarioController(scenarioLogger, cfg.Store.Dir, store, idGen, mixerEntityID)
 
 	// Create base bus
 	baseBus := bus.NewNatsBus("flux-msg")
@@ -236,29 +239,72 @@ func (a *App) Run() error {
 		sc.SetBus(scenarioBus)
 		enrollment.SetScenario(sc)
 	}
-	// 10. Bootstrap Scenario (if configured)
-	if a.scenarioPath != "" {
-		slog.Info("Bootstrapping Scenario", "path", a.scenarioPath)
-		content, errRead := os.ReadFile(a.scenarioPath)
+	// 10. Bootstrap Scenario (three-way resolution)
+	scenarioRef := a.scenarioRef
+
+	switch {
+	case scenarioRef == "":
+		// Resume previously active scenario from store
+		if activeName := sc.GetActiveName(); activeName != "" {
+			slog.Info("Resuming stored scenario", "name", activeName)
+			if errActivate := sc.Activate(context.Background(), activeName); errActivate != nil {
+				slog.Warn("Failed to resume stored scenario", "name", activeName, "error", errActivate)
+			} else {
+				slog.Info("Stored scenario resumed", "name", activeName)
+			}
+		}
+
+	case strings.Contains(scenarioRef, "/"):
+		// File path — strip file:// prefix if present
+		path := strings.TrimPrefix(scenarioRef, "file://")
+		slog.Info("Bootstrapping scenario from file", "path", path)
+
+		content, errRead := os.ReadFile(filepath.Clean(path))
 		if errRead != nil {
-			slog.Error("Failed to read bootstrap scenario", "path", a.scenarioPath, "error", errRead)
-			// Decide: Should we exit? Probably yes, as this was explicit intent.
+			slog.Error("Failed to read bootstrap scenario file", "path", path, "error", errRead)
 			return fmt.Errorf("bootstrap scenario read failed: %w", errRead)
 		}
 
-		// Import (Validate & Persist)
 		safeName, errImport := sc.Import(context.Background(), content, false)
 		if errImport != nil {
 			slog.Error("Failed to import bootstrap scenario", "error", errImport)
 			return fmt.Errorf("bootstrap scenario import failed: %w", errImport)
 		}
 
-		// Activate
 		if errActivate := sc.Activate(context.Background(), safeName); errActivate != nil {
 			slog.Error("Failed to activate bootstrap scenario", "name", safeName, "error", errActivate)
 			return fmt.Errorf("bootstrap scenario activation failed: %w", errActivate)
 		}
-		slog.Info("Bootstrap Scenario Activated", "name", safeName)
+		slog.Info("Bootstrap scenario activated", "name", safeName)
+
+	default:
+		// URN reference (name:tag) — resolve from CAS store
+		slog.Info("Loading scenario from store", "urn", scenarioRef)
+
+		storePath := filepath.Join(cfg.Store.Dir, "store")
+		mgr, errMgr := manager.NewManager(storePath)
+		if errMgr != nil {
+			slog.Error("Failed to open spec/scenario store", "path", storePath, "error", errMgr)
+			return fmt.Errorf("scenario store open failed: %w", errMgr)
+		}
+
+		content, errLoad := mgr.Load(context.Background(), scenarioRef)
+		if errLoad != nil {
+			slog.Error("Failed to load scenario from store", "urn", scenarioRef, "error", errLoad)
+			return fmt.Errorf("scenario store load failed: %w", errLoad)
+		}
+
+		safeName, errImport := sc.Import(context.Background(), content, false)
+		if errImport != nil {
+			slog.Error("Failed to import stored scenario", "urn", scenarioRef, "error", errImport)
+			return fmt.Errorf("bootstrap scenario import failed: %w", errImport)
+		}
+
+		if errActivate := sc.Activate(context.Background(), safeName); errActivate != nil {
+			slog.Error("Failed to activate stored scenario", "name", safeName, "error", errActivate)
+			return fmt.Errorf("bootstrap scenario activation failed: %w", errActivate)
+		}
+		slog.Info("Stored scenario activated", "name", safeName, "urn", scenarioRef)
 	}
 
 	// 11. Start Janitor (Retention)

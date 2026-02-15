@@ -1,0 +1,38 @@
+# Copyright 2025 JAAB Tech SAS, Uruguay
+meta:
+  name: "iso8583_concurrency"
+  version: "1.0.0"
+
+racks:
+  - name: "iso-node-01"
+    labels:
+      tier: "edge"
+
+gears:
+  - name: "iso-gateway-limited"
+    type: "io_iso8583"
+    deploy: "iso-node-01"
+    config:
+      mode: "server"
+      bind: ":8583"
+      frame_length_size: 2
+      frame_length_endian: "big"
+      encoding: "ascii"
+      max_connections: 5 # Strict limit for testing
+
+  - name: "iso-client"
+    type: "io_iso8583"
+    deploy: "iso-node-01"
+    config:
+      mode: "client"
+      connect: "127.0.0.1:10000"
+      frame_length_size: 2
+      frame_length_endian: "big"
+      encoding: "ascii"
+      reconnect_wait: "1s"
+
+wires:
+  - from: "iso-gateway-limited.out"
+    to: "iso-client.in"
+  - from: "iso-client.out"
+    to: "iso-gateway-limited.in"

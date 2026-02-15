@@ -1,0 +1,97 @@
+# BCD-dominant spec with per-field encoding overrides
+# Numeric fields use BCD encoding.
+# Alpha fields override to ASCII encoding.
+meta:
+  name: "bcd-basic"
+  version: "1.0.0"
+spec:
+fields:
+  0:
+    label: "MTI"
+    type: "numeric"
+    length: 4
+    enc: "bcd"
+  1:
+    label: "Bitmap"
+    type: "binary"
+    length: 8
+    enc: "binary"
+  2:
+    label: "PAN"
+    type: "llvar_n"
+    length: 19
+    alias: "card.pan"
+    log_mask: true
+    enc: "bcd"
+  3:
+    label: "Processing Code"
+    type: "numeric"
+    length: 6
+    alias: "proc_code"
+    enc: "bcd"
+  4:
+    label: "Amount"
+    type: "numeric"
+    length: 12
+    alias: "amount"
+    enc: "bcd"
+  11:
+    label: "STAN"
+    type: "numeric"
+    length: 6
+    alias: "stan"
+    enc: "bcd"
+  12:
+    label: "Local Time"
+    type: "numeric"
+    length: 6
+    alias: "local_time"
+    enc: "bcd"
+  13:
+    label: "Local Date"
+    type: "numeric"
+    length: 4
+    alias: "local_date"
+    enc: "bcd"
+  25:
+    label: "POS Condition Code"
+    type: "numeric"
+    length: 2
+    alias: "pos_condition"
+    enc: "bcd"
+  37:
+    label: "Retrieval Reference Number"
+    type: "alpha"
+    length: 12
+    alias: "rrn"
+    enc: "ascii"
+  38:
+    label: "Authorization ID"
+    type: "alpha"
+    length: 6
+    alias: "auth_id"
+    enc: "ascii"
+  39:
+    label: "Response Code"
+    type: "alpha"
+    length: 2
+    alias: "response_code"
+    enc: "ascii"
+  41:
+    label: "Terminal ID"
+    type: "alpha"
+    length: 8
+    alias: "terminal_id"
+    enc: "ascii"
+  42:
+    label: "Merchant ID"
+    type: "alpha"
+    length: 15
+    alias: "merchant_id"
+    enc: "ascii"
+  49:
+    label: "Currency Code"
+    type: "alpha"
+    length: 3
+    alias: "currency"
+    enc: "ascii"

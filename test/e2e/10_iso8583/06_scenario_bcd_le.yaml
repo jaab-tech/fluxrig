@@ -1,0 +1,40 @@
+# Copyright 2025 JAAB Tech SAS, Uruguay
+meta:
+  name: "iso8583_bcd_le"
+  version: "1.0.0"
+
+racks:
+  - name: "iso-node-01"
+    labels:
+      tier: "edge"
+
+gears:
+  - name: "iso-gateway"
+    type: "io_iso8583"
+    deploy: "iso-node-01"
+    config:
+      mode: "server"
+      bind: ":8583"
+      frame_length_size: 2
+      frame_length_endian: "little"
+      encoding: "bcd"
+
+  - name: "iso-client"
+    type: "io_iso8583"
+    deploy: "iso-node-01"
+    config:
+      mode: "client"
+      connect: "127.0.0.1:10000"
+      frame_length_size: 2
+      frame_length_endian: "little"
+      encoding: "bcd"
+      reconnect_wait: "1s"
+
+wires:
+  # Route Server Ingress -> Client Egress
+  - from: "iso-gateway.out"
+    to: "iso-client.in"
+
+  # Route Client Response -> Server Egress
+  - from: "iso-client.out"
+    to: "iso-gateway.in"

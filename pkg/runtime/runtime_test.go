@@ -25,6 +25,7 @@ import (
 	"github.com/jaab-tech/fluxrig/pkg/bus"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/jaab-tech/fluxrig/pkg/idgen"
+	"github.com/jaab-tech/fluxrig/pkg/manager"
 	"github.com/jaab-tech/fluxrig/pkg/registry"
 	"github.com/jaab-tech/fluxrig/pkg/sdk"
 )
@@ -72,6 +73,25 @@ type MockGear struct {
 
 func (m *MockGear) Init(ctx sdk.GearContext) error                               { return m.InitErr }
 func (m *MockGear) Start(ctx context.Context, emit func(*fluxmsg.FluxMsg)) error { return m.StartErr }
+
+type MockManager struct{}
+
+func (m *MockManager) Import(ctx context.Context, filePath, name, tag string) (string, string, string, error) {
+	return "", "", "", nil
+}
+func (m *MockManager) ImportScenario(ctx context.Context, filePath, name, tag string) (string, string, string, error) {
+	return "", "", "", nil
+}
+func (m *MockManager) Load(ctx context.Context, urn string) ([]byte, error) {
+	return nil, nil
+}
+func (m *MockManager) Export(ctx context.Context, urn, outputPath string) error {
+	return nil
+}
+func (m *MockManager) List(ctx context.Context) ([]manager.ArtifactInfo, error) {
+	return nil, nil
+}
+
 func (m *MockGear) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.FluxMsg, error) {
 	return msg, nil
 }
@@ -86,9 +106,10 @@ func (m *MockGear) Drain(ctx context.Context) error {
 func TestManager_Lifecycle(t *testing.T) {
 	// 1. Setup Dependencies
 	mockBus := &MockBus{}
+	mockSpecMgr := &MockManager{}
 	gen, _ := idgen.New(1)
 
-	mgr := NewManager(slog.Default(), mockBus, gen, 100, "test-rack", 5*time.Second)
+	mgr := NewManager(slog.Default(), mockBus, gen, mockSpecMgr, 100, "test-rack", 5*time.Second)
 
 	// 2. Apply Scenario
 	sc := &registry.Scenario{
@@ -112,8 +133,9 @@ func TestManager_Lifecycle(t *testing.T) {
 
 func TestManager_Errors(t *testing.T) {
 	mockBus := &MockBus{}
+	mockSpecMgr := &MockManager{}
 	gen, _ := idgen.New(1)
-	mgr := NewManager(slog.Default(), mockBus, gen, 100, "test-rack", 5*time.Second)
+	mgr := NewManager(slog.Default(), mockBus, gen, mockSpecMgr, 100, "test-rack", 5*time.Second)
 
 	// 1. Unknown Gear Type
 	sc := &registry.Scenario{
@@ -152,7 +174,7 @@ func TestManager_Errors(t *testing.T) {
 
 	// 4. Subscribe Failure
 	failBus := &MockBus{FailSubscribe: true}
-	mgr2 := NewManager(slog.Default(), failBus, gen, 100, "test-rack", 5*time.Second)
+	mgr2 := NewManager(slog.Default(), failBus, gen, mockSpecMgr, 100, "test-rack", 5*time.Second)
 	// Use good gear, but bad bus
 	sc2 := &registry.Scenario{
 		Meta: registry.ScenarioMeta{Name: "test", Version: "1.0"},

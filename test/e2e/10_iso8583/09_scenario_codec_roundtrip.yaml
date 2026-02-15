@@ -1,0 +1,64 @@
+# Copyright 2025 JAAB Tech SAS, Uruguay
+meta:
+  name: "iso8583_codec_roundtrip"
+  version: "1.0.0"
+
+racks:
+  - name: "iso-node-01"
+    labels:
+      tier: "edge"
+
+gears:
+  - name: "iso-gateway"
+    type: "io_iso8583"
+    deploy: "iso-node-01"
+    config:
+      mode: "server"
+      bind: ":8583"
+      frame_length_size: 2
+      frame_length_endian: "big"
+      encoding: "bcd"
+
+  - name: "codec-decode"
+    type: "codec_iso8583"
+    deploy: "iso-node-01"
+    config:
+      spec_path: "specs/e2e_codec.yaml"
+      direction: "decode"
+      on_error: "reject"
+
+  - name: "codec-encode"
+    type: "codec_iso8583"
+    deploy: "iso-node-01"
+    config:
+      spec_path: "specs/e2e_codec.yaml"
+      direction: "encode"
+      on_error: "reject"
+
+  - name: "iso-client"
+    type: "io_iso8583"
+    deploy: "iso-node-01"
+    config:
+      mode: "client"
+      connect: "127.0.0.1:10000"
+      frame_length_size: 2
+      frame_length_endian: "big"
+      encoding: "bcd"
+      reconnect_wait: "1s"
+
+wires:
+  # Route Server Ingress -> Codec Decode
+  - from: "iso-gateway.out"
+    to: "codec-decode.in"
+
+  # Route Codec Decode -> Codec Encode (Round-trip)
+  - from: "codec-decode.out"
+    to: "codec-encode.in"
+
+  # Route Codec Encode -> Client Egress
+  - from: "codec-encode.out"
+    to: "iso-client.in"
+
+  # Reverse path for responses (if any)
+  - from: "iso-client.out"
+    to: "iso-gateway.in"

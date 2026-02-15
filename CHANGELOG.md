@@ -1,32 +1,35 @@
-<!-- Copyright (c) 2025 JAAB Tech SAS, Uruguay All Rights Reserved -->
-<!-- See https://jaab.tech -->
-
 # Changelog
 
-All notable changes to this project will be documented in this file.
+All notable changes to the **FluxRig** project will be documented in this file.
 
-## [0.2.0-dev] - Unreleased
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [v0.4.1] - 2026-02-09
 ### Added
-- **Phase 3 Development**: Started work on Gear Ecosystem.
-- **Database Migrations**: Implemented a robust DuckDB migration system (`Migrate()`) replacing ad-hoc schema initialization.
-- **Telemetry Schema**: Added `description` column to `telemetry_metrics` table (Migration V2).
-- **Store API**: Updated `NewStore` to require structured logger injection.
+- **Coat Check Pattern**: Implemented architectural pattern to handle "Detached State" during connection handovers.
+- **IO Refactor**: Decoupled TCP connection management from protocol logic.
 
-
-## [v0.1.0-alpha] - 2025-12-27
-
+## [v0.4.0] - 2026-02-01
 ### Added
-- **Core Foundation**: Complete Mixer/Rack architecture.
-- **Transport**: NATS JetStream integration via Watermill.
-- **Registry**: DuckDB embedded registry with telemetry sink.
-- **REST API**: 8 Control Plane endpoints (`/racks`, `/health`, etc.).
-- **CLI**: `fluxrig` command with `keys`, `admin`, `logs`, `metrics` subcommands.
-- **Telemetry**: OpenTelemetry SDK embedded with DuckDB exporter.
-- **Security**: Ed25519 identity, StateEnvelope signing, Snake Tunnel.
-- **Docs**: Comprehensive architecture, data, and security documentation.
-- **CI**: GitHub Actions workflow for lint/test/build.
+- **ISO8583 Native Gear (Alpha)**: First release of the high-performance payment switch gear.
+- **Telemetry Governor**: Introduced QoS constraints for telemetry ingress to protect business traffic.
 
-### Changed
-- **Architecture**: Moved from Proof-of-Concept to Clean Slate architecture.
-- **Coverage**: Achieved 70% unit test coverage.
+## [v0.3.0] - 2026-01-05
+### Added
+- **Bento Integration**: Native support for the `warpstreamlabs/bento` ecosystem, enabling 100+ I/O connectors (AWS, SQL, Kafka, File).
+- **Load Testing Suite**: Integrated `e2e_load` capabilities for stress testing.
+
+## [v0.2.0] - 2026-01-08
+### Added
+- **Observability Stack**: Full OTel integration (Metrics, Traces) with DuckDB backend.
+- **Configuration V2**: Unified TOML-based configuration schema.
+- **TLS Support**: Enabled mutual TLS for internal bus and HTTPS for management API.
+
+## [v0.1.0] - 2025-12-28
+### Added
+- **Foundation**: Initial release of the 4-Repo Architecture.
+- **Snake Protocol**: Secure tunneling implementation for Rack-to-Mixer connectivity.
+- **FluxMsg**: Canonical JSON schema for inter-gear communication.

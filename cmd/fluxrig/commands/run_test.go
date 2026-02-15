@@ -92,6 +92,7 @@ func TestSendHello(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	_ = nc.Flush()
 
 	// 2. Send Hello
 	payload := &fluxmsg.HelloPayload{

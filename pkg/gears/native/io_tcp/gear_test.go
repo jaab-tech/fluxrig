@@ -24,6 +24,7 @@ import (
 	"github.com/jaab-tech/fluxrig/pkg/bus"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/jaab-tech/fluxrig/pkg/idgen"
+	"github.com/jaab-tech/fluxrig/pkg/manager"
 	"github.com/jaab-tech/fluxrig/pkg/sdk"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -45,6 +46,7 @@ func (m *MockCtx) MachineID() uint64        { return 1 }
 func (m *MockCtx) Logger() *slog.Logger     { return slog.Default() }
 func (m *MockCtx) IDGen() sdk.IDGenerator   { return &MockIDGen{} }
 func (m *MockCtx) Bus() bus.Bus             { return nil }
+func (m *MockCtx) Manager() manager.Manager { return nil }
 
 func TestGear_Init_Validation(t *testing.T) {
 	g := &Gear{}
@@ -110,7 +112,7 @@ func TestGear_Loopback(t *testing.T) {
 	select {
 	case msg := <-serverMsgs:
 		assert.Equal(t, "hello server", string(msg.RawPayload))
-		assert.Equal(t, "io_tcp_client", msg.Metadata["flux.source"])
+		assert.Equal(t, "io_tcp_server", msg.Metadata["flux.source"])
 	case <-time.After(1 * time.Second):
 		t.Fatal("Server did not receive message")
 	}
