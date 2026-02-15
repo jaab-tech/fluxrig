@@ -45,7 +45,8 @@ func Execute() error {
 }
 
 func init() {
-	// Global flags can be added here
+	// Global flags
+	rootCmd.PersistentFlags().String("store-dir", "", "Path to spec store directory")
 	rootCmd.CompletionOptions.DisableDefaultCmd = true
 	rootCmd.AddCommand(versionCmd)
 }

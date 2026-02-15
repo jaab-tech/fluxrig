@@ -53,21 +53,22 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 // Config holds the configuration for the Simple TCP Gear.
 type Config struct {
 	// Mode: 'server' (Listen) or 'client' (Dial)
-	Mode string `json:"mode"`
+	Mode string `json:"mode" mapstructure:"mode"`
 
 	// Server Mode Settings
-	Bind string `json:"bind"` // e.g. ":9000"
+	Bind           string `json:"bind" mapstructure:"bind"`                      // e.g. ":9000"
+	MaxConnections int    `json:"max_connections" mapstructure:"max_connections"` // Limit concurrent connections (0 = unlimited, default 4096)
 
 	// Client Mode Settings
-	Connect       string   `json:"connect"`        // e.g. "localhost:9000"
-	ReconnectWait Duration `json:"reconnect_wait"` // e.g. "5s"
+	Connect       string   `json:"connect" mapstructure:"connect"`                // e.g. "localhost:9000"
+	ReconnectWait Duration `json:"reconnect_wait" mapstructure:"reconnect_wait"` // e.g. "5s"
 
 	// Common Settings
-	Delimiter         string   `json:"delimiter"`          // Delimiter string (e.g. "\n", "<log")
-	DelimiterPosition string   `json:"delimiter_position"` // "suffix" (default) or "prefix"
-	DelimiterInclude  bool     `json:"delimiter_include"`  // Ingress: Keep delimiter in payload
-	DelimiterAppend   bool     `json:"delimiter_append"`   // Egress: Append delimiter to outgoing
-	IdleTimeout       Duration `json:"idle_timeout"`       // Close connection if idle
+	Delimiter         string   `json:"delimiter" mapstructure:"delimiter"`                   // Delimiter string (e.g. "\n", "<log")
+	DelimiterPosition string   `json:"delimiter_position" mapstructure:"delimiter_position"` // "suffix" (default) or "prefix"
+	DelimiterInclude  bool     `json:"delimiter_include" mapstructure:"delimiter_include"`   // Ingress: Keep delimiter in payload
+	DelimiterAppend   bool     `json:"delimiter_append" mapstructure:"delimiter_append"`     // Egress: Append delimiter to outgoing
+	IdleTimeout       Duration `json:"idle_timeout" mapstructure:"idle_timeout"`             // Close connection if idle
 }
 
 // DefaultConfig returns safe defaults
@@ -75,6 +76,7 @@ func DefaultConfig() Config {
 	return Config{
 		Mode:              ModeServer,
 		Bind:              ":8080",
+		MaxConnections:    4096,
 		ReconnectWait:     Duration(5 * time.Second),
 		DelimiterPosition: "suffix",
 		IdleTimeout:       Duration(60 * time.Second),

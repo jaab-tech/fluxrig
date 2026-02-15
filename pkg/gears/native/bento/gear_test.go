@@ -22,6 +22,7 @@ import (
 
 	"github.com/jaab-tech/fluxrig/pkg/bus"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
+	"github.com/jaab-tech/fluxrig/pkg/manager"
 	"github.com/jaab-tech/fluxrig/pkg/sdk"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -87,6 +88,7 @@ func (m *MockContext) MachineID() uint64        { return 1 }
 func (m *MockContext) Logger() *slog.Logger     { return slog.Default() }
 func (m *MockContext) IDGen() sdk.IDGenerator   { return nil }
 func (m *MockContext) Bus() bus.Bus             { return nil }
+func (m *MockContext) Manager() manager.Manager { return nil }
 
 func TestStrictValidation(t *testing.T) {
 	g := New()

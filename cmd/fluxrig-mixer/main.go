@@ -43,7 +43,7 @@ import (
 func main() {
 	// 1. Parse Flags
 	var configPath string
-	var scenarioPath string
+	var scenarioRef string
 
 	args := os.Args[1:]
 	for i := 0; i < len(args); i++ {
@@ -55,7 +55,7 @@ func main() {
 			}
 		case "-s", "--scenario":
 			if i+1 < len(args) {
-				scenarioPath = args[i+1]
+				scenarioRef = args[i+1]
 				i++
 			}
 		}
@@ -90,12 +90,12 @@ func main() {
 	slog.SetDefault(bufLogger)
 
 	// Fallback to Config
-	if scenarioPath == "" && cfg.Mixer.StartupScenario != "" {
-		scenarioPath = cfg.Mixer.StartupScenario
+	if scenarioRef == "" && cfg.Mixer.StartupScenario != "" {
+		scenarioRef = cfg.Mixer.StartupScenario
 	}
 
 	// 4. Run Application
-	app := mixer.NewApp(cfg, scenarioPath)
+	app := mixer.NewApp(cfg, scenarioRef)
 	if err := app.Run(); err != nil {
 		slog.Error("Mixer exited with error", "error", err)
 		os.Exit(1)

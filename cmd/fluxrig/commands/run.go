@@ -33,6 +33,7 @@ import (
 	"github.com/jaab-tech/fluxrig/pkg/idgen"
 	"github.com/jaab-tech/fluxrig/pkg/lockfile"
 	loggerPkg "github.com/jaab-tech/fluxrig/pkg/logger"
+	"github.com/jaab-tech/fluxrig/pkg/manager"
 	"github.com/jaab-tech/fluxrig/pkg/pki"
 	"github.com/jaab-tech/fluxrig/pkg/registry"
 	rt "github.com/jaab-tech/fluxrig/pkg/runtime"
@@ -175,15 +176,22 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 	// if err != nil { return err }
 	_ = gen // unused for now except for generating trace IDs if we wanted
 
-	// 2.5 Initialize Runtime Manager (Rack Engine)
+	// 2.5 Initialize Spec Manager & Runtime
 	opTimeout, _ := time.ParseDuration(cfg.Rack.Bus.OperationTimeout)
+
+	// Spec Manager (Git-backed Registry)
+	specStorePath := filepath.Join(cfg.Store.Dir, "store")
+	specMgr, errMgr := manager.NewManager(specStorePath)
+	if errMgr != nil {
+		return fmt.Errorf("failed to init spec manager: %w", errMgr)
+	}
 
 	// INSTRUMENTATION: Wrap Bus
 	// We always wrap it so it can dynamically pick up metrics via GetMetrics()
 	// even if telemetry initialization is deferred.
 	managedBus := telemetry.NewInstrumentedBus(natsBus, nil)
 
-	rtManager := rt.NewManager(logger, managedBus, gen, uint64(mID), clientName, opTimeout)
+	rtManager := rt.NewManager(logger, managedBus, gen, specMgr, uint64(mID), clientName, opTimeout)
 	defer rtManager.Shutdown()
 
 	// Scenario Loading:

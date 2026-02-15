@@ -21,7 +21,7 @@ import (
 	"log/slog"
 	"net"
 	"sync"
-	"syscall"
+	"sync/atomic"
 	"time"
 
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
@@ -39,6 +39,7 @@ type Server struct {
 	listener net.Listener
 	conns    sync.Map // map[string]*Connection
 	done     chan struct{}
+	activeConns atomic.Int64
 }
 
 type Connection struct {
@@ -71,19 +72,39 @@ func (s *Server) Start(ctx context.Context) error {
 }
 
 func (s *Server) acceptLoop() {
+	backoff := 5 * time.Millisecond
+
 	for {
 		conn, err := s.listener.Accept()
 		if err != nil {
-			if isActive(s.done) { // Assuming s.ctx was a typo and should be s.done
+			if isActive(s.done) {
 				s.log.Error("accept failed", "error", err)
+				// Backoff to prevent spin loop on persistent errors (e.g. EMFILE)
+				time.Sleep(backoff)
+				if backoff < 1*time.Second {
+					backoff *= 2
+				}
 			}
-			return
+			continue
 		}
+		// Reset backoff on success
+		backoff = 5 * time.Millisecond
+
+		// Check limits
+		if s.config.MaxConnections > 0 && s.activeConns.Load() >= int64(s.config.MaxConnections) {
+			s.log.Warn("max connections reached, rejecting", "limit", s.config.MaxConnections, "remote", conn.RemoteAddr())
+			_ = conn.Close()
+			continue
+		}
+
+		s.activeConns.Add(1)
 		go s.handleConn(conn)
 	}
 }
 
 func (s *Server) handleConn(conn net.Conn) {
+	defer s.activeConns.Add(-1)
+
 	// Generate persistent Connection Wrapper
 	id := s.idGen.NextEntityID(idgen.EntitySession)
 	connID := fmt.Sprintf("%x", id)
@@ -110,7 +131,7 @@ func (s *Server) handleConn(conn net.Conn) {
 		msg.RawPayload = payload
 
 		msg.Metadata["conn.id"] = connID
-		msg.Metadata["flux.source"] = "io_tcp" // Should be actual gear name
+		msg.Metadata["flux.source"] = "io_tcp_server" // Should be actual gear name
 		// Extract Peer IP/Port for metadata
 		host, port, _ := net.SplitHostPort(conn.RemoteAddr().String())
 		msg.Metadata["peer.ip"] = host
@@ -219,18 +240,4 @@ func isActive(c chan struct{}) bool {
 	default:
 		return true
 	}
-}
-
-func reusePortControl(network, address string, c syscall.RawConn) error {
-	var err error
-	if err2 := c.Control(func(fd uintptr) {
-		err = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
-		if err != nil {
-			return
-		}
-		err = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEPORT, 1)
-	}); err2 != nil {
-		return err2
-	}
-	return err
 }

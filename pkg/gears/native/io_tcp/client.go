@@ -73,6 +73,14 @@ func (c *Client) runLoop() {
 		}
 
 		c.handleConn(conn)
+
+		// Wait before reconnecting to avoid spin loop if peer closes immediately
+		select {
+		case <-c.done:
+			return
+		case <-time.After(time.Duration(c.config.ReconnectWait)):
+			continue
+		}
 	}
 }
 

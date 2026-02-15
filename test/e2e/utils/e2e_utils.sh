@@ -60,6 +60,28 @@ section() {
     echo -e "${CYAN}--- $1 ---${NC}"
 }
 
+# Python Environment Setup
+setup_python_env() {
+    local req_file="$1"
+    local venv_dir="${BASE_DIR}/../../.venv"
+    
+    # Check/Create Venv
+    if [ ! -d "$venv_dir" ]; then
+        log_info "Creating Python venv at $venv_dir..."
+        python3 -m venv "$venv_dir"
+    fi
+    
+    # Activate
+    source "$venv_dir/bin/activate"
+    log_info "Activated Python Venv: $(which python3)"
+    
+    # Install Requirements if provided
+    if [ -n "$req_file" ] && [ -f "$req_file" ]; then
+        log_info "Installing dependencies from $req_file..."
+        pip install -r "$req_file" > /dev/null 2>&1 || log_warn "pip install failed"
+    fi
+}
+
 # Generic Cleanup Hook
 cleanup() {
     EXIT_CODE=$?

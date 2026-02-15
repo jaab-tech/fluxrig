@@ -54,7 +54,8 @@ type Server struct {
 	connsActive metric.Int64UpDownCounter
 	connsTotal  metric.Int64Counter
 
-	draining atomic.Bool
+	activeConns atomic.Int64
+	draining    atomic.Bool
 }
 
 // Connection represents an active ISO8583 connection.
@@ -112,11 +113,13 @@ func (s *Server) Start(ctx context.Context) error {
 	s.log.Info("listening", "addr", s.config.Bind)
 
 	go s.acceptLoop()
+	s.log.Info("starting tcp server", "addr", s.config.Bind, "max_conns", s.config.MaxConnections)
 	return nil
 }
 
 func (s *Server) acceptLoop() {
 	defer func() { _ = s.listener.Close() }()
+	backoff := 5 * time.Millisecond
 
 	for {
 		select {
@@ -129,15 +132,33 @@ func (s *Server) acceptLoop() {
 		if err != nil {
 			if isActive(s.done) {
 				s.log.Error("accept error", "error", err)
+				time.Sleep(backoff)
+				if backoff < 1*time.Second {
+					backoff *= 2
+				}
 			}
 			continue
 		}
+		backoff = 5 * time.Millisecond
+		
+		// Check limits
+		if s.config.MaxConnections > 0 {
+			current := s.activeConns.Load()
+			if current >= int64(s.config.MaxConnections) {
+				s.log.Warn("max connections reached, rejecting", "limit", s.config.MaxConnections, "active", current, "remote", conn.RemoteAddr())
+				_ = conn.Close()
+				continue
+			}
+		}
 
+		s.activeConns.Add(1)
 		go s.handleConn(conn)
 	}
 }
 
 func (s *Server) handleConn(conn net.Conn) {
+	defer s.activeConns.Add(-1)
+
 	id := s.idGen.NextEntityID(idgen.EntitySession)
 	connID := fmt.Sprintf("0x%x", id)
 
@@ -233,6 +254,7 @@ func (s *Server) handleConn(conn net.Conn) {
 				"flux_id", fmt.Sprintf("0x%x", msg.FluxID),
 				"conn_id", connID,
 				"mti", frameInfo.MTI,
+				"variant", s.config.Variant,
 				"src_id", msg.Metadata["iso8583.src_id"],
 				"dst_id", msg.Metadata["iso8583.dst_id"],
 				"payload_hex", fmt.Sprintf("0x%x", payload),

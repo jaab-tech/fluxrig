@@ -28,6 +28,7 @@ import (
 	"github.com/jaab-tech/fluxrig/pkg/gears"
 	"github.com/jaab-tech/fluxrig/pkg/idgen"
 	"github.com/jaab-tech/fluxrig/pkg/logger"
+	"github.com/jaab-tech/fluxrig/pkg/manager"
 	"github.com/jaab-tech/fluxrig/pkg/registry"
 	"github.com/jaab-tech/fluxrig/pkg/sdk"
 	"github.com/jaab-tech/fluxrig/pkg/telemetry"
@@ -41,6 +42,7 @@ import (
 type Manager struct {
 	bus       bus.Bus
 	idGen     *idgen.IDGenerator // Wrapper that satisfies sdk.IDGenerator
+	mgr       manager.Manager    // Spec/Scenario Manager
 	factory   *gears.Factory
 	machineID uint64
 	rackName  string
@@ -53,13 +55,14 @@ type Manager struct {
 	mu          sync.Mutex
 }
 
-func NewManager(log *slog.Logger, b bus.Bus, ig *idgen.IDGenerator, mid uint64, name string, timeout time.Duration) *Manager {
+func NewManager(log *slog.Logger, b bus.Bus, ig *idgen.IDGenerator, specMgr manager.Manager, mid uint64, name string, timeout time.Duration) *Manager {
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
 	return &Manager{
 		bus:         b,
 		idGen:       ig,
+		mgr:         specMgr,
 		factory:     gears.NewFactory(),
 		machineID:   mid,
 		rackName:    name,
@@ -88,6 +91,7 @@ type GearContextImpl struct {
 	logger    *slog.Logger
 	idGen     sdk.IDGenerator
 	bus       bus.Bus
+	mgr       manager.Manager
 }
 
 func (g *GearContextImpl) Context() context.Context { return g.ctx }
@@ -97,6 +101,7 @@ func (g *GearContextImpl) MachineID() uint64        { return g.machineID }
 func (g *GearContextImpl) Logger() *slog.Logger     { return g.logger }
 func (g *GearContextImpl) IDGen() sdk.IDGenerator   { return g.idGen }
 func (g *GearContextImpl) Bus() bus.Bus             { return g.bus }
+func (g *GearContextImpl) Manager() manager.Manager { return g.mgr }
 
 // ApplyScenario diffs and applies the scenario.
 func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) error {
@@ -166,6 +171,7 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) erro
 			logger: logger.WithComponent(m.logger(), logger.TypeGear, gSpec.Name),
 			idGen:  m.idGen,
 			bus:    m.bus,
+			mgr:    m.mgr,
 		}
 
 		if err := gear.Init(gCtx); err != nil {

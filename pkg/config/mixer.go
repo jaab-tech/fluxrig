@@ -74,7 +74,9 @@ type MixerSettings struct {
 	MachineID uint16 `koanf:"machine_id" example:"1"`
 	// MixerName is the human-readable name of the Mixer.
 	MixerName string `koanf:"mixer_name" example:"mixer-01"`
-	// StartupScenario path to a scenario YAML file to load on startup.
+	// StartupScenario reference to the scenario to load on startup.
+	// Accepts: file path ("/path/to/file.yaml"), URN ("payment-flow:v1.0.0"),
+	// or empty string (resume last active scenario).
 	StartupScenario string `koanf:"startup_scenario"`
 }
 

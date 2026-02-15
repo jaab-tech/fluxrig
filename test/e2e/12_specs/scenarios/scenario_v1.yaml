@@ -1,0 +1,12 @@
+meta:
+  name: payment-flow
+  version: v1.0.0
+racks:
+  - name: rack-1
+gears:
+  - name: visa-link
+    type: codec_iso8583
+    deploy: rack-1
+    config:
+      spec: visa:v1.0.0
+wires: []
