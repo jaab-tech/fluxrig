@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# Copyright 2025 JAAB Tech SAS, Uruguay
+# Copyright (c) 2026 JAAB Tech SAS, Uruguay
+# SPDX-License-Identifier: Apache-2.0
 
 """
 ISO8583 Load Tester & Concurrency Verifier.
