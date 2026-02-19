@@ -1,3 +1,6 @@
+// Copyright (c) 2026 JAAB Tech SAS, Uruguay
+// SPDX-License-Identifier: Apache-2.0
+
 package sdl
 
 import (
@@ -41,11 +44,11 @@ func (c *CompositeField) GetSubvalues() map[string]string {
 }
 
 // moov-io field.Field interface implementation
-func (c *CompositeField) Spec() *field.Spec { return c.spec }
+func (c *CompositeField) Spec() *field.Spec        { return c.spec }
 func (c *CompositeField) SetSpec(spec *field.Spec) { c.spec = spec }
-func (c *CompositeField) SetBytes(b []byte) error { c.data = b; return nil }
-func (c *CompositeField) Bytes() ([]byte, error) { return c.data, nil }
-func (c *CompositeField) String() (string, error) { return string(c.data), nil }
+func (c *CompositeField) SetBytes(b []byte) error  { c.data = b; return nil }
+func (c *CompositeField) Bytes() ([]byte, error)   { return c.data, nil }
+func (c *CompositeField) String() (string, error)  { return string(c.data), nil }
 
 func (c *CompositeField) Pack() ([]byte, error) {
 	// TODO: Implement packing based on c.values and c.config
@@ -114,7 +117,7 @@ func (c *CompositeField) MarshalJSON() ([]byte, error) {
 
 func (c *CompositeField) unpackSubfields(content []byte) error {
 	offset := 0
-	
+
 	switch c.config.Structure {
 	case "tlv":
 		// Loop until end of content
@@ -125,7 +128,7 @@ func (c *CompositeField) unpackSubfields(content []byte) error {
 			// If subfields are keyed by TAG, we need to read the Tag first.
 			// This is complex because Tag length varies (BER-TLV vs Fixed).
 			// Stub: Just consuming rest for now to allow compilation/pass.
-			break 
+			break
 		}
 
 	case "fixed", "": // Default to positional
@@ -139,15 +142,15 @@ func (c *CompositeField) unpackSubfields(content []byte) error {
 			if err != nil {
 				return fmt.Errorf("failed to unpack subfield %s: %w", key, err)
 			}
-			
+
 			// Extract value
-			val, _ := f.String() 
+			val, _ := f.String()
 			c.values[key] = val
-			
+
 			offset += read
 		}
 	}
-	
+
 	return nil
 }
 

@@ -1,3 +1,6 @@
+// Copyright (c) 2026 JAAB Tech SAS, Uruguay
+// SPDX-License-Identifier: Apache-2.0
+
 package ctrl
 
 // Command matches the JSON schema defined in ADR 0020.

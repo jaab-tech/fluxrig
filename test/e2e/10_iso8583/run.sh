@@ -1,5 +1,6 @@
 #!/bin/bash
-# Copyright 2025 JAAB Tech SAS, Uruguay
+# Copyright (c) 2026 JAAB Tech SAS, Uruguay
+# SPDX-License-Identifier: Apache-2.0
 
 set -e
 

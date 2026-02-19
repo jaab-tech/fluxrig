@@ -1,16 +1,5 @@
-// Copyright 2025 JAAB Tech SAS, Uruguay
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright (c) 2026 JAAB Tech SAS, Uruguay
+// SPDX-License-Identifier: Apache-2.0
 
 package sdl
 
@@ -44,31 +33,31 @@ type SDLSpec struct {
 
 // SDLField defines the layout and semantics of a single ISO8583 field.
 type SDLField struct {
-	Label   string         `yaml:"label"`
-	Type    string         `yaml:"type"`
-	Length  int            `yaml:"length"`
-	Alias   string         `yaml:"alias"`
-	Enc     string         `yaml:"enc"`
-	LenEnc  string         `yaml:"len_enc"`
-	Pad     string         `yaml:"pad"`
-	Storage string         `yaml:"storage"`
-	Mask    bool           `yaml:"log_mask"`
+	Label   string              `yaml:"label"`
+	Type    string              `yaml:"type"`
+	Length  int                 `yaml:"length"`
+	Alias   string              `yaml:"alias"`
+	Enc     string              `yaml:"enc"`
+	LenEnc  string              `yaml:"len_enc"`
+	Pad     string              `yaml:"pad"`
+	Storage string              `yaml:"storage"`
+	Mask    bool                `yaml:"log_mask"`
 	Sub     map[string]SDLField `yaml:"subfields"` // Recursive definition
-	
+
 	// Enhanced Structure Support
-	Structure  string `yaml:"structure"`        // "fixed", "tlv", "dataset"
-	TLVTagEnc  string `yaml:"tlv_tag_encoding"` // "hex", "int", "ascii"
-	TLVLenEnc  string `yaml:"tlv_len_encoding"` // "int", "bcd", "binary"
+	Structure string `yaml:"structure"`        // "fixed", "tlv", "dataset"
+	TLVTagEnc string `yaml:"tlv_tag_encoding"` // "hex", "int", "ascii"
+	TLVLenEnc string `yaml:"tlv_len_encoding"` // "int", "bcd", "binary"
 }
 
 // FieldMeta stores pre-computed metadata for the gear to use during Process().
 type FieldMeta struct {
-	SpecHash  string
-	Protocol  string
-	Aliases   map[int]string
+	SpecHash   string
+	Protocol   string
+	Aliases    map[int]string
 	SubAliases map[int]map[string]string // Field ID -> SubKey -> Alias
-	IDByAlias map[string]int
-	SecureIDs map[int]bool
+	IDByAlias  map[string]int
+	SecureIDs  map[int]bool
 }
 
 // LoadSpec reads a YAML SDL file and returns a moov-io MessageSpec
@@ -94,7 +83,7 @@ func LoadSpec(path string) (*iso8583.MessageSpec, *FieldMeta, error) {
 		Name:   sdl.Meta.Name,
 		Fields: make(map[int]field.Field),
 	}
-	
+
 	// Default protocol if missing (backward compatibility)
 	if sdl.Meta.Protocol == "" {
 		sdl.Meta.Protocol = "iso8583"
@@ -138,7 +127,7 @@ func LoadSpec(path string) (*iso8583.MessageSpec, *FieldMeta, error) {
 		if f.Mask {
 			meta.SecureIDs[id] = true
 		}
-		
+
 		// Helper to collect subfield aliases
 		if f.Structure != "" && len(f.Sub) > 0 {
 			subMap := make(map[string]string)
@@ -196,7 +185,7 @@ func buildMoovField(id int, f SDLField) (field.Field, error) {
 			LenEnc:    f.TLVLenEnc,
 		}
 		comp := NewCompositeField(spec, cfg)
-		
+
 		// Sort subkeys for deterministic order
 		subKeys := make([]string, 0, len(f.Sub))
 		for k := range f.Sub {

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+
+# Copyright (c) 2026 JAAB Tech SAS, Uruguay
+# SPDX-License-Identifier: Apache-2.0
 """
 Simple TCP Echo Server for Coat Check E2E Tests.
 Handles raw socket connections and echoes back received data.

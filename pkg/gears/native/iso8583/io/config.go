@@ -1,16 +1,5 @@
-// Copyright 2025 JAAB Tech SAS, Uruguay
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright (c) 2026 JAAB Tech SAS, Uruguay
+// SPDX-License-Identifier: Apache-2.0
 
 package io
 
@@ -56,11 +45,11 @@ type Config struct {
 	Mode string `json:"mode" mapstructure:"mode"`
 
 	// Server Mode Settings
-	Bind           string `json:"bind" mapstructure:"bind"`                      // e.g. ":9000"
+	Bind           string `json:"bind" mapstructure:"bind"`                       // e.g. ":9000"
 	MaxConnections int    `json:"max_connections" mapstructure:"max_connections"` // Limit concurrent connections (0 = unlimited, default 4096)
 
 	// Client Mode Settings
-	Connect       string   `json:"connect" mapstructure:"connect"`                // e.g. "localhost:9000"
+	Connect       string   `json:"connect" mapstructure:"connect"`               // e.g. "localhost:9000"
 	ReconnectWait Duration `json:"reconnect_wait" mapstructure:"reconnect_wait"` // e.g. "5s"
 
 	// Framing Settings (ISO8583 Length-Prefix)
