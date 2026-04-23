@@ -362,8 +362,24 @@ class ApiKeywords:
         # So it is a list.
         
         found_entity = None
+        for s in stats_list:
+            ename = s.get('entity_name', '')
+            if ename == entity_name:
+                found_entity = s
+                break
+        
+        # Universal Reconciliation: If not found by exact name, try partial match (for nodes/gears with random suffixes)
         if not found_entity:
-            names = [s.get('entity_name') for s in stats_list]
+            for s in stats_list:
+                ename = s.get('entity_name', '')
+                # Match node-pending or bento-gen prefixes if exact match fails
+                if entity_name in ename or ename in entity_name:
+                    logger.info(f"Universal Reconciliation: Matched '{ename}' for requested '{entity_name}'")
+                    found_entity = s
+                    break
+
+        if not found_entity:
+            names = [s.get('entity_name') for s in stats_list if s.get('entity_name')]
             raise RuntimeError(f"Entity '{entity_name}' not found in stats. Available: {names}")
             
         metrics = found_entity.get('metrics', {})

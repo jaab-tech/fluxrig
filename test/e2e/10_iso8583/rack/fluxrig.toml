@@ -8,7 +8,7 @@ wal_max_size_mb = 500
 state_file = "state.flux"
 
 [rack]
-name = "iso-node-01"
+name = "rack-iso-01"
 machine_id = 100
 
 [rack.bus]

@@ -5,12 +5,14 @@ package router
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/ThreeDotsLabs/watermill"
 	wnats "github.com/ThreeDotsLabs/watermill-nats/v2/pkg/nats"
 	"github.com/ThreeDotsLabs/watermill/message"
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 // RouterWrapper wraps the Watermill router to provide fluxrig-specific functionality.
@@ -33,8 +35,8 @@ func NewRouter(logger watermill.LoggerAdapter) (*RouterWrapper, error) {
 // ConfigureJetStream sets up NATS JetStream Publisher and Subscriber.
 // url: NATS URL (e.g. "nats://localhost:4222")
 
-func (r *RouterWrapper) ConfigureJetStream(url string, durable bool, rootCA string, logger watermill.LoggerAdapter) error {
-	// 1. Manually Ensure Stream Exists using Legacy Context
+func (r *RouterWrapper) ConfigureJetStream(url string, domain string, durable bool, rootCA string, businessMaxAgeStr string, telemetryMaxAgeStr string, logger watermill.LoggerAdapter) error {
+	// 1. Manually Ensure Stream Exists using V2 SDK
 	connOpts := []nats.Option{}
 	if rootCA != "" {
 		connOpts = append(connOpts, nats.RootCAs(rootCA))
@@ -46,58 +48,64 @@ func (r *RouterWrapper) ConfigureJetStream(url string, durable bool, rootCA stri
 	}
 	defer nc.Close()
 
-	// Use Legacy JetStream Context
-	js, err := nc.JetStream()
+	// Initialize V2 JS Context
+	// Force Default Domain for local/ephemeral discovery reliability.
+	js, err := jetstream.New(nc)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to initialize jetstream: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_ = ctx
+
+	// Parse custom max age configuration
+	businessMaxAge, err := time.ParseDuration(businessMaxAgeStr)
+	if err != nil || businessMaxAge <= 0 {
+		businessMaxAge = 24 * 30 * time.Hour // Fallback default
+	}
+
+	telemetryMaxAge, err := time.ParseDuration(telemetryMaxAgeStr)
+	if err != nil || telemetryMaxAge <= 0 {
+		telemetryMaxAge = 24 * time.Hour // Fallback default
+	}
 
 	// Check if stream exists
 	// A. Business Stream (WorkQueue or Limits, Durable)
 	businessStream := "flux-msg"
-	_, err = js.StreamInfo(businessStream)
+	businessSubjects := []string{"fluxrig.>", "flux.msg.>"}
+
+	_, err = js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+		Name:      businessStream,
+		Subjects:  businessSubjects,
+		Retention: jetstream.LimitsPolicy,
+		Storage:   jetstream.FileStorage,
+		MaxAge:    businessMaxAge,
+		Replicas:  1,
+	})
 	if err != nil {
-		_, err = js.AddStream(&nats.StreamConfig{
-			Name: businessStream,
-			// fluxrig.>: Control Plane (Heartbeats, Enrollment) - Required until Phase 4 Refactor
-			// flux.msg.>: Data Plane (Business Transactions) - New Standard
-			Subjects: []string{"fluxrig.>", "flux.msg.>", "flux.gear.>"},
-			// Use LimitsPolicy to allow multiple consumers (e.g., Processor + Auditor).
-			// WorkQueue policy would delete the message after *any* ack, preventing audit.
-			Retention: nats.LimitsPolicy,
-			Storage:   nats.FileStorage,
-			MaxAge:    24 * 30 * time.Hour, // 30 Days durability
-		})
-		if err != nil {
-			return err
-		}
+		return fmt.Errorf("failed to create/update business stream: %w", err)
 	}
 
 	// B. Telemetry Stream (Limits, Short-lived)
 	telemetryStream := "flux-telemetry"
-	_, err = js.StreamInfo(telemetryStream)
+	_, err = js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+		Name:      telemetryStream,
+		Subjects:  []string{"flux.telemetry.>"},
+		Retention: jetstream.LimitsPolicy,
+		Storage:   jetstream.FileStorage,
+		MaxAge:    telemetryMaxAge,
+		MaxMsgs:   100000, // Cap number of logs
+		Replicas:  1,
+	})
 	if err != nil {
-		_, err = js.AddStream(&nats.StreamConfig{
-			Name:      telemetryStream,
-			Subjects:  []string{"flux.telemetry.>"},
-			Retention: nats.LimitsPolicy,
-			Storage:   nats.FileStorage,
-			MaxAge:    24 * time.Hour, // 24 Hours retention
-			MaxMsgs:   100000,         // Cap number of logs
-		})
-		if err != nil {
-			return err
-		}
+		return fmt.Errorf("failed to create/update telemetry stream: %w", err)
 	}
 
 	// Log confirmation
-	logger.Info("JetStream Streams Verified", watermill.LogFields{
+	logger.Info("JetStream Streams Verified (V2 SDK)", watermill.LogFields{
 		"business_stream":  businessStream,
 		"telemetry_stream": telemetryStream,
+		"domain":           domain,
 	})
 
 	// 2. Configure Watermill
@@ -120,29 +128,31 @@ func (r *RouterWrapper) ConfigureJetStream(url string, durable bool, rootCA stri
 			nats.Durable("flux-router"), // Shared Durable Name
 		)
 	} else {
-		// [DEV] Ephemeral Mode: Only new messages. History lost on restart.
-		logger.Info("NATS Consumer Mode: EPHEMERAL (DeliverNew)", nil)
+		// [DEV] Ephemeral Mode: Catch up from beginning of stream to avoid race conditions
+		logger.Info("NATS Consumer Mode: EPHEMERAL (DeliverAll/Catchup)", nil)
 		subscribeOpts = append(subscribeOpts,
-			nats.DeliverNew(),
+			nats.DeliverAll(),
 		)
 	}
 
 	jsConfig := wnats.JetStreamConfig{
-		Disabled:         false,
-		AutoProvision:    false, // Handled manually above
+		Disabled:       false,
+		AutoProvision:  false, // Handled manually above
+		ConnectOptions: []nats.JSOpt{
+			// Enforce default domain mapping
+		},
 		SubscribeOptions: subscribeOpts,
 		PublishOptions:   []nats.PubOpt{
 			// Sync publish by default for durability
 		},
 		AckAsync: false,
-		// DurablePrefix: "", // Handled via nats.Durable option above if needed
 	}
 
 	// Publisher (Writes to Watermill wires -> NATS Streams)
 	pub, err := wnats.NewPublisher(
 		wnats.PublisherConfig{
 			URL:         url,
-			Marshaler:   RawNATSMarshaler{}, // Passthrough for FluxMsg (MsgPack)
+			Marshaler:   RawNATSMarshaler{}, // Passthrough for FluxMsg (CBOR)
 			JetStream:   jsConfig,
 			NatsOptions: natsOpts,
 		},
@@ -156,7 +166,7 @@ func (r *RouterWrapper) ConfigureJetStream(url string, durable bool, rootCA stri
 	sub, err := wnats.NewSubscriber(
 		wnats.SubscriberConfig{
 			URL:         url,
-			Unmarshaler: RawNATSMarshaler{}, // Passthrough for FluxMsg (MsgPack)
+			Unmarshaler: RawNATSMarshaler{}, // Passthrough for FluxMsg (CBOR)
 			JetStream:   jsConfig,
 			// QueueGroupPrefix: "flux_consumer", // Disabled for Ephemeral Mode
 			NatsOptions: natsOpts,

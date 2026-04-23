@@ -24,6 +24,8 @@ type mockGearContext struct {
 
 func (m *mockGearContext) Config() map[string]any { return m.config }
 func (m *mockGearContext) Logger() *slog.Logger   { return m.logger }
+func (m *mockGearContext) GearName() string       { return "test-codec" }
+func (m *mockGearContext) GearID() uint64         { return 100 }
 
 func initGear(t *testing.T, specFile string, extras ...map[string]any) *Gear {
 	t.Helper()

@@ -139,9 +139,9 @@ func (c *Client) handleConn(conn net.Conn) {
 		payload, err := c.readFrame(conn)
 		if err != nil {
 			if err == io.EOF {
-				c.log.Info("connection closed by peer")
+				c.log.Info("connection closed by peer", "target", c.config.Connect, "conn_id", connID)
 			} else {
-				c.log.Warn("read error", "error", err)
+				c.log.Warn("read error", "target", c.config.Connect, "conn_id", connID, "error", err)
 			}
 			return
 		}
@@ -367,6 +367,21 @@ func (c *Client) buildFrame(payload []byte) ([]byte, error) {
 	return frame, nil
 }
 
+// Disconnect forcefully closes the current connection.
+func (c *Client) Disconnect(connID string) error {
+	conn := c.connPtr.Load()
+	if conn == nil {
+		return fmt.Errorf("client not connected")
+	}
+	// In client mode, we usually have only one connection.
+	// We'll check the ID if provided, otherwise just close.
+	if connID != "" && conn.id != connID {
+		return fmt.Errorf("connection id mismatch: target %s, current %s", connID, conn.id)
+	}
+	c.log.Warn("Forcefully closing connection via Control Plane", "conn_id", conn.id)
+	return conn.conn.Close()
+}
+
 // Stop closes the client connection.
 func (c *Client) Stop() error {
 	close(c.done)
@@ -388,7 +403,7 @@ func (c *Client) Drain(ctx context.Context) error {
 
 // inspect performs heuristic validation (Layer 1.5) and returns frame info.
 func (c *Client) inspect(payload []byte, meta map[string]string) FrameInfo {
-	info := FrameInfo{}
+	info := FrameInfo{Valid: !c.config.HeuristicValidation}
 
 	if len(payload) < 4 {
 		c.log.Warn("Frame too short for ISO8583", "len", len(payload))

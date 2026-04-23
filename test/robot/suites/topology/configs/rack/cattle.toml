@@ -1,16 +1,19 @@
-# Rack Configuration for Robot Tests (Cattle Mode)
+# Cattle Node - Anonymous Agent
+[rack]
+# No name = Adoptable
+enrollment_timeout = "10s"
+
+[bus]
+url = "nats://localhost:4222"
+stream_name = "flux-msg"
+
 [logging]
 level = "debug"
 filename = "logs/fluxrig.log"
+max_size_mb = 100
+max_backups = 7
+compress = true
 
-[rack]
-# name = "robot-rack-01"  <-- Commented out to force Cattle/Pending mode
-data_dir = "data"
-
-[rack.bus]
-url = "nats://localhost:4222"
-connect_timeout = "5s"
-
-[telemetry]
-export_interval = "100ms"
-batch_size = 1
+[enrollment]
+timeout = "10s"
+push_delay = "100ms"

@@ -82,8 +82,10 @@ func (s *TelemetrySink) Start() error {
 		for {
 			select {
 			case <-ticker.C:
-				if err := s.store.FlushTelemetry(context.Background(), s.dataDir); err != nil {
-					slog.Error("Failed to flush telemetry", "error", err)
+				if s.store != nil {
+					if err := s.store.FlushTelemetry(context.Background(), s.dataDir); err != nil {
+						slog.Error("Failed to flush telemetry", "error", err)
+					}
 				}
 			case <-s.stopCh:
 				return
@@ -99,8 +101,10 @@ func (s *TelemetrySink) Stop() error {
 	close(s.stopCh)
 
 	// Perform final flush to ensure no data loss on shutdown
-	if err := s.store.FlushTelemetry(context.Background(), s.dataDir); err != nil {
-		slog.Error("Final telemetry flush failed", "error", err)
+	if s.store != nil {
+		if err := s.store.FlushTelemetry(context.Background(), s.dataDir); err != nil {
+			slog.Error("Final telemetry flush failed", "error", err)
+		}
 	}
 
 	if s.sub != nil {
@@ -129,8 +133,8 @@ func (s *TelemetrySink) handleMessage(ctx context.Context, msg *fluxmsg.FluxMsg)
 		// Individual log from JSON handler
 		err = s.persistSingleLog(msg)
 	case TypeLog:
-		// Individual log from WAL (MsgPack)
-		err = s.persistMsgPackLog(msg)
+		// Individual log from WAL (CBOR)
+		err = s.persistCborLog(msg)
 	default:
 		// Ignore unknown types
 		return
@@ -143,20 +147,27 @@ func (s *TelemetrySink) handleMessage(ctx context.Context, msg *fluxmsg.FluxMsg)
 
 func (s *TelemetrySink) persistSpans(msg *fluxmsg.FluxMsg) error {
 	// Payload is msg.Data["batch"] -> []map[string]interface{}
-	// Payload is msg.Data["batch"] -> []map[string]interface{}
-	batch, ok := msg.Data["batch"].([]interface{})
+	batch, ok := msg.Data["batch"].([]any)
 	if !ok {
-		return fmt.Errorf("invalid batch format for spans: expected []interface{}, got %T", msg.Data["batch"])
+		return fmt.Errorf("invalid batch format for spans: expected []any, got %T", msg.Data["batch"])
 	}
 
-	// Prepare Statement (Bulk Insert optimization deferred)
-	// We iterate row-by-row.
 	for _, item := range batch {
-		span, ok := item.(map[string]interface{})
-		if !ok {
-			// Skip invalid items instead of aborting
+		var span map[string]any
+		switch v := item.(type) {
+		case map[string]any:
+			span = v
+		case map[any]any:
+			span = make(map[string]any)
+			for k, val := range v {
+				span[fmt.Sprint(k)] = val
+			}
+		default:
 			continue
 		}
+
+		// Proactive Cleaning: Convert CBOR Map types to Go Native recursively
+		span = cleanMap(span).(map[string]any)
 
 		// Helper to safely get string/etc
 		str := func(k string) string { v, _ := span[k].(string); return v }
@@ -180,7 +191,7 @@ func (s *TelemetrySink) persistSpans(msg *fluxmsg.FluxMsg) error {
 			}
 		}
 
-		attrJSON, _ := json.Marshal(span["attributes"])
+		attrJSON, _ := json.Marshal(cleanMap(span["attributes"]))
 
 		_, err := s.store.DB().Exec(queryInsertSpan,
 			str("trace_id"), str("span_id"), str("parent_span_id"), str("name"),
@@ -270,16 +281,27 @@ func extractIdentityAndSource(defaultName string, log map[string]interface{}) (e
 }
 
 func (s *TelemetrySink) persistLogs(msg *fluxmsg.FluxMsg) error {
-	batch, ok := msg.Data["batch"].([]interface{})
+	batch, ok := msg.Data["batch"].([]any)
 	if !ok {
-		return fmt.Errorf("invalid batch format for logs: expected []interface{}, got %T", msg.Data["batch"])
+		return fmt.Errorf("invalid batch format for logs: expected []any, got %T", msg.Data["batch"])
 	}
 
 	for _, item := range batch {
-		log, ok := item.(map[string]interface{})
-		if !ok {
+		var log map[string]any
+		switch v := item.(type) {
+		case map[string]any:
+			log = v
+		case map[any]any:
+			log = make(map[string]any)
+			for k, val := range v {
+				log[fmt.Sprint(k)] = val
+			}
+		default:
 			continue
 		}
+
+		// Proactive Cleaning: Convert CBOR Map types to Go Native recursively
+		log = cleanMap(log).(map[string]any)
 
 		str := func(k string) string { v, _ := log[k].(string); return v }
 		u64 := func(k string) uint64 {
@@ -306,7 +328,7 @@ func (s *TelemetrySink) persistLogs(msg *fluxmsg.FluxMsg) error {
 		baseName := str("entity_name")
 		eType, eName, sFile, sFunc, sLine := extractIdentityAndSource(baseName, log)
 
-		attrJSON, _ := json.Marshal(log["attributes"])
+		attrJSON, _ := json.Marshal(cleanMap(log["attributes"]))
 
 		_, err := s.store.DB().Exec(queryInsertLog,
 			//nolint:gosec // timestamp conversion safe
@@ -329,15 +351,27 @@ func (s *TelemetrySink) persistMetrics(msg *fluxmsg.FluxMsg) error {
 		metrics = []map[string]any{msg.Data}
 	} else if msgType == TypeBatchMetrics {
 		// Batched metrics
-		batch, ok := msg.Data["batch"].([]interface{})
+		batch, ok := msg.Data["batch"].([]any)
 		if !ok {
-			return fmt.Errorf("invalid batch format for metrics: expected []interface{}, got %T", msg.Data["batch"])
+			return fmt.Errorf("invalid batch format for metrics: expected []any, got %T", msg.Data["batch"])
 		}
 		for _, item := range batch {
-			if m, ok := item.(map[string]interface{}); ok {
+			switch m := item.(type) {
+			case map[string]any:
 				metrics = append(metrics, m)
+			case map[any]any:
+				metricStr := make(map[string]any)
+				for k, val := range m {
+					metricStr[fmt.Sprint(k)] = val
+				}
+				metrics = append(metrics, metricStr)
 			}
 		}
+	}
+
+	// Proactive Cleaning: Ensure all metrics have Go Native attribute maps
+	for i := range metrics {
+		metrics[i] = cleanMap(metrics[i]).(map[string]any)
 	}
 
 	// Persist each metric
@@ -370,8 +404,32 @@ func (s *TelemetrySink) persistMetrics(msg *fluxmsg.FluxMsg) error {
 				return float64(v)
 			case int:
 				return float64(v)
+			case uint64:
+				return float64(v)
 			default:
 				return 0.0
+			}
+		}
+
+		// Extract Identity from attributes if missing at top-level
+		// Resource attributes are usually nested in "attributes" by the exporter.
+		eID := u64("entity_id")
+		eName := str("entity_name")
+		if eID == 0 || eName == "" {
+			if attrs, ok := metric["attributes"].(map[string]any); ok {
+				if eID == 0 {
+					if id, ok := attrs["flux.id"].(float64); ok {
+						eID = uint64(id)
+					} else if id, ok := attrs["flux.id"].(int64); ok && id >= 0 {
+						//nolint:gosec // conversion safe after non-negative check
+						eID = uint64(id)
+					}
+				}
+				if eName == "" {
+					if name, ok := attrs["flux.name"].(string); ok {
+						eName = name
+					}
+				}
 			}
 		}
 
@@ -388,11 +446,30 @@ func (s *TelemetrySink) persistMetrics(msg *fluxmsg.FluxMsg) error {
 			ts = time.Now().UnixMicro()
 		}
 
-		attrJSON, _ := json.Marshal(metric["attributes"])
+		// Val is mandatory for gauge/counter
+		valFloat := f64("value")
+
+		metricAttrs, _ := metric["attributes"].(map[string]any)
+
+		// DEBUG tracer (INFO level for definitive Robot audit)
+		slog.Info("Telemetry Sink Ingestion",
+			"metric", str("name"),
+			"val", valFloat,
+			"eID", eID,
+			"eName", eName,
+			"attrs_count", len(metricAttrs),
+		)
+
+		if eID == 0 {
+			// Skip if no entity identified to avoid polluting cache with 0-ID
+			continue
+		}
+
+		attrJSON, _ := json.Marshal(cleanMap(metric["attributes"]))
 
 		_, err := s.store.DB().Exec(queryInsertMetric,
-			ts, u64("entity_id"), str("entity_name"), str("name"),
-			str("description"), str("unit"), str("type"), f64("value"), string(attrJSON))
+			ts, eID, eName, str("name"),
+			str("description"), str("unit"), str("type"), valFloat, string(attrJSON))
 
 		if err != nil {
 			return err
@@ -400,14 +477,9 @@ func (s *TelemetrySink) persistMetrics(msg *fluxmsg.FluxMsg) error {
 
 		// Update In-Memory Cache
 		if s.cache != nil {
-			// Convert to int64 for cache (which uses Atomic/Gauge)
-			// Truncate float values
-			valFloat := f64("value")
-
 			// Try to extract type from attributes if possible, or leave empty
 			eType := "" // Default
-
-			s.cache.SetGauge(u64("entity_id"), str("name"), valFloat, str("entity_name"), eType)
+			s.cache.SetGauge(eID, str("name"), valFloat, eName, eType)
 		}
 	}
 	return nil
@@ -450,7 +522,7 @@ func (s *TelemetrySink) persistSingleLog(msg *fluxmsg.FluxMsg) error {
 	baseName := str("entity_name")
 	eType, eName, sFile, sFunc, sLine := extractIdentityAndSource(baseName, log)
 
-	attrJSON, _ := json.Marshal(log["attributes"])
+	attrJSON, _ := json.Marshal(cleanMap(log["attributes"]))
 
 	_, err := s.store.DB().Exec(queryInsertLog,
 		//nolint:gosec // timestamp conversion safe
@@ -460,7 +532,7 @@ func (s *TelemetrySink) persistSingleLog(msg *fluxmsg.FluxMsg) error {
 	return err
 }
 
-func (s *TelemetrySink) persistMsgPackLog(msg *fluxmsg.FluxMsg) error {
+func (s *TelemetrySink) persistCborLog(msg *fluxmsg.FluxMsg) error {
 	// msg.Data IS the log record map[string]any
 	log := msg.Data
 
@@ -492,7 +564,10 @@ func (s *TelemetrySink) persistMsgPackLog(msg *fluxmsg.FluxMsg) error {
 	// Attributes might need marshalling if they are map/slice
 	attrJSON := []byte("{}")
 	if attrs, ok := log["attributes"]; ok {
-		attrJSON, _ = json.Marshal(attrs)
+		j, err := json.Marshal(cleanMap(attrs))
+		if err == nil {
+			attrJSON = j
+		}
 	}
 
 	_, err := s.store.DB().Exec(queryInsertLog,

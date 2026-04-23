@@ -8,7 +8,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	_ "github.com/marcboeker/go-duckdb"
+	_ "github.com/duckdb/duckdb-go/v2"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -190,7 +190,8 @@ func (s *Store) RegisterMixer(ctx context.Context, mid uint16, name string, eid 
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if _, errDel := tx.ExecContext(ctx, "DELETE FROM registry WHERE name = ? AND type_id = 2", name); errDel != nil {
+	// Replace by EntityID to allow Mixer to reclaim its identity on restart
+	if _, errDel := tx.ExecContext(ctx, "DELETE FROM registry WHERE entity_id = ? AND type_id = 2", eid); errDel != nil {
 		return errDel
 	}
 

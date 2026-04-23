@@ -128,7 +128,7 @@ class TelemetryKeywords:
         
         telemetry_dir = os.path.join(base_dir, "data", "telemetry")
         if not os.path.exists(telemetry_dir):
-            logger.warn(f"No telemetry directory found at {telemetry_dir}")
+            logger.debug(f"No telemetry directory found at {telemetry_dir} (skipping stats)")
             return
 
         try:
@@ -269,11 +269,11 @@ class TelemetryKeywords:
             
             # Validate that Parquet has logs for critical entities
             if parquet_counts.get('MIXER', 0) == 0:
-                logger.warn("No MIXER logs found in Parquet")
+                logger.debug("No MIXER logs found in Parquet (yet)")
             if parquet_counts.get('RACK', 0) == 0:
-                logger.warn("No RACK logs found in Parquet")
+                logger.debug("No RACK logs found in Parquet (yet)")
             if parquet_counts.get('GEAR', 0) == 0:
-                logger.warn("No GEAR logs found in Parquet")
+                logger.debug("No GEAR logs found in Parquet (yet)")
                 
             total_parquet = sum(parquet_counts.values())
             logger.info(f"Total Parquet logs: {total_parquet}")
@@ -362,7 +362,7 @@ class TelemetryKeywords:
         
         telemetry_dir = os.path.join(base_dir, "data", "telemetry")
         if not os.path.exists(telemetry_dir):
-            logger.warn(f"Detailed telemetry: dir not found at {telemetry_dir}")
+            logger.debug(f"Detailed telemetry: dir not found at {telemetry_dir}")
             return []
 
         components = []
@@ -652,9 +652,9 @@ class TelemetryKeywords:
                 except: pass
 
                 if not report_files:
-                    logger.warn(f"No load generator reports found in {[work_dir, os.path.dirname(work_dir)]}")
+                    logger.info(f"No load generator reports found in {[work_dir, os.path.dirname(work_dir)]}")
                 if not report_files:
-                    logger.warn("No load generator reports found for throughput chart")
+                    logger.info("No load generator reports found for throughput chart")
                 else:
                     for r_file in report_files:
                         try:
@@ -698,7 +698,7 @@ class TelemetryKeywords:
                         logger.warn("No time series data found in load generator reports")
 
             except Exception as e:
-                logger.warn(f"Suite Throughput Chart failed: {e}")
+                logger.debug(f"Suite Throughput Chart skipped: {e}")
 
 
 

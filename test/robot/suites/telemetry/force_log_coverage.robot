@@ -10,7 +10,7 @@ Library           Process
 Library           OperatingSystem
 
 *** Variables ***
-${FLUXRIG_BIN}    ./bin/fluxrig
+${FLUXRIG_BIN}    ${CURDIR}/../../../../bin/fluxrig
 ${TIMEOUT}        5s
 
 *** Test Cases ***
@@ -18,23 +18,21 @@ Trigger Debug Logs
     [Documentation]    Runs FluxRig with FLUXRIG_TRACE=true to emit debug logs.
     [Setup]    Remove File    rack.log
     ${env}=    Create Dictionary    FLUXRIG_TRACE=true    FLUXRIG_STDOUT_ENABLED=true
-    Log    Starting FluxRig in Trace Mode...
-    ${handle}=    Start Process    ${FLUXRIG_BIN}    rack    run    env=${env}
-    Sleep    2s
-    Terminate Process    ${handle}
-    ${result}=    Get Process Result    ${handle}
+    Log    Starting FluxRig Rack help to emit Trace Logs...
+    # Use 'rack' subcommand to ensure logger initialization
+    ${result}=    Run Process    ${FLUXRIG_BIN}    rack    env=${env}    timeout=5s
     Log    FluxRig Trace Output:\n${result.stdout}
-    Should Contain    ${result.stdout}    [DEBUG]
-    Should Contain    ${result.stdout}    [TRACE]
+    
+    # Standard format: 2026-04-07... | INFO | ...
+    Should Contain    ${result.stdout}    | INFO |
+    Should Contain    ${result.stdout}    | DEBUG |
+    Should Contain    ${result.stdout}    | TRACE |
 
 Trigger Config Error Logs
     [Documentation]    Runs FluxRig with invalid configuration to trigger error logs.
     ${env}=    Create Dictionary    FLUXRIG_NATS_URL=nats://invalid-host:4222
     Log    Starting FluxRig with Bad Config...
-    ${result}=    Run Process    ${FLUXRIG_BIN}    rack    run    env=${env}    timeout=${TIMEOUT}
+    ${result}=    Run Process    ${FLUXRIG_BIN}    rack    -c    non_existent.toml    env=${env}    timeout=${TIMEOUT}
     Log    FluxRig Bad Config Output:\n${result.stderr}
-    # We expect it to fail or log errors
-    # Should Contain    ${result.stderr}    Failed to connect
-    # Note: Depending on stdout/stderr config, check output.
-
-*** Keywords ***
+    # Cobra prints errors to stderr
+    Should Contain    ${result.stderr}    Error: failed to load config

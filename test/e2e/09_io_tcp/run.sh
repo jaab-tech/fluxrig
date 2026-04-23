@@ -84,11 +84,15 @@ log_success "CLI Visibility OK"
 # 4. Graceful Shutdown & Restart
 log_info "--- Transition: Graceful Shutdown ---"
 # Stop Agent First
+kill $AGENT_PID 2>/dev/null || true
+for i in {1..5}; do kill -0 $AGENT_PID 2>/dev/null || break; sleep 1; done
 kill -9 $AGENT_PID 2>/dev/null || true
 wait $AGENT_PID 2>/dev/null || true
 log_info "Agent Shutdown Cleanly"
 
 # Stop Mixer
+kill $MIXER_PID 2>/dev/null || true
+for i in {1..5}; do kill -0 $MIXER_PID 2>/dev/null || break; sleep 1; done
 kill -9 $MIXER_PID 2>/dev/null || true
 wait $MIXER_PID 2>/dev/null || true
 log_info "Mixer Shutdown Cleanly"
@@ -137,6 +141,8 @@ log_info "Waiting for telemetry flush..."
 sleep 10
 
 # Final Cleanup
+kill $AGENT_PID $MIXER_PID 2>/dev/null || true
+for i in {1..5}; do kill -0 $AGENT_PID 2>/dev/null || kill -0 $MIXER_PID 2>/dev/null || break; sleep 1; done
 kill -9 $AGENT_PID $MIXER_PID 2>/dev/null || true
 wait $AGENT_PID $MIXER_PID 2>/dev/null || true
 sleep 1

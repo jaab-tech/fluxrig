@@ -21,26 +21,28 @@ import (
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/jaab-tech/fluxrig/pkg/registry"
 
+	"github.com/fxamacker/cbor/v2"
 	"github.com/jaab-tech/fluxrig/pkg/pki"
 	"github.com/jaab-tech/fluxrig/pkg/telemetry"
 	"github.com/jaab-tech/fluxrig/pkg/version"
-	"github.com/vmihailenco/msgpack/v5"
 
 	"github.com/jaab-tech/fluxrig/pkg/config"
 	"github.com/jaab-tech/fluxrig/pkg/controller"
+	_ "github.com/jaab-tech/fluxrig/pkg/mixer/api/docs" // Swagger docs
+	httpSwagger "github.com/swaggo/http-swagger"
 )
 
 type Server struct {
 	reg          registry.Registry
 	pub          message.Publisher
 	signer       *pki.ClusterKey
-	scenarioCtrl *controller.ScenarioController
+	scenarioCtrl controller.ScenarioManager
 	metricsCache *telemetry.MetricsCache
 	mixerID      uint64
 	cfg          *config.MixerConfig
 }
 
-func NewServer(reg registry.Registry, pub message.Publisher, signer *pki.ClusterKey, sc *controller.ScenarioController, cache *telemetry.MetricsCache, mixerID uint64, cfg *config.MixerConfig) *Server {
+func NewServer(reg registry.Registry, pub message.Publisher, signer *pki.ClusterKey, sc controller.ScenarioManager, cache *telemetry.MetricsCache, mixerID uint64, cfg *config.MixerConfig) *Server {
 	return &Server{reg: reg, pub: pub, signer: signer, scenarioCtrl: sc, metricsCache: cache, mixerID: mixerID, cfg: cfg}
 }
 
@@ -49,16 +51,19 @@ func (s *Server) Start(addr string) error {
 
 	// Middleware: CORS/Recovery/Logging logic can be added here
 
-	mux.HandleFunc("/api/v1/health", s.handleHealth)
-	mux.HandleFunc("/api/v1/config", s.handleConfig)
-	mux.HandleFunc("/api/v1/racks", s.handleRacks)
-	mux.HandleFunc("/api/v1/racks/{id}", s.handleRackAction) // Use Go 1.22 path value syntax if valid, or just check content first.
-	mux.HandleFunc("/api/v1/racks/", s.handleRackAction)     // Trailing slash for sub-paths
-	mux.HandleFunc("/api/v1/telemetry/", s.handleTelemetry)
-	mux.HandleFunc("/api/v1/entities/stats", s.handleEntityStats)
-	mux.HandleFunc("/api/v1/scenario/import", s.handleScenarioImport)
-	mux.HandleFunc("/api/v1/topology/status", s.handleTopologyStatus)
-	mux.HandleFunc("/api/v1/topology/list", s.handleTopologyList)
+	mux.HandleFunc("GET /api/v1/health", s.handleHealth)
+	mux.HandleFunc("GET /api/v1/config", s.handleConfig)
+	mux.HandleFunc("GET /api/v1/racks", s.handleRacks)
+	mux.HandleFunc("DELETE /api/v1/racks/{id}", s.handleRackAction)
+	mux.HandleFunc("POST /api/v1/racks/{id}/{action}", s.handleRackAction)
+	mux.HandleFunc("GET /api/v1/telemetry/{type}", s.handleTelemetry)
+	mux.HandleFunc("GET /api/v1/entities/stats", s.handleEntityStats)
+	mux.HandleFunc("POST /api/v1/scenario/import", s.handleScenarioImport)
+	mux.HandleFunc("GET /api/v1/topology/status", s.handleTopologyStatus)
+	mux.HandleFunc("GET /api/v1/topology/list", s.handleTopologyList)
+
+	// Swagger UI
+	mux.Handle("/swagger/", httpSwagger.WrapHandler)
 
 	// Log using global/standard logger which is slog at this point
 	slog.Info("Mixer Control Plane listening", "addr", addr)
@@ -74,9 +79,24 @@ func (s *Server) Start(addr string) error {
 			return opErr
 		},
 	}
-	l, err := lc.Listen(context.Background(), "tcp", addr)
+	// Resilient Bind-Retry Loop (ADR 0032)
+	// Handles transient port conflicts on macOS during rapid CI cycles.
+	var l net.Listener
+	var err error
+	maxAttempts := 3
+	for i := 1; i <= maxAttempts; i++ {
+		l, err = lc.Listen(context.Background(), "tcp", addr)
+		if err == nil {
+			break
+		}
+		if i < maxAttempts {
+			slog.Info("Mixer API bind failed, retrying...", "attempt", i, "addr", addr, "error", err)
+			time.Sleep(250 * time.Millisecond)
+		}
+	}
+
 	if err != nil {
-		return err
+		return fmt.Errorf("Mixer API bind failed after %d attempts: %w", maxAttempts, err)
 	}
 
 	readTimeout, _ := time.ParseDuration(s.cfg.API.ReadHeaderTimeout)
@@ -160,54 +180,39 @@ func (s *Server) handleRacks(w http.ResponseWriter, r *http.Request) {
 // @Success 200 {object} ActionResponse
 // @Router /racks/{id}/{action} [post]
 func (s *Server) handleRackAction(w http.ResponseWriter, r *http.Request) {
-	// Parse /api/v1/racks/{id}/approve
-	path := strings.TrimPrefix(r.URL.Path, "/api/v1/racks/")
-	parts := strings.Split(path, "/")
+	idStr := r.PathValue("id")
+	action := r.PathValue("action")
 
-	// Handle /racks/{id} (DELETE)
-	if len(parts) == 1 {
-		idStr := parts[0]
-		id, err := strconv.ParseUint(idStr, 10, 16)
-		if err != nil {
-			http.Error(w, "Invalid ID", http.StatusBadRequest)
-			return
-		}
-
-		if r.Method == http.MethodDelete {
-			if err := s.reg.Remove(r.Context(), uint16(id)); err != nil {
-				if err == registry.ErrNotFound {
-					http.Error(w, "Rack not found", http.StatusNotFound)
-					return
-				}
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{"status":"removed"}`))
-			return
-		}
-
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	id, err := strconv.ParseUint(idStr, 10, 16)
+	if err != nil {
+		http.Error(w, "Invalid ID", http.StatusBadRequest)
 		return
 	}
 
-	// Handle /racks/{id}/{action}
-	if len(parts) >= 2 {
-		idStr := parts[0]
-		action := parts[1]
-
-		id, err := strconv.ParseUint(idStr, 10, 16)
-		if err != nil {
-			http.Error(w, "Invalid ID", http.StatusBadRequest)
+	// Handle DELETE /racks/{id}
+	if r.Method == http.MethodDelete && action == "" {
+		if err := s.reg.Remove(r.Context(), uint16(id)); err != nil {
+			if err == registry.ErrNotFound {
+				http.Error(w, "Rack not found", http.StatusNotFound)
+				return
+			}
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"removed"}`))
+		return
+	}
 
+	// Handle POST /racks/{id}/{action}
+	if r.Method == http.MethodPost {
 		// Definition of SetLogLevelRequest
 		type SetLogLevelRequest struct {
 			Level string `json:"level"`
 		}
 
-		if action == "approve" && r.Method == http.MethodPost {
+		switch action {
+		case "approve":
 			var req ApproveRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				http.Error(w, "Invalid JSON", http.StatusBadRequest)
@@ -235,7 +240,7 @@ func (s *Server) handleRackAction(w http.ResponseWriter, r *http.Request) {
 					MixerPublic: s.signer.Public,
 				}
 				if env, err := s.signer.Sign(&rackState); err == nil {
-					if b, err := msgpack.Marshal(env); err == nil {
+					if b, err := cbor.Marshal(env); err == nil {
 						passportBytes = b
 					}
 				}
@@ -245,9 +250,8 @@ func (s *Server) handleRackAction(w http.ResponseWriter, r *http.Request) {
 			s.publishStatus(uint16(id), "active", "approved", passportBytes)
 			_ = json.NewEncoder(w).Encode(rack)
 			return
-		}
 
-		if action == "suspend" && r.Method == http.MethodPost {
+		case "suspend":
 			if err := s.reg.UpdateStatus(r.Context(), uint16(id), "inactive"); err != nil {
 				if err == registry.ErrNotFound {
 					http.Error(w, "Rack not found", http.StatusNotFound)
@@ -267,7 +271,7 @@ func (s *Server) handleRackAction(w http.ResponseWriter, r *http.Request) {
 					MixerPublic: s.signer.Public,
 				}
 				if env, err := s.signer.Sign(&rackState); err == nil {
-					if b, err := msgpack.Marshal(env); err == nil {
+					if b, err := cbor.Marshal(env); err == nil {
 						passportBytes = b
 					}
 				}
@@ -278,9 +282,8 @@ func (s *Server) handleRackAction(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"status":"suspended"}`))
 			return
-		}
 
-		if action == "activate" && r.Method == http.MethodPost {
+		case "activate":
 			if err := s.reg.UpdateStatus(r.Context(), uint16(id), "active"); err != nil {
 				if err == registry.ErrNotFound {
 					http.Error(w, "Rack not found", http.StatusNotFound)
@@ -300,7 +303,7 @@ func (s *Server) handleRackAction(w http.ResponseWriter, r *http.Request) {
 					MixerPublic: s.signer.Public,
 				}
 				if env, err := s.signer.Sign(&rackState); err == nil {
-					if b, err := msgpack.Marshal(env); err == nil {
+					if b, err := cbor.Marshal(env); err == nil {
 						passportBytes = b
 					}
 				}
@@ -311,9 +314,8 @@ func (s *Server) handleRackAction(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"status":"activated"}`))
 			return
-		}
 
-		if action == "log-level" && r.Method == http.MethodPost {
+		case "log-level":
 			var req SetLogLevelRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				http.Error(w, "Invalid JSON", http.StatusBadRequest)
@@ -344,9 +346,8 @@ func (s *Server) handleRackAction(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "level": req.Level})
 			return
-		}
 
-		if action == "shutdown" && r.Method == http.MethodPost {
+		case "shutdown":
 			// Get current rack to find status
 			rack, err := s.reg.Get(r.Context(), uint16(id))
 			if err != nil {
@@ -363,7 +364,6 @@ func (s *Server) handleRackAction(w http.ResponseWriter, r *http.Request) {
 
 			w.WriteHeader(http.StatusOK)
 			_ = json.NewEncoder(w).Encode(map[string]string{"status": "shutdown_command_sent"})
-			return
 		}
 	}
 
@@ -384,7 +384,7 @@ func (s *Server) handleRackAction(w http.ResponseWriter, r *http.Request) {
 // @Router /telemetry/{type} [get]
 func (s *Server) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 	// /api/v1/telemetry/logs or /metrics
-	path := strings.TrimPrefix(r.URL.Path, "/api/v1/telemetry/")
+	path := r.PathValue("type")
 	q := r.URL.Query()
 
 	limitStr := q.Get("limit")
@@ -635,7 +635,7 @@ func (s *Server) publishStatus(id uint16, status string, cmd string, passport []
 	fm.SrcGearID = 0
 	fm.Data = payload
 
-	b, err := msgpack.Marshal(fm)
+	b, err := cbor.Marshal(fm)
 	if err != nil {
 		slog.Error("failed to marshal fluxmsg", "error", err)
 		return

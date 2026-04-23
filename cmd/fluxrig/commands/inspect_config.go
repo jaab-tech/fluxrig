@@ -27,26 +27,26 @@ var configCmd = &cobra.Command{
 			apiURL = "http://localhost:8090"
 		}
 
-		fmt.Printf("[CLI] Querying Mixer Config at %s...\n", apiURL)
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "[CLI] Querying Mixer Config at %s...\n", apiURL)
 		// 1. Get Mixer Config
-		_, _ = fmt.Println("--- Mixer Configuration ---")
-		if err := showMixerConfig(cmd.Context(), apiURL); err != nil {
-			fmt.Printf("Warning: failed to get mixer configuration: %v\n", err)
+		_, _ = fmt.Fprintln(cmd.OutOrStdout(), "--- Mixer Configuration ---")
+		if err := showMixerConfig(cmd.Context(), apiURL, cmd.OutOrStdout()); err != nil {
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Warning: failed to get mixer configuration: %v\n", err)
 		}
-		_, _ = fmt.Println()
+		_, _ = fmt.Fprintln(cmd.OutOrStdout())
 
-		fmt.Printf("[CLI] Querying Racks Config at %s...\n", apiURL)
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "[CLI] Querying Racks Config at %s...\n", apiURL)
 		// 2. Get Racks Config
-		fmt.Println("--- Racks Configuration ---")
-		if err := showRacksConfig(cmd.Context(), apiURL); err != nil {
-			fmt.Printf("Warning: failed to get racks configuration: %v\n", err)
+		_, _ = fmt.Fprintln(cmd.OutOrStdout(), "--- Racks Configuration ---")
+		if err := showRacksConfig(cmd.Context(), apiURL, cmd.OutOrStdout()); err != nil {
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Warning: failed to get racks configuration: %v\n", err)
 		}
 
 		return nil
 	},
 }
 
-func showMixerConfig(ctx context.Context, apiURL string) error {
+func showMixerConfig(ctx context.Context, apiURL string, out io.Writer) error {
 	req, err := http.NewRequestWithContext(ctx, "GET", apiURL+"/api/v1/config", nil)
 	if err != nil {
 		return err
@@ -67,13 +67,13 @@ func showMixerConfig(ctx context.Context, apiURL string) error {
 		return err
 	}
 
-	enc := json.NewEncoder(os.Stdout)
+	enc := json.NewEncoder(out)
 	enc.SetIndent("", "  ")
 	enc.SetEscapeHTML(false)
 	return enc.Encode(config)
 }
 
-func showRacksConfig(ctx context.Context, apiURL string) error {
+func showRacksConfig(ctx context.Context, apiURL string, out io.Writer) error {
 	req, err := http.NewRequestWithContext(ctx, "GET", apiURL+"/api/v1/racks", nil)
 	if err != nil {
 		return err
@@ -99,7 +99,7 @@ func showRacksConfig(ctx context.Context, apiURL string) error {
 		return err
 	}
 
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
+	w := tabwriter.NewWriter(out, 0, 0, 3, ' ', 0)
 	_, _ = fmt.Fprintln(w, "ID\tNAME\tSTATUS\tCONFIGURATION")
 	for _, r := range racks {
 		configStr := "no-config"

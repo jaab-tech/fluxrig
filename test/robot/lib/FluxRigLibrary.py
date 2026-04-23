@@ -9,6 +9,7 @@ from datetime import datetime
 from robot.api.deco import library, keyword
 from robot.api import logger
 from robot.libraries.BuiltIn import BuiltIn
+import time
 
 import warnings
 try:
@@ -136,7 +137,7 @@ class FluxRigLibrary(ProcessKeywords, ApiKeywords, TelemetryKeywords):
             all_data.append({'label': wr['label'], 'color': wr['color'], 'series': ts})
         
         if not all_data or global_start == float('inf'):
-            logger.warn("No valid worker data for aggregation")
+            logger.info("No valid worker data for aggregation (skipping multi-worker chart)")
             return
         
         # Create unified time buckets (1 second resolution)
@@ -175,7 +176,7 @@ class FluxRigLibrary(ProcessKeywords, ApiKeywords, TelemetryKeywords):
         Processes a performance JSON and stores it for the suite summary.
         """
         if not os.path.exists(json_path):
-            logger.warn(f"JSON Report not found: {json_path}")
+            logger.info(f"Performance report not found (yet): {json_path}")
             return
 
         with open(json_path, 'r') as f:
@@ -183,7 +184,7 @@ class FluxRigLibrary(ProcessKeywords, ApiKeywords, TelemetryKeywords):
             
         time_series = data.get('time_series', [])
         if not time_series:
-            logger.warn(f"No time series data in {name}")
+            logger.info(f"No time series data in {name}")
             return
             
         time_series.sort(key=lambda x: x['timestamp'])
@@ -246,14 +247,22 @@ class FluxRigLibrary(ProcessKeywords, ApiKeywords, TelemetryKeywords):
                 window_start = start_ts - 60
                 window_end = end_ts + 60
                 
-                rack_data = [p for p in rack_raw if window_start <= p['timestamp'] <= window_end]
+                # Retry Loop for Metric Window (Ingestion Lag Protection)
+                rack_data = []
+                for attempt in range(3):
+                    rack_data = [p for p in rack_raw if window_start <= p['timestamp'] <= window_end]
+                    if rack_data:
+                        break
+                    logger.info(f"Retrying metric window match for {name} (attempt {attempt+1}/3)...")
+                    time.sleep(2)
+
                 gear_map = {gid: [p for p in pts if window_start <= p['timestamp'] <= window_end] 
                             for gid, pts in gear_raw_map.items()}
                 
                 if not rack_data and rack_raw:
                     # Clock skew fallback: take points based on counts if window fails
                     rack_data = rack_raw[-10:]
-                    logger.warn(f"No direct window match for rack metrics for {name}, using latest samples.")
+                    logger.debug(f"Using latest metric samples for {name} (Direct window match fallback).")
                 
                 def get_rates(points):
                     if not points: return [], []

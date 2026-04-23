@@ -1,24 +1,21 @@
-# Rack Configuration for ISO8583 Performance Tests
+# Copyright 2025 JAAB Tech SAS, Uruguay
+[rack]
+name = "iso-node-01"
+machine_id = 1
+enrollment_timeout = "10s"
+
+[bus]
+url = "nats://localhost:4222"
+domain = "flux"
+stream_name = "flux-msg"
+
 [logging]
 level = "debug"
 filename = "logs/fluxrig.log"
+max_size_mb = 100
+max_backups = 7
+compress = true
 
-[logging.throttling]
-rate = 50000.0
-burst = 10000
-
-[rack]
-name = "iso-node-01"
-data_dir = "data"
-
-[rack.bus]
-url = "nats://localhost:4222"
-connect_timeout = "5s"
-
-[telemetry]
-export_interval = "1s"
-batch_size = 512
-
-[telemetry.metrics]
-host_enabled = true
-runtime_enabled = true
+[enrollment]
+timeout = "10s"
+push_delay = "100ms"

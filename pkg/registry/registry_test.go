@@ -25,7 +25,10 @@ func setupTestRegistry(t *testing.T) (*registry.DuckDBRegistry, func()) {
 		t.Fatalf("Migrate failed: %v", err)
 	}
 
-	return registry.NewDuckDBRegistry(store), func() { _ = store.Close() }
+	reg := registry.NewDuckDBRegistry(store)
+	reg.SetAutoAdopt(true) // Required for static registration tests to return 'active'
+
+	return reg, func() { _ = store.Close() }
 }
 
 func TestRegistry_Register_Static(t *testing.T) {

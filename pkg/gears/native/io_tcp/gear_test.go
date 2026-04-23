@@ -36,6 +36,7 @@ func (m *MockCtx) Logger() *slog.Logger     { return slog.Default() }
 func (m *MockCtx) IDGen() sdk.IDGenerator   { return &MockIDGen{} }
 func (m *MockCtx) Bus() bus.Bus             { return nil }
 func (m *MockCtx) Manager() manager.Manager { return nil }
+func (m *MockCtx) ControlPlane() any        { return nil }
 
 func TestGear_Init_Validation(t *testing.T) {
 	g := &Gear{}

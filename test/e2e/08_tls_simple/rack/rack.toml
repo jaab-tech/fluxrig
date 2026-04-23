@@ -12,4 +12,5 @@ heartbeat_interval = "1s"
 
 [rack.bus]
 url = "nats://localhost:4223"
+domain = "flux"
 root_ca = "../certs/ca.crt"

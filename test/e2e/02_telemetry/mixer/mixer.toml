@@ -22,3 +22,7 @@ tier = "embedded"
 
 [observability.embedded]
 # data_dir removed (uses store.dir/telemetry)
+
+
+[enrollment]
+auto_adopt = true

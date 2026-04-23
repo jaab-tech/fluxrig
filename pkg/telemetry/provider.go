@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jaab-tech/fluxrig/pkg/bus"
+	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/jaab-tech/fluxrig/pkg/idgen"
 	loggerPkg "github.com/jaab-tech/fluxrig/pkg/logger"
 	"github.com/jaab-tech/fluxrig/pkg/logger/rotator"
@@ -21,6 +22,7 @@ import (
 	"github.com/jaab-tech/fluxrig/pkg/telemetry/wal"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -170,6 +172,9 @@ func Init(ctx context.Context, cfg Config, b bus.Bus, logBuffer *BufferHandler, 
 			semconv.ServiceName(cfg.ServiceName),
 			semconv.ServiceVersion(cfg.ServiceVersion),
 			semconv.ServiceInstanceID(fmt.Sprintf("%x", cfg.EntityID)),
+			//nolint:gosec // conversion safe for entity IDs
+			attribute.Int64("flux.id", int64(cfg.EntityID)),
+			attribute.String("flux.name", cfg.EntityName),
 		),
 	)
 	if err != nil {
@@ -339,8 +344,8 @@ func Init(ctx context.Context, cfg Config, b bus.Bus, logBuffer *BufferHandler, 
 	// 8. Initialize Host/Runtime Metrics (if enabled)
 	slog.Info("Initializing Host/Runtime Metrics", "host", cfg.Metrics.HostEnabled, "runtime", cfg.Metrics.RuntimeEnabled, "bento", cfg.Metrics.BentoEnabled)
 	if err := InitHostMetrics(ctx, cfg.Metrics); err != nil {
-		slog.Warn("Failed to initialize host/runtime metrics", "error", err)
-		// Don't fail the whole startup, just warn
+		slog.Debug("Failed to initialize host/runtime metrics", "error", err)
+		// Don't fail the whole startup, just log to debug
 	}
 
 	// 8. Flush Buffer (Replay early logs)
@@ -378,4 +383,60 @@ func Init(ctx context.Context, cfg Config, b bus.Bus, logBuffer *BufferHandler, 
 
 	currentShutdown = cleanup
 	return cleanup, nil
+}
+
+// VerifyConnectivity performs a mandatory handshake with the telemetry bus (ADR 0036).
+// It publishes sync probes relentlessly and waits for loopback.
+func VerifyConnectivity(ctx context.Context, b bus.Bus, nodeName string, handshakeTimeout, handshakeInterval time.Duration) error {
+	subject := fmt.Sprintf("flux.telemetry.%s.logs", nodeName)
+
+	slog.Info("Waiting for telemetry-plane convergence (ADR 0036)", "subject", subject)
+
+	hotCh := make(chan struct{})
+	sub, err := b.Subscribe(subject, func(_ context.Context, msg *fluxmsg.FluxMsg) {
+		if msg.Flags&fluxmsg.FlagSyncProbe != 0 {
+			select {
+			case <-hotCh:
+				// already closed
+			default:
+				close(hotCh)
+			}
+		}
+	})
+	if err != nil {
+		return fmt.Errorf("failed to subscribe to telemetry sync on %s: %w", subject, err)
+	}
+	defer func() { _ = sub.Unsubscribe() }()
+
+	// 2. Relentless Probe Loop
+	ticker := time.NewTicker(handshakeInterval)
+	defer ticker.Stop()
+
+	timeout := time.NewTimer(handshakeTimeout)
+	defer timeout.Stop()
+
+	emitProbe := func() {
+		probe := fluxmsg.New()
+		probe.Flags |= fluxmsg.FlagSyncProbe
+		if err := b.Publish(ctx, subject, probe); err != nil {
+			slog.Warn("Failed to emit telemetry probe", "subject", subject, "error", err)
+		}
+	}
+
+	// Initial emission
+	emitProbe()
+
+	for {
+		select {
+		case <-hotCh:
+			slog.Info("telemetry-plane convergence confirmed")
+			return nil
+		case <-ticker.C:
+			emitProbe()
+		case <-timeout.C:
+			return fmt.Errorf("timeout waiting for telemetry convergence on %s", subject)
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 }

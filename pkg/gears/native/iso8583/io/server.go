@@ -94,9 +94,22 @@ func (s *Server) Start(ctx context.Context) error {
 			return opErr
 		},
 	}
-	l, err := lc.Listen(ctx, "tcp", s.config.Bind)
+	var l net.Listener
+	var err error
+	maxRetries := 3
+	for i := 0; i < maxRetries; i++ {
+		l, err = lc.Listen(ctx, "tcp", s.config.Bind)
+		if err == nil {
+			break
+		}
+		if i < maxRetries-1 {
+			s.log.Warn("failed to bind, retrying...", "addr", s.config.Bind, "error", err, "attempt", i+1)
+			time.Sleep(250 * time.Millisecond)
+		}
+	}
+
 	if err != nil {
-		return fmt.Errorf("failed to bind %s: %w", s.config.Bind, err)
+		return fmt.Errorf("failed to bind %s after %d attempts: %w", s.config.Bind, maxRetries, err)
 	}
 	s.listener = l
 	s.log.Info("listening", "addr", s.config.Bind)
@@ -200,16 +213,16 @@ func (s *Server) handleConn(conn net.Conn) {
 		offset := GetHeaderOffset(payload, s.config)
 		innerPayload := payload[offset:]
 
-		// Preserve Raw Header if requested (Stateless Loopback)
-		if s.config.PreserveHeaders && offset > 0 {
-			headerMeta["iso8583.raw_header"] = string(payload[:offset])
-		}
-
 		// Build FluxMsg
 		msg := fluxmsg.New()
 		msg.FluxID, _ = s.idGen.NextFluxID()
 		msg.TsInit = time.Now().UnixNano()
 		msg.RawPayload = innerPayload
+
+		// Preserve Raw Header if requested (Stateless Loopback)
+		if s.config.PreserveHeaders && offset > 0 {
+			msg.SetMetadataBytes("iso8583.raw_header", payload[:offset])
+		}
 
 		for k, v := range headerMeta {
 			msg.Metadata[k] = v
@@ -309,6 +322,8 @@ func (s *Server) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.Fl
 	if !ok {
 		return nil, fmt.Errorf("missing conn.id in metadata")
 	}
+
+	s.log.Info("Egress Processing", "conn_id", connID, "flux_id", fmt.Sprintf("0x%x", msg.FluxID), "payload_len", len(msg.RawPayload))
 
 	val, ok := s.conns.Load(connID)
 	var conn *Connection
@@ -447,6 +462,17 @@ func (s *Server) buildFrame(payload []byte) ([]byte, error) {
 	return frame, nil
 }
 
+// Disconnect forcefully closes a specific connection.
+func (s *Server) Disconnect(connID string) error {
+	val, ok := s.conns.Load(connID)
+	if !ok {
+		return fmt.Errorf("connection %s not found", connID)
+	}
+	conn := val.(*Connection)
+	s.log.Warn("Forcefully closing connection via Control Plane", "conn_id", connID)
+	return conn.conn.Close()
+}
+
 // Stop closes all connections and the listener.
 func (s *Server) Stop() error {
 	close(s.done)
@@ -502,7 +528,7 @@ func (s *Server) Drain(ctx context.Context) error {
 
 // inspect performs heuristic validation (Layer 1.5) and returns frame info.
 func (s *Server) inspect(payload []byte, connID string, meta map[string]string) FrameInfo {
-	info := FrameInfo{}
+	info := FrameInfo{Valid: !s.config.HeuristicValidation}
 
 	if len(payload) < 4 {
 		s.log.Warn("Frame too short for ISO8583", "len", len(payload), "conn_id", connID)

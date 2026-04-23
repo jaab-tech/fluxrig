@@ -3,6 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 set -e
+# Support common binary paths (Mac/Homebrew, Linux/usr/local)
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 
 BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
 VENV_DIR="${BASE_DIR}/.venv"
@@ -13,8 +15,11 @@ if [ ! -d "$VENV_DIR" ]; then
     echo "[ROBOT] Creating venv..."
     python3 -m venv "$VENV_DIR"
     "$VENV_DIR/bin/pip" install --upgrade pip
-    "$VENV_DIR/bin/pip" install -r "${BASE_DIR}/requirements.txt"
 fi
+
+# 2. Sync Dependencies (Always ensure we have what's in requirements.txt)
+echo "[ROBOT] Syncing dependencies..."
+"$VENV_DIR/bin/pip" install -q -r "${BASE_DIR}/requirements.txt"
 
 # Run Robot Framework
 # We use a temp directory for global results to avoid polluting the source tree
@@ -65,11 +70,18 @@ echo "[ROBOT] Using Python Environment: $VENV_DIR"
 "$VENV_DIR/bin/python3" --version
 "$VENV_DIR/bin/python3" -c "import sys; print(f'Python Executable: {sys.executable}')"
 
+EXTRA_ARGS=""
+if [ "${FLUXRIG_ROBOT_EXIT_ON_FAILURE}" = "true" ]; then
+    echo "[ROBOT] Fast-Fail enabled (--exitonfailure)"
+    EXTRA_ARGS="--exitonfailure"
+fi
+
 "$VENV_DIR/bin/robot" \
     --outputdir "$RESULTS_DIR" \
     --pythonpath "${BASE_DIR}/lib" \
-    --loglevel TRACE \
-    $TARGETS
+    --pythonpath "${BASE_DIR}/lib/keywords" \
+    $EXTRA_ARGS \
+    ${@:-$TARGETS}
 
 # Print summary
 echo "------------------------------------------------------------------------------"

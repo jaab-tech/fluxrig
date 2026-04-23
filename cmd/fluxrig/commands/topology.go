@@ -23,7 +23,7 @@ var topologyStatusCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		baseURL := os.Getenv("FLUXRIG_API_URL")
 		if baseURL == "" {
-			baseURL = "http://localhost:9000"
+			baseURL = "http://localhost:8090"
 		}
 		mixerURL := fmt.Sprintf("%s/api/v1/topology/status", baseURL)
 
@@ -49,7 +49,7 @@ var topologyListCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		baseURL := os.Getenv("FLUXRIG_API_URL")
 		if baseURL == "" {
-			baseURL = "http://localhost:9000"
+			baseURL = "http://localhost:8090"
 		}
 		mixerURL := fmt.Sprintf("%s/api/v1/topology/list", baseURL)
 		resp, err := http.Get(mixerURL) // #nosec G107 -- URL is from trusted env var

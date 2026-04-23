@@ -16,7 +16,7 @@ gears:
       mode: "server"
       bind: ":8583"
       frame_length_size: 2
-      strict_connection_routing: true
+      strict_connection_routing: false
       frame_length_endian: "big"
       encoding: "bcd"
       protocol_header_size: 12

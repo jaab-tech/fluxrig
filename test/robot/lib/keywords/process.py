@@ -32,21 +32,49 @@ class ProcessKeywords:
         Safely kills any lingering FluxRig binaries (mixer/rack) from previous runs.
         Does NOT use 'pkill -f' to avoid killing the IDE/Agent.
         """
-        targets = ["fluxrig", "fluxrig-mixer"]
+        targets = ["fluxrig", "fluxrig-mixer", "iso8583-tool"]
         logger.info(f"Ensuring environment is clean (killing {targets})...")
         
+        # 1. Kill by name
         for name in targets:
             try:
-                # pgrep -x matches exact process name, avoiding path matching
-                pids = subprocess.check_output(["pgrep", "-x", name]).decode().split()
+                pids = [int(p) for p in subprocess.check_output(["pgrep", "-x", name]).decode().split()]
+                if not pids:
+                    continue
+                
+                logger.info(f"Terminating lingering {name} (PIDs: {pids})")
                 for pid in pids:
-                    logger.info(f"Killing lingering {name} (PID: {pid})")
-                    os.kill(int(pid), signal.SIGKILL)
+                    try:
+                        os.kill(pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        continue
+
+                # Wait for processes to exit
+                time.sleep(1.0)
+                
+                # Check if still alive and SIGKILL
+                for pid in pids:
+                    try:
+                        os.kill(pid, 0) # Check existence
+                        logger.info(f"Hygienic SIGKILL on {name} (PID: {pid})")
+                        os.kill(pid, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        continue
             except subprocess.CalledProcessError:
-                # No process found, which is good
                 pass
-            except Exception as e:
-                logger.warn(f"Failed to kill {name}: {e}")
+
+        # 2. Kill by port
+        ports = [54321, 8583, 8090, 8590, 4222]
+        for port in ports:
+            try:
+                pids = [int(p) for p in subprocess.check_output(["lsof", "-ti", f":{port}"]).decode().split()]
+                for pid in pids:
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        continue
+            except subprocess.CalledProcessError:
+                pass
 
     @keyword
     def setup_workspace(self, suite_path: str, output_dir: str = None):

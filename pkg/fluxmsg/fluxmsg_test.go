@@ -9,12 +9,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vmihailenco/msgpack/v5"
+	"github.com/fxamacker/cbor/v2"
 )
 
 // Validation Note:
-// To validate the Hex output externally, you can specific MsgPack tools or online inspectors
-// (e.g., https://msgpack.org/ -> Javascript demo or similar hex-to-msgpack converters).
+// To validate the Hex output externally, you can use specific CBOR tools or online inspectors
+// (e.g., https://cbor.me/ -> Hex to Diagnostics converter).
 // The structure matches 'ops/docs/public/5_reference/protocols.md'.
 
 func TestFluxMsg_Scenarios(t *testing.T) {
@@ -88,20 +88,20 @@ func TestFluxMsg_Scenarios(t *testing.T) {
 			original := tt.setup()
 
 			// 1. Serialize
-			data, err := msgpack.Marshal(original)
+			data, err := cbor.Marshal(original)
 			if err != nil {
 				t.Fatalf("Marshal failed: %v", err)
 			}
 
 			// 2. Output for User Validation
 			fmt.Printf("\n=== Scenario: %s ===\n", tt.name)
-			fmt.Printf("MsgPack Size: %d bytes\n", len(data))
+			fmt.Printf("CBOR Size: %d bytes\n", len(data))
 			fmt.Printf("Hex Dump:\n%s\n", hex.Dump(data))
 			fmt.Printf("Single Line Hex: %X\n", data)
 
 			// 3. Deserialize
 			var decoded FluxMsg
-			if err := msgpack.Unmarshal(data, &decoded); err != nil {
+			if err := cbor.Unmarshal(data, &decoded); err != nil {
 				t.Fatalf("Unmarshal failed: %v", err)
 			}
 

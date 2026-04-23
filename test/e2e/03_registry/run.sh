@@ -45,7 +45,7 @@ lsof -ti :8093 | xargs kill -9 2>/dev/null || true
 lsof -ti :4222 | xargs kill -9 2>/dev/null || true
 
 # 2. Build Check
-if [ ! -f "bin/fluxrig-mixer" ]; then
+if [ ! -f "${ROOT_DIR}/bin/fluxrig-mixer" ]; then
     echo "❌ bin/fluxrig-mixer not found. Run make build."
     exit 1
 fi
@@ -111,8 +111,8 @@ if [ $FOUND -eq 0 ]; then
     exit 1
 fi
 
-echo "[INFO] Waiting 10s for Snake Registration (NATS Handshake)..."
-sleep 10
+echo "[INFO] Waiting 15s for Snake Registration (NATS Handshake)..."
+sleep 15
 
 # Verify Bus Connected in logs
 if ! grep -q "Bus Connected" "$RACK_LOG"; then
@@ -136,7 +136,11 @@ echo "✅ CLI Racks Verified."
 
 # Stop Mixer to release DB lock before verification
 echo "[INFO] Stopping Mixer to verify DB..."
-kill -9 $MIXER_PID 2>/dev/null || true
+kill $MIXER_PID 2>/dev/null || true
+for i in {1..5}; do
+    if ! ps -p $MIXER_PID > /dev/null; then break; fi
+    sleep 1
+done
 wait $MIXER_PID 2>/dev/null || true
 MIXER_PID=""
 
@@ -180,8 +184,8 @@ if [[ "$RACK_ROW" != *"last_seen"* ]]; then # stats usually has last_seen?
     :
 fi
 # Version check
-if [[ "$RACK_ROW" == *"0.2.0-dev"* ]]; then
-     echo "✅ Rack Version Verified: 0.2.0-dev"
+if [[ "$RACK_ROW" == *"v0.4"* ]] || [[ "$RACK_ROW" == *"v0.5"* ]]; then
+     echo "✅ Rack Version Verified"
 else
      echo "❌ Rack Version Check Failed. Row: $RACK_ROW"
      exit 1

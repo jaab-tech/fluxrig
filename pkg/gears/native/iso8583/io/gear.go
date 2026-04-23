@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/jaab-tech/fluxrig/pkg/ctrl"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/jaab-tech/fluxrig/pkg/sdk"
 )
@@ -73,7 +74,38 @@ func (g *Gear) Start(ctx context.Context, emit func(*fluxmsg.FluxMsg)) error {
 		}
 	}
 
+	// --- Control Plane Integration (ADR 0020) ---
+	if cp, ok := g.ctx.ControlPlane().(ctrl.ControlPlane); ok {
+		cmdChan, err := cp.Subscribe(g.ctx.GearName())
+		if err != nil {
+			g.log.Error("failed to subscribe to control plane", "error", err)
+		} else {
+			go g.handleControlPlane(cmdChan)
+		}
+	}
+
 	return nil
+}
+
+func (g *Gear) handleControlPlane(cmds <-chan ctrl.Command) {
+	for cmd := range cmds {
+		switch cmd.Cmd {
+		case "conn.close":
+			connID := cmd.Args["conn_id"]
+			g.log.Warn("Kill Switch triggered via Control Plane", "conn_id", connID, "src", cmd.Src)
+			var err error
+			if g.server != nil {
+				err = g.server.Disconnect(connID)
+			} else if g.client != nil {
+				err = g.client.Disconnect(connID)
+			}
+			if err != nil {
+				g.log.Error("Disconnect failed", "conn_id", connID, "error", err)
+			}
+		default:
+			g.log.Debug("received unknown control command", "cmd", cmd.Cmd)
+		}
+	}
 }
 
 // Process handles egress messages (writing to TCP).

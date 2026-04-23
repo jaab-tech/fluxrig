@@ -8,6 +8,8 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/nats-io/nats-server/v2/server"
@@ -17,7 +19,8 @@ import (
 
 // Server wraps a NATS server instance for the Snake protocol.
 type Server struct {
-	ns *server.Server
+	ns     *server.Server
+	domain string
 }
 
 // Config holds the configuration for the Snake Server.
@@ -61,7 +64,7 @@ func NewServer(cfg Config) (*Server, error) {
 	}
 
 	// JetStream Configuration
-	opts.JetStreamDomain = cfg.ClusterName
+	// opts.JetStreamDomain = cfg.ClusterName // Disabled for restoration (use default)
 
 	ns, err := server.NewServer(opts)
 	if err != nil {
@@ -76,7 +79,7 @@ func NewServer(cfg Config) (*Server, error) {
 		return nil, errors.New("nats server failed to start")
 	}
 
-	s := &Server{ns: ns}
+	s := &Server{ns: ns, domain: cfg.ClusterName}
 
 	// 4. Provision Streams
 	if cfg.StreamName != "" {
@@ -93,18 +96,41 @@ func NewServer(cfg Config) (*Server, error) {
 func (s *Server) ProvisionStream(name string, subjects []string) error {
 	// Connect to self
 	url := s.ns.ClientURL()
-	nc, err := nats.Connect(url)
+	// Use InsecureSkipVerify for self-connection during provisioning IF TLS is enabled
+	var natsOpts []nats.Option
+	if strings.HasPrefix(url, "tls://") {
+		// #nosec G402
+		natsOpts = append(natsOpts, nats.Secure(&tls.Config{InsecureSkipVerify: true}))
+	}
+
+	// Connect to self with retry resilience (ADR 0032 follow-up)
+	var nc *nats.Conn
+	var err error
+	for i := 1; i <= 3; i++ {
+		nc, err = nats.Connect(url, natsOpts...)
+		if err == nil {
+			break
+		}
+		if i < 3 {
+			slog.Info("Snake provisioning connect failed, retrying...", "attempt", i, "error", err)
+			time.Sleep(250 * time.Millisecond)
+		}
+	}
+
 	if err != nil {
-		return err
+		return fmt.Errorf("snake: failed to connect for provisioning after 3 attempts: %w", err)
 	}
 	defer nc.Close()
 
-	js, err := jetstream.New(nc)
-	if err != nil {
-		return err
+	var js jetstream.JetStream
+	var jsErr error
+	js, jsErr = jetstream.New(nc)
+
+	if jsErr != nil {
+		return fmt.Errorf("snake: failed to initialize jetstream: %w", jsErr)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	// Check if exists
@@ -113,16 +139,20 @@ func (s *Server) ProvisionStream(name string, subjects []string) error {
 		// Update Subjects
 		info, errInfo := stream.Info(ctx)
 		if errInfo != nil {
-			return errInfo
+			return fmt.Errorf("snake: failed to get stream info for %s: %w", name, errInfo)
 		}
 
 		cfg := info.Config
 		cfg.Subjects = subjects
-		_, err = js.UpdateStream(ctx, cfg)
-		return err
+		if _, err = js.UpdateStream(ctx, cfg); err != nil {
+			return fmt.Errorf("snake: failed to update stream %s subjects: %w", name, err)
+		}
+		slog.Info("Stream exists, subjects updated", "name", name, "subjects", subjects)
+		return nil
 	}
 
 	// Create
+	slog.Info("Provisioning JetStream stream", "name", name, "subjects", subjects)
 	_, err = js.CreateStream(ctx, jetstream.StreamConfig{
 		Name:      name,
 		Subjects:  subjects,
@@ -131,7 +161,11 @@ func (s *Server) ProvisionStream(name string, subjects []string) error {
 		Replicas:  1,
 	})
 
-	return err
+	if err != nil {
+		return fmt.Errorf("snake: failed to create stream %s: %w", name, err)
+	}
+
+	return nil
 }
 
 // Shutdown stops the embedded NATS server.

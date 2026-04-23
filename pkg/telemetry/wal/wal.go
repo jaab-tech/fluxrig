@@ -8,8 +8,8 @@ import (
 	"os"
 	"sync"
 
+	"github.com/fxamacker/cbor/v2"
 	"github.com/tidwall/wal"
-	"github.com/vmihailenco/msgpack/v5"
 )
 
 var (
@@ -19,7 +19,7 @@ var (
 // Options aliases tidwall/wal.Options
 type Options = wal.Options
 
-// WAL wraps tidwall/wal with MsgPack encoding and auto-indexing.
+// WAL wraps tidwall/wal with CBOR encoding and auto-indexing.
 type WAL struct {
 	mu  sync.Mutex
 	dir string
@@ -42,7 +42,7 @@ func (w *WAL) Write(v interface{}) error {
 	defer w.mu.Unlock()
 
 	// 1. Marshal payload
-	data, err := msgpack.Marshal(v)
+	data, err := cbor.Marshal(v)
 	if err != nil {
 		return fmt.Errorf("marshal failed: %w", err)
 	}

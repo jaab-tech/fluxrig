@@ -5,20 +5,27 @@ package bus
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
-
 	"fmt"
+	"log/slog"
+	"os"
+	"time"
+
+	"github.com/fxamacker/cbor/v2"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
-	"github.com/vmihailenco/msgpack/v5"
 )
 
 // NatsBus is the concrete implementation of the Bus interface using NATS JetStream.
 type NatsBus struct {
-	conn       *nats.Conn
-	js         jetstream.JetStream
-	streamName string
+	conn          *nats.Conn
+	js            jetstream.JetStream
+	streamName    string
+	retryWait     time.Duration
+	retryAttempts int
 }
 
 // NewNatsBus creates a new instance.
@@ -38,8 +45,32 @@ func (n *NatsBus) Connect(url string, opts ConnectOptions) error {
 		nats.MaxReconnects(-1), // Infinite reconnects
 	}
 
-	if opts.RootCA != "" {
-		natsOpts = append(natsOpts, nats.RootCAs(opts.RootCA))
+	// --- Advanced TLS Configuration (ADR 0020) ---
+	if opts.InsecureSkipVerify || opts.RootCA != "" {
+		tlsConfig := &tls.Config{
+			InsecureSkipVerify: opts.InsecureSkipVerify, //nolint:gosec // allowed for dev/test environments
+			MinVersion:         tls.VersionTLS12,
+		}
+
+		if opts.RootCA != "" {
+			caCert, err := os.ReadFile(opts.RootCA)
+			if err != nil {
+				return fmt.Errorf("failed to read root ca: %w", err)
+			}
+			caCertPool := x509.NewCertPool()
+			if ok := caCertPool.AppendCertsFromPEM(caCert); !ok {
+				return fmt.Errorf("failed to append root ca (no PEM blocks found)")
+			}
+			tlsConfig.RootCAs = caCertPool
+		}
+
+		if opts.Domain != "" {
+			// If we have a domain (flux), we might want to use it as ServerName for verification
+			// But only if the cert supports it (it does in 08_tls_simple)
+			tlsConfig.ServerName = opts.Domain
+		}
+
+		natsOpts = append(natsOpts, nats.Secure(tlsConfig))
 	}
 
 	// 2. Connect to NATS Core
@@ -49,24 +80,35 @@ func (n *NatsBus) Connect(url string, opts ConnectOptions) error {
 	}
 	n.conn = nc
 
-	// 3. Initialize JetStream
+	n.retryWait = opts.SubscriptionRetryWait
+	n.retryAttempts = opts.SubscriptionRetryAttempts
+	if n.retryAttempts <= 0 {
+		n.retryAttempts = 1 // At least one attempt
+	}
+
+	// 3. Initialize JetStream (ADR 0020)
 	js, err := jetstream.New(nc)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to initialize jetstream: %w", err)
 	}
 	n.js = js
 
 	return nil
 }
 
-// Publish serializes the FluxMsg to MsgPack bytes and sends it via JetStream.
+// Publish serializes the FluxMsg to CBOR bytes and sends it via JetStream.
 func (n *NatsBus) Publish(ctx context.Context, subject string, msg *fluxmsg.FluxMsg) error {
 	if n.js == nil {
 		return errors.New("nats bus not connected")
 	}
 
-	// 1. Serialize to Binary (MsgPack)
-	data, err := msgpack.Marshal(msg)
+	// 1. Technical Enforcement (Transparent UTF-8 Guard)
+	if err := msg.Validate(); err != nil {
+		return fmt.Errorf("fluxmsg validation failed: %w", err)
+	}
+
+	// 2. Serialize to Binary (CBOR)
+	data, err := cbor.Marshal(msg)
 	if err != nil {
 		return err
 	}
@@ -83,7 +125,7 @@ func (n *NatsBus) Publish(ctx context.Context, subject string, msg *fluxmsg.Flux
 	return err
 }
 
-// PublishRaw sends pre-serialized data (MsgPack) with a specific deduplication ID.
+// PublishRaw sends pre-serialized data (CBOR) with a specific deduplication ID.
 func (n *NatsBus) PublishRaw(ctx context.Context, subject string, data []byte, fluxID uint64) error {
 	if n.js == nil {
 		return errors.New("nats bus not connected")
@@ -105,34 +147,40 @@ func (n *NatsBus) Subscribe(subject string, handler Handler) (Subscription, erro
 
 	ctx := context.Background()
 
-	// 1. Create Ordered Consumer (Ephemeral, In-Memory for speed)
-	// This gives us "Simple Subscribe" semantics but backed by the Stream.
-	cons, err := n.js.CreateOrUpdateConsumer(ctx, n.streamName, jetstream.ConsumerConfig{
-		Name:          "", // Ephemeral
-		FilterSubject: subject,
-		DeliverPolicy: jetstream.DeliverNewPolicy, // Only new messages
-	})
+	// 1. Create Ephemeral Pull Consumer (Standard Worker Pattern)
+	// We use a short retry loop to handle propagation latency during promotion.
+	slog.Info("NATS Subscribe Initiated", "stream", n.streamName, "subject", subject)
+
+	var cons jetstream.Consumer
+	var err error
+	for i := 0; i < n.retryAttempts; i++ {
+		cons, err = n.js.CreateOrUpdateConsumer(ctx, n.streamName, jetstream.ConsumerConfig{
+			FilterSubject: subject,
+			DeliverPolicy: jetstream.DeliverAllPolicy,
+			AckPolicy:     jetstream.AckExplicitPolicy, // Reliable baseline
+			MaxAckPending: 10000,                       // Prevent stalls during high-TPS
+		})
+		if err == nil {
+			break
+		}
+		time.Sleep(n.retryWait)
+	}
+
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create ephemeral consumer for %s: %w", subject, err)
 	}
 
 	// 2. Consume Messages
 	cancelCtx, cancel := context.WithCancel(ctx)
 
-	// We start a goroutine to consume
 	cc, err := cons.Consume(func(msg jetstream.Msg) {
-		// Auto-Ack for simple subscription
+		slog.Debug("NATS Bus Delivery", "subject", subject, "len", len(msg.Data()))
 		_ = msg.Ack()
-
-		// Deserialize
 		var fluxMsg fluxmsg.FluxMsg
-
-		if errUnmarshal := msgpack.Unmarshal(msg.Data(), &fluxMsg); errUnmarshal != nil {
-			return // Drop corrupt
+		if errUnmarshal := cbor.Unmarshal(msg.Data(), &fluxMsg); errUnmarshal != nil {
+			slog.Error("NATS Unmarshal Failed", "subject", subject, "error", errUnmarshal, "len", len(msg.Data()))
+			return
 		}
-
-		// NATS doesn't provide a context per message, so we start with Background.
-		// Middleware (InstrumentedBus) will enrich this.
 		handler(context.Background(), &fluxMsg)
 	})
 
@@ -156,15 +204,14 @@ func (n *NatsBus) SubscribeRaw(subject string, streamName string, handler RawHan
 
 	ctx := context.Background()
 
-	// 1. Create Ordered Consumer (Ephemeral)
-	// We MUST specify the stream name because $KV events are in KV_<bucket>, not flux-msg.
+	// 1. Create Ephemeral Pull Consumer (Standard Worker Pattern)
 	cons, err := n.js.CreateOrUpdateConsumer(ctx, streamName, jetstream.ConsumerConfig{
-		Name:          "", // Ephemeral
 		FilterSubject: subject,
-		DeliverPolicy: jetstream.DeliverNewPolicy,
+		DeliverPolicy: jetstream.DeliverAllPolicy,
+		AckPolicy:     jetstream.AckNonePolicy,
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create ephemeral consumer (raw): %w", err)
 	}
 
 	// 2. Consume Messages
@@ -214,7 +261,7 @@ func (n *NatsBus) SubscribeDurable(subject, durableName string, handler Handler)
 	cc, err := cons.Consume(func(msg jetstream.Msg) {
 		// Deserialize
 		var fluxMsg fluxmsg.FluxMsg
-		if errUnmarshal := msgpack.Unmarshal(msg.Data(), &fluxMsg); errUnmarshal != nil {
+		if errUnmarshal := cbor.Unmarshal(msg.Data(), &fluxMsg); errUnmarshal != nil {
 			// If corrupt, we still Ack to move past it?
 			// Ideally dead letter queue, but for now Ack + Log error (if logger avail)
 			_ = msg.Ack()
@@ -235,6 +282,10 @@ func (n *NatsBus) SubscribeDurable(subject, durableName string, handler Handler)
 		cancel: cancel,
 		ctx:    cancelCtx,
 	}, nil
+}
+
+func (n *NatsBus) Core() any {
+	return n.conn
 }
 
 func (n *NatsBus) Close() {

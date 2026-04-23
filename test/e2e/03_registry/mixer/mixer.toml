@@ -17,3 +17,6 @@ cluster_key_file = "cluster.key"
 
 [observability]
 enabled = false # Registry test focuses on registry, not telemetry storage
+
+[enrollment]
+auto_adopt = false

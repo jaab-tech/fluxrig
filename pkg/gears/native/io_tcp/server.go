@@ -48,9 +48,25 @@ func NewServer(cfg *Config, log *slog.Logger, emit func(*fluxmsg.FluxMsg), idGen
 
 func (s *Server) Start(ctx context.Context) error {
 	listenConfig := net.ListenConfig{Control: reusePortControl}
-	listener, err := listenConfig.Listen(ctx, "tcp", s.config.Bind)
+
+	// Resilient Bind-Retry Loop (ADR 0032)
+	// Handles transient port conflicts on macOS during rapid CI cycles.
+	var listener net.Listener
+	var err error
+	maxAttempts := 3
+	for i := 1; i <= maxAttempts; i++ {
+		listener, err = listenConfig.Listen(ctx, "tcp", s.config.Bind)
+		if err == nil {
+			break
+		}
+		if i < maxAttempts {
+			s.log.Warn("bind failed, retrying...", "attempt", i, "addr", s.config.Bind, "error", err)
+			time.Sleep(250 * time.Millisecond)
+		}
+	}
+
 	if err != nil {
-		return fmt.Errorf("bind failed: %w", err)
+		return fmt.Errorf("bind failed after %d attempts: %w", maxAttempts, err)
 	}
 
 	s.log.Info("listening", "addr", s.config.Bind)

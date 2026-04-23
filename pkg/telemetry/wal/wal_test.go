@@ -6,7 +6,7 @@ package wal
 import (
 	"testing"
 
-	"github.com/vmihailenco/msgpack/v5"
+	"github.com/fxamacker/cbor/v2"
 )
 
 func TestWAL_WriteRead(t *testing.T) {
@@ -31,7 +31,7 @@ func TestWAL_WriteRead(t *testing.T) {
 	}
 
 	var res map[string]string
-	if err := msgpack.Unmarshal(data, &res); err != nil {
+	if err := cbor.Unmarshal(data, &res); err != nil {
 		t.Fatalf("Unmarshal failed: %v", err)
 	}
 
@@ -76,4 +76,40 @@ func TestWAL_Truncate(t *testing.T) {
 	}
 }
 
-// Legacy Test compatibility (removed, creating new tests)
+func TestWAL_Size(t *testing.T) {
+	tmpDir := t.TempDir()
+	w, err := Open(tmpDir, nil)
+	if err != nil {
+		t.Fatalf("Failed to open WAL: %v", err)
+	}
+	defer func() { _ = w.Close() }()
+
+	_ = w.Write("test")
+	size, err := w.Size()
+	if err != nil {
+		t.Fatalf("Size failed: %v", err)
+	}
+	if size <= 0 {
+		t.Errorf("Expected positive size, got %d", size)
+	}
+}
+
+func TestWAL_FirstIndex(t *testing.T) {
+	tmpDir := t.TempDir()
+	w, err := Open(tmpDir, nil)
+	if err != nil {
+		t.Fatalf("Failed to open WAL: %v", err)
+	}
+	defer func() { _ = w.Close() }()
+
+	idx, _ := w.FirstIndex()
+	if idx != 0 {
+		t.Errorf("Expected 0 first index for empty log, got %d", idx)
+	}
+
+	_ = w.Write("test")
+	idx, _ = w.FirstIndex()
+	if idx != 1 {
+		t.Errorf("Expected 1 first index, got %d", idx)
+	}
+}

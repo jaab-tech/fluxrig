@@ -6,15 +6,17 @@ package bus
 import (
 	"context"
 	"sync"
+	"time"
 
+	"github.com/fxamacker/cbor/v2"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
-	"github.com/vmihailenco/msgpack/v5"
 )
 
 // MockBus is a memory-based implementation for testing.
 type MockBus struct {
 	PublishedMessages map[string][]*fluxmsg.FluxMsg
 	Handlers          map[string]Handler
+	kv                *MockKeyValue
 	mu                sync.RWMutex
 }
 
@@ -22,6 +24,9 @@ func NewMockBus() *MockBus {
 	return &MockBus{
 		PublishedMessages: make(map[string][]*fluxmsg.FluxMsg),
 		Handlers:          make(map[string]Handler),
+		kv: &MockKeyValue{
+			data: make(map[string]map[string][]byte),
+		},
 	}
 }
 
@@ -32,7 +37,7 @@ func (m *MockBus) Connect(url string, opts ConnectOptions) error {
 // PublishRaw implements PublishRaw by unmarshaling and calling Publish (simulating wire).
 func (m *MockBus) PublishRaw(ctx context.Context, subject string, data []byte, fluxID uint64) error {
 	var msg fluxmsg.FluxMsg
-	if err := msgpack.Unmarshal(data, &msg); err != nil {
+	if err := cbor.Unmarshal(data, &msg); err != nil {
 		return err
 	}
 	// Verify ID matches if needed, but for mock just publish
@@ -81,16 +86,20 @@ func (m *MockBus) SubscribeDurable(subject, durableName string, handler Handler)
 
 func (m *MockBus) SubscribeRaw(subject string, streamName string, handler RawHandler) (Subscription, error) {
 	// For mock, we can assume normal subscribe behavior, ignoring streamName
-	// But we need to adapt implementation since RawHandler != Handler
-	// Mock implementation likely doesn't support Raw dispatch logic fully yet.
-	// We'll return a no-op subscription for now to satisfy interface.
 	return &MockSubscription{}, nil
 }
+
+func (m *MockBus) Core() any { return nil }
 
 func (m *MockBus) Close() {}
 
 func (m *MockBus) KV() KeyValue {
-	return nil // Return nil or a mock KV implementation if needed
+	if m.kv == nil {
+		m.kv = &MockKeyValue{
+			data: make(map[string]map[string][]byte),
+		}
+	}
+	return m.kv
 }
 
 // GetMessages safely retrieves messages for a subject
@@ -110,5 +119,48 @@ func (m *MockBus) GetMessages(subject string) []*fluxmsg.FluxMsg {
 type MockSubscription struct{}
 
 func (s *MockSubscription) Unsubscribe() error {
+	return nil
+}
+
+type MockKeyValue struct {
+	data map[string]map[string][]byte
+	mu   sync.RWMutex
+}
+
+func (m *MockKeyValue) Put(bucket, key string, value []byte) (uint64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.data == nil {
+		m.data = make(map[string]map[string][]byte)
+	}
+	if m.data[bucket] == nil {
+		m.data[bucket] = make(map[string][]byte)
+	}
+	m.data[bucket][key] = value
+	return 1, nil
+}
+
+func (m *MockKeyValue) Get(bucket, key string) ([]byte, uint64, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.data == nil {
+		return nil, 0, nil
+	}
+	if m.data[bucket] == nil {
+		return nil, 0, nil
+	}
+	val, ok := m.data[bucket][key]
+	if !ok {
+		return nil, 0, nil
+	}
+	return val, 1, nil
+}
+
+func (m *MockKeyValue) Delete(bucket, key string) error { return nil }
+func (m *MockKeyValue) Watch(bucket, keys string, handler KVHandler) (Subscription, error) {
+	return &MockSubscription{}, nil
+}
+func (m *MockKeyValue) Keys(bucket string) ([]string, error) { return nil, nil }
+func (m *MockKeyValue) EnsureBucket(bucket string, storage string, replicas int, ttl time.Duration) error {
 	return nil
 }

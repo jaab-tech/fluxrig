@@ -25,6 +25,14 @@ type ScenarioPublisher interface {
 	Publish(ctx context.Context, subject string, msg *fluxmsg.FluxMsg) error
 }
 
+// ScenarioManager defines the interface for managing scenarios.
+type ScenarioManager interface {
+	Import(ctx context.Context, content []byte, dryRun bool) (string, error)
+	Activate(ctx context.Context, name string) error
+	CurrentVersion() string
+	GetActiveScenario() *registry.Scenario
+}
+
 // ScenarioController manages the lifecycle of the Active Scenario.
 type ScenarioController struct {
 	log       *slog.Logger
@@ -257,13 +265,12 @@ func (c *ScenarioController) registerScenarioEntities(ctx context.Context, s *re
 				c.log.Info("activated rack", "name", rack.Name)
 			}
 
-			// Get the rack's machine_id
-			machineID, err := c.store.GetRackByName(ctx, rack.Name)
+			// Get the rack's machine_id with a short retry to handle bootstrap races
+			machineID, err := c.waitForRack(ctx, rack.Name)
 			if err != nil {
-				c.log.Warn("rack not found in registry", "name", rack.Name, "error", err)
-			} else {
-				rackMachineIDs[rack.Name] = machineID
+				return fmt.Errorf("failed to register scenario: rack %s not found: %w", rack.Name, err)
 			}
+			rackMachineIDs[rack.Name] = machineID
 		}
 	}
 
@@ -430,15 +437,14 @@ func (c *ScenarioController) pushScenarioToRacks(ctx context.Context, s *registr
 			continue
 		}
 
-		// Get rack machineID from registry
+		// Get rack machineID from registry with retry
 		var machineID uint16 = 0
 		if c.store != nil {
-			if mid, err := c.store.GetRackByName(ctx, rack.Name); err == nil {
-				machineID = mid
-			} else {
-				c.log.Warn("rack not in registry, skipping push", "rack", rack.Name, "error", err)
-				continue
+			mid, err := c.waitForRack(ctx, rack.Name)
+			if err != nil {
+				return fmt.Errorf("failed to push scenario: rack %s not in registry: %w", rack.Name, err)
 			}
+			machineID = mid
 		}
 
 		// Build payload
@@ -481,4 +487,22 @@ func (c *ScenarioController) pushScenarioToRacks(ctx context.Context, s *registr
 	}
 
 	return nil
+}
+
+// waitForRack polls the registry for a rack registration for up to 5 seconds.
+func (c *ScenarioController) waitForRack(ctx context.Context, name string) (uint16, error) {
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		mid, err := c.store.GetRackByName(ctx, name)
+		if err == nil {
+			return mid, nil
+		}
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+			// retry
+		}
+	}
+	return 0, fmt.Errorf("timeout waiting for rack registration")
 }

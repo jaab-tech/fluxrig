@@ -14,6 +14,7 @@ type Rack struct {
 	MachineID uint16    `json:"machine_id"`
 	Name      string    `json:"name"`
 	Status    string    `json:"status"` // active, pending, offline
+	Version   string    `json:"version"`
 	IP        string    `json:"ip"`
 	Port      int       `json:"port"` // Added: Support NAT/Localhost
 	FirstSeen time.Time `json:"first_seen"`
@@ -53,6 +54,9 @@ type Registry interface {
 
 	// UpdateStatus changes the status of a rack (e.g. suspend/activate).
 	UpdateStatus(ctx context.Context, machineID uint16, status string) error
+
+	// SetAutoAdopt enables or disables automatic activation of new Racks.
+	SetAutoAdopt(enabled bool)
 
 	// Telemetry Queries
 	QueryLogs(ctx context.Context, query LogQuery) ([]LogEntry, error)

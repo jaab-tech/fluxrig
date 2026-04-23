@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fxamacker/cbor/v2"
 	"github.com/jaab-tech/fluxrig/pkg/bus"
 	"github.com/jaab-tech/fluxrig/pkg/config"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
@@ -15,7 +16,6 @@ import (
 	"github.com/jaab-tech/fluxrig/pkg/snake"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
-	"github.com/vmihailenco/msgpack/v5"
 )
 
 func setupBus(t *testing.T) (*snake.Server, *bus.NatsBus, string) {
@@ -105,7 +105,7 @@ func TestSendHello(t *testing.T) {
 
 	// Unpack FluxMsg
 	var fMsg fluxmsg.FluxMsg
-	if errUnmarshal := msgpack.Unmarshal(msg.Data, &fMsg); errUnmarshal != nil {
+	if errUnmarshal := cbor.Unmarshal(msg.Data, &fMsg); errUnmarshal != nil {
 		t.Fatal(errUnmarshal)
 	}
 
@@ -149,7 +149,7 @@ func TestSendHeartbeat(t *testing.T) {
 	}
 
 	var fMsg fluxmsg.FluxMsg
-	if errUnmarshal := msgpack.Unmarshal(msg.Data, &fMsg); errUnmarshal != nil {
+	if errUnmarshal := cbor.Unmarshal(msg.Data, &fMsg); errUnmarshal != nil {
 		t.Fatalf("Failed to unmarshal FluxMsg: %v", errUnmarshal)
 	}
 

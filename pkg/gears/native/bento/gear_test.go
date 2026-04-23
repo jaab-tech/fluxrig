@@ -78,6 +78,7 @@ func (m *MockContext) Logger() *slog.Logger     { return slog.Default() }
 func (m *MockContext) IDGen() sdk.IDGenerator   { return nil }
 func (m *MockContext) Bus() bus.Bus             { return nil }
 func (m *MockContext) Manager() manager.Manager { return nil }
+func (m *MockContext) ControlPlane() any        { return nil }
 
 func TestStrictValidation(t *testing.T) {
 	g := New()

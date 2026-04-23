@@ -1,5 +1,5 @@
 # Versioning
-VERSION ?= $(shell cat VERSION 2>/dev/null || echo "0.0.0-dev")
+VERSION ?= $(shell cat VERSION)
 COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo "none")
 DATE := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 # Check if dirty
@@ -10,8 +10,13 @@ endif
 MODULE_NAME := github.com/jaab-tech/fluxrig
 
 # Go settings
-GO_FLAGS := -v
+GO_FLAGS ?= -v
+# Use local GOPATH/GOMODCACHE if system is locked
+GOMODCACHE ?= $(shell pwd)/.gomod_cache
+export GOMODCACHE
+
 LDFLAGS := -w -s \
+	-extldflags "-Wl,-ld_classic" \
 	-X '$(MODULE_NAME)/pkg/version.Version=$(VERSION)' \
 	-X '$(MODULE_NAME)/pkg/version.Commit=$(COMMIT)' \
 	-X '$(MODULE_NAME)/pkg/version.BuildDate=$(DATE)' \
@@ -48,12 +53,12 @@ OPS_DIR ?= ../fluxrig-ops
 
 catalog: ## Generate log message catalog
 	@echo "Generating log catalog..."
-	@go run scripts/catalog_logs.go > $(OPS_DIR)/docs/internal/log_catalog.csv
+	-go run scripts/catalog_logs.go > $(OPS_DIR)/docs/internal/log_catalog.csv || true
 
 test: ## Run unit tests with race detection and coverage
 	@echo "Running tests..."
 	@mkdir -p test/test_logs
-	go test -race -coverprofile=test/test_logs/coverage.out $$(go list ./... | grep -v '/test/utils' | grep -v 'cmd/fluxrig$$' | grep -v 'cmd/fluxrig-mixer$$')
+	go test -race -ldflags "$(LDFLAGS)" -coverprofile=test/test_logs/coverage.out $$(go list ./... | grep -v '/test/utils' | grep -v 'cmd/fluxrig$$' | grep -v 'cmd/fluxrig-mixer$$')
 	@go tool cover -func=test/test_logs/coverage.out | grep total | awk '{print "Total Coverage: " $$3}'
 
 lint: ## Run golangci-lint
@@ -104,7 +109,9 @@ clean: ## Remove build artifacts and temporary files
 	rm -f fluxrig_test.toml
 	rm -f cluster.key
 	rm -f cluster.key.pub
-	rm -f $(OPS_DIR)/docs/internal/log_catalog.csv
+	-rm -f $(OPS_DIR)/docs/internal/log_catalog.csv
+	@if [ -d .gomod_cache ]; then go clean -modcache; fi
+	rm -rf .gomod_cache
 	go clean -cache
 
 # Python / Test Automation
@@ -136,11 +143,22 @@ test-scenarios: $(VENV) build ## Run Robot Framework Scenarios (Multi-Rack)
 	@mkdir -p test/robot/scenarios
 	$(ROBOT) --outputdir test/robot/scenarios test/robot/scenarios/setup_scenarios.robot
 
+robot-prep: ## Kill lingering Mixer/Rack/NATS/ISO processes (Hardening)
+	@echo "--------------------------------------------------"
+	@echo "Locking down environment for Robot execution..."
+	-@pkill -9 fluxrig 2>/dev/null || true
+	-@pkill -9 fluxrig-mixer 2>/dev/null || true
+	-@pkill -9 iso8583-tool 2>/dev/null || true
+	-@lsof -ti:8080,4222,8583,54321,9120 2>/dev/null | xargs kill -9 2>/dev/null || true
+	@echo "Environment Secured."
+	@echo "--------------------------------------------------"
+	@sleep 1
+
 help: ## Display this help screen
 	@grep -h -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}'
 # Robot Framework (Validation)
 .PHONY: robot
-robot: build ## Run Robot Framework validation suite
+robot: build-bin ## Run Robot Framework validation suite
 	@echo "Running Robot Framework tests..."
 	@cd test/robot && ./run.sh
 
@@ -156,15 +174,17 @@ clean-robot: ## Clean Robot Framework artifacts
 	@find test/robot -name "work" -type l -delete
 
 .PHONY: openapi
-openapi: ## Generate OpenAPI specification
+openapi: ## Generate OpenAPI specification and sync to ops
 	@echo "Generating OpenAPI spec..."
+	@mkdir -p pkg/mixer/api/docs
 	@if command -v swag >/dev/null; then \
-		swag init -g cmd/fluxrig-mixer/main.go -o $(OPS_DIR)/docs/public/5_reference --outputTypes yaml; \
+		swag init -g cmd/fluxrig-mixer/main.go -o pkg/mixer/api/docs --outputTypes yaml,go; \
 	else \
-		$(shell go env GOPATH)/bin/swag init -g cmd/fluxrig-mixer/main.go -o $(OPS_DIR)/docs/public/5_reference --outputTypes yaml; \
+		$(shell go env GOPATH)/bin/swag init -g cmd/fluxrig-mixer/main.go -o pkg/mixer/api/docs --outputTypes yaml,go; \
 	fi
-	@mv $(OPS_DIR)/docs/public/5_reference/swagger.yaml $(OPS_DIR)/docs/public/5_reference/openapi.yaml
-	@echo "Spec generated at $(OPS_DIR)/docs/public/5_reference/openapi.yaml"
+	@cp pkg/mixer/api/docs/swagger.yaml $(OPS_DIR)/docs/public/reference/openapi.yaml
+	@cp pkg/mixer/api/docs/swagger.yaml $(OPS_DIR)/website/static/openapi.yaml
+	@echo "Spec generated at pkg/mixer/api/docs/ and synced to $(OPS_DIR)"
 
 .PHONY: iso8583-tool
 iso8583-tool: ## Build iso8583-tool (Load Gen & Echo Server)
@@ -172,27 +192,35 @@ iso8583-tool: ## Build iso8583-tool (Load Gen & Echo Server)
 	@go build -o bin/iso8583-tool ./cmd/iso8583-tool
 
 test-robot-perf: iso8583-tool ## Run Robot Performance Suite
-	@echo "Running Robot Performance Suite..."
-	@./test/robot/run.sh test/robot/suites/iso8583/performance.robot
+	@echo "Running Robot Performance Suite (Staged Load)..."
+	@./test/robot/run.sh test/robot/suites/iso8583/server_staged_load.robot
 
 test-robot-iso: iso8583-tool ## Run Robot ISO8583 Suite
-	@echo "Running Robot ISO8583 Suite..."
-	@./test/robot/run.sh test/robot/suites/iso8583/performance.robot
+	@echo "Running Robot ISO8583 Suite (Validation)..."
+	@./test/robot/run.sh test/robot/suites/iso8583/server_validation.robot
 
-test-robot-coatcheck: build ## Run Robot Coatcheck Suite
+test-robot-coatcheck: build-bin ## Run Robot Coatcheck Suite
 	@echo "Running Robot Coatcheck Suite..."
 	@./test/robot/run.sh test/robot/suites/iso8583/coatcheck_loop.robot
 
-test-robot: test-robot-iso test-robot-coatcheck ## Run all Robot Framework suites
+test-robot-topology: robot-prep build-bin ## Run Robot Topology Suite
+	@echo "Running Topology Test..."
+	@cd test/robot && ./run.sh suites/topology/cross_rack.robot
 
-test-robot-staged: build ## Run Robot Staged Load Suite (QoS Validation)
+test-robot-telemetry: robot-prep build-bin ## Run Robot Telemetry Suite
+	@echo "Running Telemetry Coverage Test..."
+	@cd test/robot && ./run.sh suites/telemetry/force_log_coverage.robot
+
+test-robot: test-robot-iso test-robot-coatcheck test-robot-topology test-robot-telemetry ## Run all Robot Framework suites
+
+test-robot-staged: robot-prep build-bin ## Run Robot Staged Load Suite (QoS Validation)
 	@echo "Running Staged Load Test..."
 	@cd test/robot && ./run.sh suites/iso8583/server_staged_load.robot
 
-test-robot-resilience: build ## Run Robot Resilience Suite
+test-robot-resilience: robot-prep build-bin ## Run Robot Resilience Suite
 	@echo "Running Resilience Test..."
 	@cd test/robot && ./run.sh suites/iso8583/resilience.robot
 
-test-robot-validation: build ## Run Robot Server Validation
+test-robot-validation: robot-prep build-bin ## Run Robot Server Validation
 	@echo "Running Server Validation..."
 	@cd test/robot && ./run.sh suites/iso8583/server_validation.robot

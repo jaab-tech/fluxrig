@@ -60,27 +60,20 @@ func TestTelemetryCommands(t *testing.T) {
 	// We should be careful about parallel tests.
 
 	// Logs
-	logsCmd.SetArgs([]string{
-		"--api-url", ts.URL,
-		"--limit", "1",
-		"--min-level", "INFO",
-	})
-	// Redirect stdout?
-	// The command writes to os.Stdout wrapped in TabWriter.
-	// We can't easily capture os.Stdout without pipe tricks.
-	// But coverage counts execution.
-	// we can check err.
-	if err := logsCmd.Execute(); err != nil {
+	_ = logsCmd.Flags().Set("api-url", ts.URL)
+	_ = logsCmd.Flags().Set("limit", "1")
+	_ = logsCmd.Flags().Set("min-level", "INFO")
+
+	if err := logsCmd.RunE(logsCmd, nil); err != nil {
 		t.Errorf("logsCmd failed: %v", err)
 	}
 
 	// Metrics
-	metricsCmd.SetArgs([]string{
-		"--api-url", ts.URL,
-		"--limit", "1",
-		"--name", "cpu",
-	})
-	if err := metricsCmd.Execute(); err != nil {
+	_ = metricsCmd.Flags().Set("api-url", ts.URL)
+	_ = metricsCmd.Flags().Set("limit", "1")
+	_ = metricsCmd.Flags().Set("name", "cpu")
+
+	if err := metricsCmd.RunE(metricsCmd, nil); err != nil {
 		t.Errorf("metricsCmd failed: %v", err)
 	}
 

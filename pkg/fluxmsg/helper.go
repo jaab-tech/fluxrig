@@ -19,50 +19,102 @@ func (m *FluxMsg) Set(key string, val any) error {
 		return nil
 	}
 
-	// Navigate to the leaf
-	current := m.Data
+	var current any = m.Data
 	for i := 0; i < len(parts)-1; i++ {
 		part := parts[i]
-		next, ok := current[part]
-		if !ok {
-			// Create new map
-			newMap := make(map[string]any)
-			current[part] = newMap
-			current = newMap
-		} else {
-			// Type assert
-			asMap, ok := next.(map[string]any)
+		switch v := current.(type) {
+		case map[string]any:
+			next, ok := v[part]
 			if !ok {
-				return fmt.Errorf("key conflict at '%s': not a map", part)
+				newMap := make(map[string]any)
+				v[part] = newMap
+				current = newMap
+			} else {
+				switch next.(type) {
+				case map[string]any, map[any]any:
+					current = next
+				default:
+					return fmt.Errorf("key conflict at '%s': not a map", part)
+				}
 			}
-			current = asMap
+		case map[any]any:
+			next, ok := v[part]
+			if !ok {
+				newMap := make(map[string]any)
+				v[part] = newMap
+				current = newMap
+			} else {
+				switch next.(type) {
+				case map[string]any, map[any]any:
+					current = next
+				default:
+					return fmt.Errorf("key conflict at '%s': not a map", part)
+				}
+			}
+		default:
+			return fmt.Errorf("key conflict at '%s': not a map", part)
 		}
 	}
 
-	// Set value
-	current[parts[len(parts)-1]] = val
+	part := parts[len(parts)-1]
+	switch v := current.(type) {
+	case map[string]any:
+		v[part] = val
+	case map[any]any:
+		v[part] = val
+	default:
+		return fmt.Errorf("key conflict at leaf: not a map")
+	}
+
 	return nil
 }
 
 // Get retrieves a value using dot notation
 func (m *FluxMsg) Get(key string) (any, bool) {
 	parts := strings.Split(key, ".")
-	current := m.Data
+	var current any = m.Data
 
 	for i := 0; i < len(parts)-1; i++ {
-		next, ok := current[parts[i]]
-		if !ok {
+		part := parts[i]
+		switch v := current.(type) {
+		case map[string]any:
+			next, ok := v[part]
+			if !ok {
+				return nil, false
+			}
+			switch next.(type) {
+			case map[string]any, map[any]any:
+				current = next
+			default:
+				return nil, false
+			}
+		case map[any]any:
+			next, ok := v[part]
+			if !ok {
+				return nil, false
+			}
+			switch next.(type) {
+			case map[string]any, map[any]any:
+				current = next
+			default:
+				return nil, false
+			}
+		default:
 			return nil, false
 		}
-		asMap, ok := next.(map[string]any)
-		if !ok {
-			return nil, false
-		}
-		current = asMap
 	}
 
-	val, ok := current[parts[len(parts)-1]]
-	return val, ok
+	part := parts[len(parts)-1]
+	switch v := current.(type) {
+	case map[string]any:
+		val, ok := v[part]
+		return val, ok
+	case map[any]any:
+		val, ok := v[part]
+		return val, ok
+	}
+
+	return nil, false
 }
 
 // GetString helper

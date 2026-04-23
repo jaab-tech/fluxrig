@@ -5,7 +5,7 @@ package fluxmsg
 
 import (
 	"fmt"
-	"github.com/vmihailenco/msgpack/v5"
+	"github.com/fxamacker/cbor/v2"
 )
 
 // System Subjects
@@ -20,24 +20,25 @@ const (
 
 // HelloPayload is sent by the Rack Agent on startup.
 type HelloPayload struct {
-	Name      string         `msgpack:"name"`
-	MachineID uint16         `msgpack:"machine_id"`
-	Secret    string         `msgpack:"secret"` // Bearer Token (Optional on first connect)
-	IP        string         `msgpack:"ip"`
-	Port      int            `msgpack:"port"`
-	Version   string         `msgpack:"version"`
-	Config    map[string]any `msgpack:"config"`
+	Name      string         `cbor:"name"`
+	Nonce     string         `cbor:"nonce"` // Unique session nonce for response topic isolation
+	MachineID uint16         `cbor:"machine_id"`
+	Secret    string         `cbor:"secret"` // Bearer Token (Optional on first connect)
+	IP        string         `cbor:"ip"`
+	Port      int            `cbor:"port"`
+	Version   string         `cbor:"version"`
+	Config    map[string]any `cbor:"config"`
 }
 
 // HeartbeatPayload is sent periodically by the Rack.
 type HeartbeatPayload struct {
-	MachineID uint16         `msgpack:"machine_id"`
-	Stats     map[string]any `msgpack:"stats"`
-	Config    map[string]any `msgpack:"config"`
+	MachineID uint16         `cbor:"machine_id"`
+	Stats     map[string]any `cbor:"stats"`
+	Config    map[string]any `cbor:"config"`
 }
 
 // ToData converts the struct to a map[string]any for FluxMsg.Data.
-// We use MsgPack round-trip to respect tags and types.
+// We use CBOR round-trip to respect tags and types.
 func (h *HelloPayload) ToData() (map[string]any, error) {
 	return toMap(h)
 }
@@ -66,17 +67,17 @@ func ParseHeartbeat(data map[string]any) (*HeartbeatPayload, error) {
 
 // HelloResponse is sent by the Mixer to the Rack.
 type HelloResponse struct {
-	Status   string            `msgpack:"status"`   // active, pending, inactive
-	Passport []byte            `msgpack:"passport"` // Null if no new passport
-	Config   map[string]string `msgpack:"config"`   // Dynamic Config (Optional)
-	Message  string            `msgpack:"message"`  // Human readable status message
+	Status   string            `cbor:"status"`   // active, pending, inactive
+	Passport []byte            `cbor:"passport"` // Null if no new passport
+	Config   map[string]string `cbor:"config"`   // Dynamic Config (Optional)
+	Message  string            `cbor:"message"`  // Human readable status message
 }
 
 // HeartbeatResponse is sent by the Mixer to the Rack.
 type HeartbeatResponse struct {
-	Status   string `msgpack:"status"`   // active, pending, inactive
-	Command  string `msgpack:"command"`  // e.g., "reconnect", "sleep"
-	Passport []byte `msgpack:"passport"` // Updated identity (optional)
+	Status   string `cbor:"status"`   // active, pending, inactive
+	Command  string `cbor:"command"`  // e.g., "reconnect", "sleep"
+	Passport []byte `cbor:"passport"` // Updated identity (optional)
 }
 
 func (h *HelloResponse) ToData() (map[string]any, error) {
@@ -104,25 +105,25 @@ func ParseHeartbeatResponse(data map[string]any) (*HeartbeatResponse, error) {
 	return &h, nil
 }
 
-// Helper generic converters using MsgPack instead of JSON
+// Helper generic converters using CBOR instead of JSON
 func toMap(v any) (map[string]any, error) {
-	b, err := msgpack.Marshal(v)
+	b, err := cbor.Marshal(v)
 	if err != nil {
 		return nil, err
 	}
 	var m map[string]any
-	if err := msgpack.Unmarshal(b, &m); err != nil {
+	if err := cbor.Unmarshal(b, &m); err != nil {
 		return nil, err
 	}
 	return m, nil
 }
 
 func fromMap(m map[string]any, v any) error {
-	b, err := msgpack.Marshal(m)
+	b, err := cbor.Marshal(m)
 	if err != nil {
 		return err
 	}
-	if err := msgpack.Unmarshal(b, v); err != nil {
+	if err := cbor.Unmarshal(b, v); err != nil {
 		return fmt.Errorf("failed to parse payload: %w", err)
 	}
 	return nil
@@ -130,12 +131,12 @@ func fromMap(m map[string]any, v any) error {
 
 // ScenarioPayload is sent by the Mixer to push scenario updates to Racks.
 type ScenarioPayload struct {
-	Version   string `msgpack:"version"`    // Scenario version
-	Name      string `msgpack:"name"`       // Scenario name
-	RackName  string `msgpack:"rack_name"`  // Target rack name
-	MachineID uint16 `msgpack:"machine_id"` // Target machine ID
-	Scenario  []byte `msgpack:"scenario"`   // YAML-encoded scenario (projected for this rack)
-	Timestamp int64  `msgpack:"timestamp"`  // Unix timestamp
+	Version   string `cbor:"version"`    // Scenario version
+	Name      string `cbor:"name"`       // Scenario name
+	RackName  string `cbor:"rack_name"`  // Target rack name
+	MachineID uint16 `cbor:"machine_id"` // Target machine ID
+	Scenario  []byte `cbor:"scenario"`   // YAML-encoded scenario (projected for this rack)
+	Timestamp int64  `cbor:"timestamp"`  // Unix timestamp
 }
 
 func (s *ScenarioPayload) ToData() (map[string]any, error) {

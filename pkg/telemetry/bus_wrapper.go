@@ -37,6 +37,10 @@ func (ib *InstrumentedBus) Close() {
 	ib.next.Close()
 }
 
+func (ib *InstrumentedBus) Core() any {
+	return ib.next.Core()
+}
+
 func (ib *InstrumentedBus) KV() bus.KeyValue {
 	return ib.next.KV()
 }
@@ -115,7 +119,7 @@ func (ib *InstrumentedBus) Subscribe(subject string, handler bus.Handler) (bus.S
 	// Wrap handler to measure RX metrics & Extract Traces
 	wrappedHandler := func(ctx context.Context, msg *fluxmsg.FluxMsg) {
 		// 1. Extract Tracing Context
-		// NATS doesn't pass context over wire natively as header in our wrapper (msgpack setup),
+		// NATS doesn't pass context over wire natively as header in our wrapper (cbor setup),
 		// so we rely on msg.Metadata carrying the W3C traceparent.
 		carrier := propagation.MapCarrier(msg.Metadata)
 		extractedCtx := otel.GetTextMapPropagator().Extract(ctx, carrier)

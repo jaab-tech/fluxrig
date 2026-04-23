@@ -8,7 +8,7 @@ wal_max_size_mb = 500
 state_file = "state.flux"
 
 [rack]
-name = "comp-node-01"
+name = "rack-tcp-01"
 # MachineID 100 is the first assigned by Mixer in fresh DB
 machine_id = 100
 # data_dir = "./data" (Uses store.dir)

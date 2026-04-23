@@ -69,7 +69,7 @@ openssl genrsa -out "${WORK_DIR}/certs/ca.key" 2048 2>/dev/null
 openssl req -new -x509 -days 365 -key "${WORK_DIR}/certs/ca.key" -subj "/C=UR/ST=MVD/L=MVD/O=JAAB/CN=FluxRig Root CA" -out "${WORK_DIR}/certs/ca.crt" 2>/dev/null
 openssl genrsa -out "${WORK_DIR}/certs/server.key" 2048 2>/dev/null
 openssl req -new -key "${WORK_DIR}/certs/server.key" -subj "/C=UR/ST=MVD/L=MVD/O=JAAB/CN=localhost" -out "${WORK_DIR}/certs/server.csr" 2>/dev/null
-echo "subjectAltName=DNS:localhost,IP:127.0.0.1" > "${WORK_DIR}/certs/extfile.cnf"
+echo "subjectAltName=DNS:localhost,IP:127.0.0.1,DNS:flux" > "${WORK_DIR}/certs/extfile.cnf"
 openssl x509 -req -days 365 -in "${WORK_DIR}/certs/server.csr" -CA "${WORK_DIR}/certs/ca.crt" -CAkey "${WORK_DIR}/certs/ca.key" -CAcreateserial -out "${WORK_DIR}/certs/server.crt" -extfile "${WORK_DIR}/certs/extfile.cnf" 2>/dev/null
 
 CA_CERT="${WORK_DIR}/certs/ca.crt"

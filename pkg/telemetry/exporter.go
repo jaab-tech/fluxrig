@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/jaab-tech/fluxrig/pkg/bus"
@@ -197,11 +198,21 @@ func NewMetricExporter(w *NatsWriter) *MetricExporter {
 func (e *MetricExporter) Export(ctx context.Context, metrics *metricdata.ResourceMetrics) error {
 	for _, scopeMetrics := range metrics.ScopeMetrics {
 		for _, m := range scopeMetrics.Metrics {
-			// Simplified Metric Export (Gauge/Sum only for demo)
-			// Loop points
-			// Convert to simple format
 			points := resolvePoints(m)
+			resAttrs := metrics.Resource.Attributes()
+			idAttrs := make(map[string]interface{})
+			for _, kv := range resAttrs {
+				k := string(kv.Key)
+				if isAllowedMetricAttribute(k) {
+					idAttrs[k] = kv.Value.AsInterface()
+				}
+			}
+
 			for _, p := range points {
+				for k, v := range idAttrs {
+					p.Attributes[k] = v
+				}
+
 				payload := map[string]interface{}{
 					"attributes":  p.Attributes,
 					"entity_id":   e.entityID,
@@ -210,16 +221,12 @@ func (e *MetricExporter) Export(ctx context.Context, metrics *metricdata.Resourc
 					"value":       p.Value,
 				}
 
-				// Fix: fluxmsg.NewFromData -> manual wrap
 				msg := fluxmsg.New()
 				msg.FluxID, _ = e.gen.NextFluxID()
 				msg.Data = payload
 				msg.Metadata["type"] = "telemetry.metric"
-				msg.Metadata["metric.name"] = m.Name + p.Suffix // For easier filtering if needed
-				// fluxmsg.Data is map[string]any.
-				// Sink handles JSON marshaling if required.
+				msg.Metadata["metric.name"] = m.Name + p.Suffix
 
-				// QoS: Strict timeout for telemetry to avoid blocking the hot path
 				exportCtx, cancel := context.WithTimeout(ctx, e.timeout)
 				err := e.bus.Publish(exportCtx, e.baseSubject+".metrics", msg)
 				cancel()
@@ -353,7 +360,7 @@ func isAllowedMetricAttribute(k string) bool {
 	case "state", "cpu", "device", "disk", "usage", "direction", "process", "filesystem":
 		return true
 	}
-	return false
+	return strings.HasPrefix(k, "flux.")
 }
 
 func (e *MetricExporter) Aggregation(k sdkmetric.InstrumentKind) sdkmetric.Aggregation {

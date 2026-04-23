@@ -92,6 +92,7 @@ func (a *App) Run() error {
 
 	// 4. Initialize Registry
 	reg := registry.NewDuckDBRegistry(store)
+	reg.SetAutoAdopt(cfg.Enrollment.AutoAdopt)
 
 	// 4b. Self-Registration (Mixer Metadata)
 	if cfg.Mixer.MixerName == "" {
@@ -132,9 +133,15 @@ func (a *App) Run() error {
 
 	slog.Info("Snake (NATS) is ready", "url", snakeSrv.ClientURL())
 
+	// 5b. Provision Telemetry Stream (Explicitly, as Snake only defaults to one)
+	if errTel := snakeSrv.ProvisionStream("flux-telemetry", []string{"flux.telemetry.>"}); errTel != nil {
+		return fmt.Errorf("failed to provision telemetry stream: %w", errTel)
+	}
+	slog.Info("Telemetry stream provisioned")
+
 	// Clear old snake sessions
 	if errClr := store.ClearSnakes(context.Background()); errClr != nil {
-		slog.Warn("Failed to clear old snakes", "error", errClr)
+		slog.Debug("Failed to clear old snakes", "error", errClr)
 	}
 
 	// Start Snake Stats Loop (Background)
@@ -152,7 +159,7 @@ func (a *App) Run() error {
 		jsUrl = "nats://localhost:4222"
 	}
 
-	if errJS := router.ConfigureJetStream(jsUrl, cfg.Snake.Durable, cfg.Snake.RootCAFile, wmLogger); errJS != nil {
+	if errJS := router.ConfigureJetStream(jsUrl, cfg.Snake.ClusterName, cfg.Snake.Durable, cfg.Snake.RootCAFile, cfg.Snake.BusinessStreamMaxAge, cfg.Snake.TelemetryStreamMaxAge, wmLogger); errJS != nil {
 		return fmt.Errorf("failed to configure router jetstream: %w", errJS)
 	}
 
@@ -171,12 +178,12 @@ func (a *App) Run() error {
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
 			if errShutdown := shutdownTel(shutdownCtx); errShutdown != nil {
-				slog.Warn("Telemetry shutdown error", "error", errShutdown)
+				slog.Debug("Telemetry shutdown error (transient)", "error", errShutdown)
 			}
 		}
 		if stopSink != nil {
 			if errStop := stopSink(); errStop != nil {
-				slog.Warn("Sink stop error", "error", errStop)
+				slog.Debug("Sink stop error (transient)", "error", errStop)
 			}
 		}
 	}()
@@ -320,10 +327,7 @@ func (a *App) Run() error {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	sig := <-stop
-	slog.Info("Received signal (ignored)", "signal", sig)
-
-	sig2 := <-stop
-	slog.Info("Shutting down Mixer...", "signal", sig2)
+	slog.Info("Shutting down Mixer...", "signal", sig)
 	return nil
 }
 
@@ -389,7 +393,7 @@ func (a *App) initTelemetry(url string, eid uint64, name string, idGen *idgen.ID
 
 	shutdownTelemetry, err := telemetry.Init(context.Background(), telCfg, telBus, bufHandler, idGen)
 	if err != nil {
-		slog.Warn("Failed to initialize telemetry", "error", err)
+		slog.Info("Failed to initialize telemetry", "error", err)
 		telBus.Close()
 		return nil, nil
 	}
@@ -444,15 +448,18 @@ func (a *App) startSnakeStats(snakeSrv *snake.Server, store *duckdb.Store, idGen
 
 			// 1. Process Active Connections
 			for _, c := range clients {
+				slog.Debug("Snake discovery tick: processing client", "cid", c.CID, "name", c.Name, "ip", c.IP)
 				currentEID, known := snakeSessions[c.CID]
 
 				if !known {
-					if c.Name == mixerName {
+					if c.Name == mixerName || c.Name == "" {
+						slog.Debug("Skipping internal Mixer or anonymous connection", "name", c.Name)
 						continue
 					}
 
 					rackID, err := store.GetEntityIDByName(context.Background(), c.Name)
 					if err != nil {
+						slog.Debug("Could not find registry entry for NATS client", "name", c.Name, "error", err)
 						continue
 					}
 
@@ -475,7 +482,7 @@ func (a *App) startSnakeStats(snakeSrv *snake.Server, store *duckdb.Store, idGen
 					}
 
 					if err := store.RegisterSnake(context.Background(), snakeName, eid, version.Version, rackID, uint64(mixerEntityID), c.IP, c.Port, mixerIP, mixerPort, cfg.Mixer.MachineID); err != nil {
-						slog.Warn("Failed to register snake", "name", snakeName, "error", err)
+						slog.Info("Failed to register snake", "name", snakeName, "error", err)
 						continue
 					}
 					snakeSessions[c.CID] = eid
@@ -507,7 +514,7 @@ func (a *App) startSnakeStats(snakeSrv *snake.Server, store *duckdb.Store, idGen
 					if eidRefs[eid] == 0 {
 						slog.Info("Pruning Dead Snake Entity", "eid", eid)
 						if err := store.RemoveSnake(context.Background(), eid); err != nil {
-							slog.Warn("Failed to remove dead snake", "eid", eid, "error", err)
+							slog.Info("Failed to remove dead snake", "eid", eid, "error", err)
 						}
 					}
 					delete(snakeSessions, cid)

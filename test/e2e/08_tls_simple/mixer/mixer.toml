@@ -18,3 +18,8 @@ root_ca_file = "../certs/ca.crt"
 dir = "./data"
 database_file = "fluxrig_test.duckdb"
 cluster_key_file = "cluster.key"
+
+
+
+[enrollment]
+auto_adopt = true
