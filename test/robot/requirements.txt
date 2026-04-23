@@ -1,8 +1,10 @@
 robotframework>=6.0
 paramiko
 scp
-paramiko
-scp
 tomli
 jinja2
 duckdb
+requests
+robotframework-requests
+nats-py
+cbor2

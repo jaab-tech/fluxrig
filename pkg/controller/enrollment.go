@@ -12,11 +12,11 @@ import (
 
 	"github.com/ThreeDotsLabs/watermill"
 	"github.com/ThreeDotsLabs/watermill/message"
+	"github.com/fxamacker/cbor/v2"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/jaab-tech/fluxrig/pkg/pki"
 	"github.com/jaab-tech/fluxrig/pkg/registry"
 	"github.com/jaab-tech/fluxrig/pkg/router"
-	"github.com/vmihailenco/msgpack/v5"
 )
 
 // ScenarioProvider defines the subset of ScenarioController used by Enrollment.
@@ -77,7 +77,7 @@ func (c *EnrollmentController) RegisterRoutes(r *router.RouterWrapper) {
 func (c *EnrollmentController) HandleHello(msg *message.Message) ([]*message.Message, error) {
 	// 1. Unmarshal FluxMsg
 	var fm fluxmsg.FluxMsg
-	if err := msgpack.Unmarshal(msg.Payload, &fm); err != nil {
+	if err := cbor.Unmarshal(msg.Payload, &fm); err != nil {
 		c.logger.Error("failed to unmarshal hello", "error", err)
 		return nil, nil // Don't retry malformed
 	}
@@ -91,15 +91,17 @@ func (c *EnrollmentController) HandleHello(msg *message.Message) ([]*message.Mes
 
 	c.logger.Info("Received Hello", "name", hello.Name, "ip", hello.IP, "port", hello.Port)
 
-	// Deduplication Check with TTL (Reduced to 1s for faster E2E restarts)
-	if val, loaded := c.processedHellos.Load(hello.Name); loaded {
-		lastSeen := val.(time.Time)
-		if time.Since(lastSeen) < 1*time.Second {
-			c.logger.Warn("Duplicate Hello ignored (throttled)", "name", hello.Name)
-			return nil, nil
+	// Deduplication Check with TTL (Bypassed if secret provided for recovery)
+	if hello.Secret == "" {
+		if val, loaded := c.processedHellos.Load(hello.Name); loaded {
+			lastSeen := val.(time.Time)
+			if time.Since(lastSeen) < 1*time.Second {
+				c.logger.Warn("Duplicate Hello ignored (throttled)", "name", hello.Name)
+				return nil, nil
+			}
 		}
+		c.processedHellos.Store(hello.Name, time.Now())
 	}
-	c.processedHellos.Store(hello.Name, time.Now())
 
 	// 3. Register
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -133,15 +135,15 @@ func (c *EnrollmentController) HandleHello(msg *message.Message) ([]*message.Mes
 	}
 
 	// Serialize Envelope
-	envBytes, err := msgpack.Marshal(envelope)
+	envBytes, err := cbor.Marshal(envelope)
 	if err != nil {
 		c.logger.Error("failed to marshal envelope", "error", err)
 		return nil, err
 	}
 
 	// Publish Response
-	// Topic: fluxrig.agent.enrollment.<Name>
-	topic := fmt.Sprintf("fluxrig.agent.enrollment.%s", hello.Name)
+	// Topic: fluxrig.agent.enrollment.<Name>.<Nonce>
+	topic := fmt.Sprintf("fluxrig.agent.enrollment.%s.%s", hello.Name, hello.Nonce)
 
 	// Prepare HelloResponse
 	resp := fluxmsg.HelloResponse{
@@ -154,7 +156,7 @@ func (c *EnrollmentController) HandleHello(msg *message.Message) ([]*message.Mes
 	respMsg := fluxmsg.New()
 	respMsg.Data = respData // Send as Data payload
 
-	respBytes, err := msgpack.Marshal(respMsg)
+	respBytes, err := cbor.Marshal(respMsg)
 	if err != nil {
 		return nil, err
 	}
@@ -186,7 +188,7 @@ func (c *EnrollmentController) HandleHello(msg *message.Message) ([]*message.Mes
 
 func (c *EnrollmentController) HandleHeartbeat(msg *message.Message) ([]*message.Message, error) {
 	var fm fluxmsg.FluxMsg
-	if err := msgpack.Unmarshal(msg.Payload, &fm); err != nil {
+	if err := cbor.Unmarshal(msg.Payload, &fm); err != nil {
 		return nil, nil
 	}
 
@@ -222,7 +224,7 @@ func (c *EnrollmentController) HandleHeartbeat(msg *message.Message) ([]*message
 	respMsg.Data = respData
 	respMsg.SrcGearID = 0
 
-	respBytes, err := msgpack.Marshal(respMsg)
+	respBytes, err := cbor.Marshal(respMsg)
 	if err != nil {
 		return nil, err
 	}

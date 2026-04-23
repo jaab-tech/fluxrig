@@ -4,9 +4,14 @@
 package sdk
 
 import (
+	"context"
+	"log/slog"
 	"strings"
 
+	"github.com/jaab-tech/fluxrig/pkg/bus"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
+	"github.com/jaab-tech/fluxrig/pkg/idgen"
+	"github.com/jaab-tech/fluxrig/pkg/manager"
 )
 
 // GetValue extracts a value from FluxMsg using a dot-notation path.
@@ -69,3 +74,31 @@ func GetValue(msg *fluxmsg.FluxMsg, path string) (any, bool) {
 func JoinKeys(parts ...string) string {
 	return strings.Join(parts, "_")
 }
+
+// NewMockGearContext creates a minimal context for unit testing Gears.
+func NewMockGearContext(config map[string]any) GearContext {
+	idGen, _ := idgen.New(1)
+	return &mockGearContext{
+		ctx:    context.Background(),
+		config: config,
+		logger: slog.Default(),
+		idGen:  idGen,
+	}
+}
+
+type mockGearContext struct {
+	ctx    context.Context
+	config map[string]any
+	logger *slog.Logger
+	idGen  *idgen.IDGenerator
+}
+
+func (m *mockGearContext) Context() context.Context { return m.ctx }
+func (m *mockGearContext) Config() map[string]any   { return m.config }
+func (m *mockGearContext) GearName() string         { return "mock_gear" }
+func (m *mockGearContext) MachineID() uint64        { return 1 }
+func (m *mockGearContext) Logger() *slog.Logger     { return m.logger }
+func (m *mockGearContext) IDGen() IDGenerator       { return m.idGen }
+func (m *mockGearContext) Bus() bus.Bus             { return nil } // Mock bus not needed for basic tests
+func (m *mockGearContext) Manager() manager.Manager { return nil }
+func (m *mockGearContext) ControlPlane() any        { return nil }

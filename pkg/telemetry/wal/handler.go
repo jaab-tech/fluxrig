@@ -39,7 +39,11 @@ func NewHandler(w *WAL, gen *idgen.IDGenerator, entityID uint64, entityName stri
 }
 
 func (h *Handler) Enabled(ctx context.Context, level slog.Level) bool {
-	return level >= h.opts.Level.Level()
+	minLevel := slog.LevelInfo
+	if h.opts.Level != nil {
+		minLevel = h.opts.Level.Level()
+	}
+	return level >= minLevel
 }
 
 func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
@@ -58,23 +62,30 @@ func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 	})
 
 	// Inject Component Identity (flux.type) if not present in attributes
-	// We use "flux.type" to match new Sink logic (to be added)
+	// We use "flux.type" to match new Sink logic
 	if _, ok := attrs["flux.type"]; !ok && h.component != "" {
 		attrs["flux.type"] = h.component
 	}
 
-	// Construct FluxMsg Payload
-	// Emulate the structure LogExporter used:
-	// type="log", timestamp, severity, body, entity details
+	// Dynamic Identity Overrides (New: respect component/name from attributes)
+	eType := h.component
+	if t, ok := attrs["flux.type"].(string); ok && t != "" {
+		eType = t
+	}
+	eName := h.entityName
+	if n, ok := attrs["flux.name"].(string); ok && n != "" {
+		eName = n
+	}
 
+	// Construct FluxMsg Payload
 	payload := map[string]any{
 		"type":        "log",
 		"timestamp":   r.Time.UnixMicro(),
 		"severity":    r.Level.String(),
 		"body":        r.Message,
 		"entity_id":   h.entityID,
-		"entity_name": h.entityName,
-		"entity_type": h.component, // Explicit top-level field
+		"entity_name": eName,
+		"entity_type": eType,
 		"attributes":  attrs,
 	}
 
@@ -87,9 +98,9 @@ func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 	msg.Data = payload // payload is "record" or flattened?
 	// LogExporter put it in a batch array.
 	// Write INDIVIDUAL records to WAL (Binary Sync)
-	// FluxMsg type "telemetry.log" (MsgPack) is handled by sink
+	// FluxMsg type "telemetry.log" (CBOR) is handled by sink
 
-	msg.Metadata["type"] = "telemetry.log" // New type for Individual MsgPack Log
+	msg.Metadata["type"] = "telemetry.log" // New type for Individual CBOR Log
 	msg.Metadata["scope"] = "telemetry"
 
 	// Write to WAL

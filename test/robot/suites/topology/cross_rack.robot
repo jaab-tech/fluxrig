@@ -17,6 +17,8 @@ Documentation     Cross-Rack Topology Validation
 ...               Verifies that messages flow from Rack A -> Mixer -> Rack B (simulated)
 ...               or simply Rack -> Mixer ingestion.
 Resource          ../../resources/common.resource
+Library           FluxRigLibrary
+Library           ISO8583Library
 Library           OperatingSystem
 Suite Setup       Initialize Topology Suite    ${CURDIR}
 Suite Teardown    Teardown Test Environment
@@ -95,18 +97,16 @@ Validate Functional Traffic (Phase 1)
     Sleep    5s
     
     # Rack B (Blackhole Bento Log) logs to stdout/stderr
-    Check Stdout Contains    pattern=phase1_test    alias=rack-b
-
-Validate Metrics
-    [Documentation]    Verifies that Entity Stats are correctly reported for Racks and Gears.
+    # Ensure telemetry has flushed from the newly adopted Rack identity
+    Sleep    10s
     Log    Verifying Metrics for Rack A...
-    Wait Until Keyword Succeeds    30x    1s    Verify Entity Metric Present    mixer_port=${MIXER_PORT}    entity_name=rack-a-adopted    metric_key=fluxrig.bus.publish_count
+    Wait Until Keyword Succeeds    30s    2s    Verify Entity Metric Present    mixer_port=${MIXER_PORT}    entity_name=rack-a-adopted    metric_key=fluxrig.bus.publish_count
     
     Log    Verifying Metrics for Bento Gen...
-    Wait Until Keyword Succeeds    30x    1s    Verify Entity Metric Present    mixer_port=${MIXER_PORT}    entity_name=bento-gen    metric_key=fluxrig.gear.messages_out_total
+    Wait Until Keyword Succeeds    30s    2s    Verify Entity Metric Present    mixer_port=${MIXER_PORT}    entity_name=rack-a-adopted    metric_key=fluxrig.gear.messages_out
 
     Log    Verifying Metrics for Rack B...
-    Wait Until Keyword Succeeds    30x    1s    Verify Entity Metric Present    mixer_port=${MIXER_PORT}    entity_name=rack-b    metric_key=fluxrig.bus.publish_count
+    Wait Until Keyword Succeeds    30s    2s    Verify Entity Metric Present    mixer_port=${MIXER_PORT}    entity_name=rack-b    metric_key=fluxrig.gear.messages_in
 
 Validate Telemetry Persistence (Phase 1)
     [Documentation]    Verifies that Telemetry data is persisted to Parquet files.

@@ -13,6 +13,9 @@ log_info() {
     echo -e "${CYAN}[INFO]${NC} $1"
 }
 
+# Ensure ROOT_DIR is available early
+ROOT_DIR="${ROOT_DIR:-.}"
+
 log_success() {
     echo -e "${GREEN}[PASS] ✅${NC} $1"
 }
@@ -204,7 +207,7 @@ start_mixer() {
     local api_url="$3"
     
     log_info "Starting Mixer..."
-    ./bin/fluxrig-mixer -c "$config" > "$log_path" 2>&1 &
+    "${ROOT_DIR}/bin/fluxrig-mixer" -c "$config" > "$log_path" 2>&1 &
     MIXER_PID=$!
     log_info "Mixer PID: $MIXER_PID"
     
@@ -219,7 +222,7 @@ start_rack() {
     local log_path="$2"
     
     log_info "Starting Rack..."
-    ./bin/fluxrig rack -c "$config" > "$log_path" 2>&1 &
+    "${ROOT_DIR}/bin/fluxrig" rack -c "$config" > "$log_path" 2>&1 &
     RACK_PID=$!
     log_info "Rack PID: $RACK_PID"
 }
@@ -230,7 +233,7 @@ gen_keys() {
     local output_path="$1"
     
     log_info "Generating Cluster Keys..."
-    ./bin/fluxrig keys gen-cluster -o "$output_path" > /dev/null
+    "${ROOT_DIR}/bin/fluxrig" keys gen-cluster -o "$output_path" > /dev/null
     verify_file "$output_path" "Cluster key generated."
 }
 

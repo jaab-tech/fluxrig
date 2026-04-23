@@ -1,0 +1,683 @@
+basePath: /api/v1
+definitions:
+  api.ActionResponse:
+    properties:
+      name:
+        description: Name of the rack (for import/approve).
+        example: rack-01
+        type: string
+      status:
+        description: Status of the action.
+        example: activated
+        type: string
+    type: object
+  api.ApproveRequest:
+    properties:
+      name:
+        description: Name to assign to the rack (optional, defaults to current).
+        example: rack-prod-01
+        type: string
+    type: object
+  api.HealthResponse:
+    properties:
+      status:
+        description: Status of the service (e.g. "ok").
+        example: ok
+        type: string
+      version:
+        description: Version of the service.
+        example: 0.1.0
+        type: string
+    type: object
+  api.RackResponse:
+    properties:
+      config:
+        allOf:
+        - $ref: '#/definitions/config.RackConfig'
+        description: Config (Runtime).
+      first_seen:
+        description: FirstSeen timestamp.
+        example: "2023-10-26T10:00:00Z"
+        type: string
+      id:
+        description: ID is the entity ID of the rack.
+        example: 45612378
+        type: integer
+      ip:
+        description: IP address of the rack agent.
+        example: 192.168.1.50
+        type: string
+      last_seen:
+        description: LastSeen timestamp.
+        example: "2023-10-27T10:00:00Z"
+        type: string
+      machine_id:
+        description: MachineID is the physical machine ID.
+        example: 10
+        type: integer
+      name:
+        description: Name of the rack.
+        example: rack-01
+        type: string
+      port:
+        description: Port number of the rack agent.
+        example: 4222
+        type: integer
+      stats:
+        allOf:
+        - $ref: '#/definitions/api.RackStats'
+        description: Stats (Transient/Snapshot).
+      status:
+        description: Status of the rack (active, inactive, pending).
+        example: active
+        type: string
+    type: object
+  api.RackStats:
+    properties:
+      cpu_usage:
+        description: CPU usage percentage.
+        example: 12.5
+        type: number
+      load_avg:
+        description: Load average (1m).
+        example: 0.5
+        type: number
+      mem_usage:
+        description: Memory usage percentage.
+        example: 45.2
+        type: number
+      uptime:
+        description: Uptime in seconds.
+        example: 3600
+        type: integer
+    type: object
+  api.ScenarioImportResponse:
+    properties:
+      name:
+        description: Name of the imported scenario.
+        example: payment-switch-v1
+        type: string
+      status:
+        description: Status of the import.
+        example: imported_and_activated
+        type: string
+    type: object
+  api.TopologyStatusResponse:
+    properties:
+      active_ver:
+        description: ActiveVer is the currently active scenario version.
+        example: v1.2.3
+        type: string
+      racks_total:
+        description: RacksTotal is the total number of registered racks.
+        example: 50
+        type: integer
+      sync_status:
+        description: SyncStatus indicates global sync state.
+        example: synchronized
+        type: string
+    type: object
+  config.ApiConfig:
+    properties:
+      port:
+        description: Port to listen on.
+        example: 8090
+        type: integer
+      readHeaderTimeout:
+        description: ReadHeaderTimeout for the HTTP server.
+        example: 3s
+        type: string
+      tlscertFile:
+        description: TLSCertFile path to server certificate.
+        example: server.crt
+        type: string
+      tlskeyFile:
+        description: TLSKeyFile path to server key.
+        example: server.key
+        type: string
+    type: object
+  config.BusConfig:
+    properties:
+      connectTimeout:
+        type: string
+      convergenceDelay:
+        type: string
+      domain:
+        type: string
+      insecureSkipVerify:
+        type: boolean
+      operationTimeout:
+        type: string
+      reconnectWait:
+        type: string
+      rootCA:
+        type: string
+      streamName:
+        type: string
+      subscriptionRetryAttempts:
+        type: integer
+      subscriptionRetryWait:
+        type: string
+      url:
+        type: string
+    type: object
+  config.EmbeddedConfig:
+    properties:
+      flushInterval:
+        description: FlushInterval for the embedded stack.
+        example: 5s
+        type: string
+      retentionDays:
+        description: RetentionDays for local parquet files.
+        example: 30
+        type: integer
+    type: object
+  config.EnrollmentConfig:
+    properties:
+      autoAdopt:
+        description: |-
+          AutoAdopt, if true, will automatically mark newly enrolled Racks as 'active'.
+          If false (default), new Racks start as 'pending'.
+        example: false
+        type: boolean
+      pushDelay:
+        description: PushDelay is the time to wait before pushing state to a newly
+          enrolled Rack.
+        example: 1s
+        type: string
+    type: object
+  config.IngestConfig:
+    properties:
+      bufferSize:
+        description: BufferSize is the internal channel buffer size (deprecated).
+        example: 1024
+        type: integer
+      flushInterval:
+        description: FlushInterval determines how often to flush data to Parquet.
+        example: 5s
+        type: string
+    type: object
+  config.LoggingConfig:
+    properties:
+      compress:
+        type: boolean
+      filename:
+        type: string
+      level:
+        type: string
+      maxBackups:
+        type: integer
+      maxSizeMB:
+        type: integer
+      throttling:
+        $ref: '#/definitions/config.ThrottlingConfig'
+    type: object
+  config.MetricsConfig:
+    properties:
+      bentoEnabled:
+        type: boolean
+      hostEnabled:
+        type: boolean
+      runtimeEnabled:
+        type: boolean
+    type: object
+  config.MixerConfig:
+    properties:
+      api:
+        $ref: '#/definitions/config.ApiConfig'
+      enrollment:
+        $ref: '#/definitions/config.EnrollmentConfig'
+      ingest:
+        $ref: '#/definitions/config.IngestConfig'
+      logging:
+        $ref: '#/definitions/config.LoggingConfig'
+      mixer:
+        $ref: '#/definitions/config.MixerSettings'
+      observability:
+        $ref: '#/definitions/config.ObservabilityConfig'
+      snake:
+        $ref: '#/definitions/config.SnakeConfig'
+      store:
+        $ref: '#/definitions/config.StoreConfig'
+      telemetry:
+        $ref: '#/definitions/config.TelemetryConfig'
+    type: object
+  config.MixerSettings:
+    properties:
+      machineID:
+        description: MachineID is the unique physical ID of the Mixer machine.
+        example: 1
+        type: integer
+      mixerName:
+        description: MixerName is the human-readable name of the Mixer.
+        example: mixer-01
+        type: string
+      startupScenario:
+        description: |-
+          StartupScenario reference to the scenario to load on startup.
+          Accepts: file path ("/path/to/file.yaml"), URN ("payment-flow:v1.0.0"),
+          or empty string (resume last active scenario).
+        type: string
+    type: object
+  config.ObservabilityConfig:
+    properties:
+      embedded:
+        allOf:
+        - $ref: '#/definitions/config.EmbeddedConfig'
+        description: Embedded configures the local embedded stack.
+      enabled:
+        description: Enabled master switch for observability features.
+        example: true
+        type: boolean
+      tier:
+        description: Tier selects the backend (embedded or standard).
+        example: embedded
+        type: string
+    type: object
+  config.RackConfig:
+    properties:
+      logging:
+        $ref: '#/definitions/config.LoggingConfig'
+      rack:
+        $ref: '#/definitions/config.RackSettings'
+      store:
+        $ref: '#/definitions/config.StoreConfig'
+      telemetry:
+        $ref: '#/definitions/config.TelemetryConfig'
+    type: object
+  config.RackSettings:
+    properties:
+      bus:
+        $ref: '#/definitions/config.BusConfig'
+      cleanupTimeout:
+        type: string
+      convergenceTimeout:
+        type: string
+      enrollmentTimeout:
+        type: string
+      handshakeInterval:
+        type: string
+      heartbeatInterval:
+        type: string
+      machineID:
+        type: integer
+      name:
+        type: string
+      namePrefix:
+        type: string
+    type: object
+  config.SnakeConfig:
+    properties:
+      businessStreamMaxAge:
+        description: BusinessStreamMaxAge retention policy.
+        example: 720h
+        type: string
+      clusterName:
+        description: ClusterName for NATS clustering.
+        example: flux
+        type: string
+      durable:
+        description: Durable toggles file-based storage.
+        example: false
+        type: boolean
+      operationTimeout:
+        description: OperationTimeout for NATS requests.
+        example: 5s
+        type: string
+      port:
+        description: Port for NATS client connections.
+        example: 4222
+        type: integer
+      rootCAFile:
+        description: RootCAFile for client connections (loopback).
+        type: string
+      streamName:
+        description: StreamName for the primary business stream.
+        example: flux-msg
+        type: string
+      streamSubjects:
+        description: StreamSubjects to bind to the stream.
+        example:
+        - flux.msg.>
+        items:
+          type: string
+        type: array
+      telemetryStreamMaxAge:
+        description: TelemetryStreamMaxAge retention policy.
+        example: 24h
+        type: string
+      tlscertFile:
+        description: TLSCertFile for server-side TLS.
+        type: string
+      tlskeyFile:
+        description: TLSKeyFile for server-side TLS.
+        type: string
+      url:
+        description: URL for internal connections.
+        example: nats://localhost:4222
+        type: string
+    type: object
+  config.StoreConfig:
+    properties:
+      clusterKeyFile:
+        type: string
+      databaseFile:
+        type: string
+      dir:
+        type: string
+      stateFile:
+        type: string
+      walmaxSizeMB:
+        type: integer
+    type: object
+  config.TelemetryConfig:
+    properties:
+      baseSubject:
+        type: string
+      batchInterval:
+        type: string
+      maxBatchSize:
+        type: integer
+      metrics:
+        $ref: '#/definitions/config.MetricsConfig'
+      serviceName:
+        type: string
+    type: object
+  config.ThrottlingConfig:
+    properties:
+      burst:
+        type: integer
+      enabled:
+        type: boolean
+      rate:
+        type: number
+    type: object
+  registry.GearSpec:
+    properties:
+      config:
+        additionalProperties:
+          type: string
+        type: object
+      deploy:
+        description: string (Group/Rack) or map
+        example: rack-group-1
+        type: string
+      doc:
+        example: Primary Ingress
+        type: string
+      id:
+        description: Assigned by Registry/Mixer
+        example: 100
+        type: integer
+      name:
+        example: iso8583-in
+        type: string
+      ports:
+        additionalProperties:
+          format: int64
+          type: integer
+        description: Assigned by Mixer
+        type: object
+      type:
+        example: iso8583-server
+        type: string
+    type: object
+  registry.LabelMatch:
+    properties:
+      labels:
+        additionalProperties:
+          type: string
+        type: object
+    type: object
+  registry.RackTarget:
+    properties:
+      config:
+        additionalProperties: {}
+        type: object
+      defaults:
+        additionalProperties: {}
+        type: object
+      group:
+        type: string
+      labels:
+        additionalProperties:
+          type: string
+        type: object
+      match:
+        $ref: '#/definitions/registry.LabelMatch'
+      name:
+        type: string
+    type: object
+  registry.Scenario:
+    properties:
+      gears:
+        items:
+          $ref: '#/definitions/registry.GearSpec'
+        type: array
+      meta:
+        $ref: '#/definitions/registry.ScenarioMeta'
+      racks:
+        items:
+          $ref: '#/definitions/registry.RackTarget'
+        type: array
+      wires:
+        items:
+          $ref: '#/definitions/registry.WireSpec'
+        type: array
+    type: object
+  registry.ScenarioMeta:
+    properties:
+      name:
+        example: payment-switch
+        type: string
+      version:
+        example: 1.0.0
+        type: string
+    type: object
+  registry.WireSpec:
+    properties:
+      from:
+        example: iso8583-in.out
+        type: string
+      id:
+        description: Assigned by Registry/Mixer
+        type: integer
+      to:
+        example: router.in
+        type: string
+    type: object
+host: localhost:8090
+info:
+  contact:
+    email: support@jaab.tech
+    name: JAAB Tech Support
+    url: https://jaab.tech
+  description: Control Plane API for FluxRig Orchestration.
+  license:
+    name: Apache 2.0
+    url: http://www.apache.org/licenses/LICENSE-2.0.html
+  termsOfService: http://swagger.io/terms/
+  title: FluxRig Mixer API
+  version: 0.1.0
+paths:
+  /config:
+    get:
+      description: Returns the current Mixer configuration
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/config.MixerConfig'
+      summary: Get Configuration
+      tags:
+      - core
+  /entities/stats:
+    get:
+      description: Returns cached metrics for a specific entity or all entities.
+      parameters:
+      - description: Entity ID
+        in: query
+        name: id
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Get Entity Stats
+      tags:
+      - telemetry
+  /health:
+    get:
+      description: Returns the operational status of the Mixer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.HealthResponse'
+      summary: Health Check
+      tags:
+      - core
+  /racks:
+    get:
+      description: Returns a list of all known Racks
+      parameters:
+      - description: Filter by status (active, pending, offline)
+        in: query
+        name: status
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/api.RackResponse'
+            type: array
+      summary: List Racks
+      tags:
+      - registry
+  /racks/{id}/{action}:
+    post:
+      consumes:
+      - application/json
+      description: 'Perform actions on Racks (Approve, Suspend, Activate, Remove,
+        Log-Level). Note: This single endpoint handles multiple actions for simplicity
+        in this Alpha version.'
+      parameters:
+      - description: Rack ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Action (approve, suspend, activate)
+        in: path
+        name: action
+        type: string
+      - description: Approve Request Body
+        in: body
+        name: body
+        schema:
+          $ref: '#/definitions/api.ApproveRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.ActionResponse'
+      summary: Rack Actions
+      tags:
+      - registry
+  /scenario/import:
+    post:
+      consumes:
+      - application/x-yaml
+      description: Upload a YAML scenario definition to update the topology.
+      parameters:
+      - description: Validate without applying
+        in: query
+        name: dry_run
+        type: boolean
+      - description: Immediately activate after import
+        in: query
+        name: activate
+        type: boolean
+      - description: Scenario YAML
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/registry.Scenario'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.ScenarioImportResponse'
+      summary: Import Scenario
+      tags:
+      - scenario
+  /telemetry/{type}:
+    get:
+      description: Query Logs or Metrics from DuckDB
+      parameters:
+      - description: Type of telemetry (logs, metrics)
+        in: path
+        name: type
+        required: true
+        type: string
+      - description: Filter by Entity Name
+        in: query
+        name: entity
+        type: string
+      - description: Filter by Level (logs only)
+        in: query
+        name: min_level
+        type: string
+      - description: Start time (e.g. 1h, 2023-01-01T00:00:00Z)
+        in: query
+        name: since
+        type: string
+      - description: Max records (default 100)
+        in: query
+        name: limit
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              additionalProperties: true
+              type: object
+            type: array
+      summary: Query Telemetry
+      tags:
+      - telemetry
+  /topology/status:
+    get:
+      description: Returns synchronization status of the fleet
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.TopologyStatusResponse'
+      summary: Topology Status
+      tags:
+      - topology
+schemes:
+- http
+swagger: "2.0"

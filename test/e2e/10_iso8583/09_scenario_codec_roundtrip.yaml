@@ -4,14 +4,14 @@ meta:
   version: "1.0.0"
 
 racks:
-  - name: "iso-node-01"
+  - name: "rack-iso-01"
     labels:
       tier: "edge"
 
 gears:
   - name: "iso-gateway"
     type: "io_iso8583"
-    deploy: "iso-node-01"
+    deploy: "rack-iso-01"
     config:
       mode: "server"
       bind: ":8583"
@@ -21,7 +21,7 @@ gears:
 
   - name: "codec-decode"
     type: "codec_iso8583"
-    deploy: "iso-node-01"
+    deploy: "rack-iso-01"
     config:
       spec_path: "specs/e2e_codec.yaml"
       direction: "decode"
@@ -29,7 +29,7 @@ gears:
 
   - name: "codec-encode"
     type: "codec_iso8583"
-    deploy: "iso-node-01"
+    deploy: "rack-iso-01"
     config:
       spec_path: "specs/e2e_codec.yaml"
       direction: "encode"
@@ -37,7 +37,7 @@ gears:
 
   - name: "iso-client"
     type: "io_iso8583"
-    deploy: "iso-node-01"
+    deploy: "rack-iso-01"
     config:
       mode: "client"
       connect: "127.0.0.1:10000"

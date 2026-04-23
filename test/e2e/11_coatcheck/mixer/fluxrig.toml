@@ -14,3 +14,7 @@ url = "nats://127.0.0.1:4233"
 dir = "./data"
 database_file = "coatcheck_e2e.duckdb"
 cluster_key_file = "cluster.key"
+
+
+[enrollment]
+auto_adopt = true

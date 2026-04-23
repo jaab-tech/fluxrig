@@ -1,5 +1,5 @@
 ---
-id: changelog_project
+id: changelog
 title: Changelog
 ---
 
@@ -14,6 +14,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [v0.4.4] - Unreleased
+### Added
+- **Certification & Core Test Hardening**: Achieved 100% pass rate in critical certification shards (Mixer, PKI, ISO8583 IO).
+- **Certified Coverage**: Consolidated core code coverage reached 60.1%.
+- **Enrollment Architecture (ADR 0034)**: Implemented configuration-driven rack adoption with secure nonce-based passports.
+- **CBOR Migration (ADR 0033)**: Transitioned internal wire-format to deterministic CBOR for 100% binary stability.
+- **Data-Plane Integrity (ADR 0037)**: Enforced technical UTF-8 validation and hex-encoded binary metadata handling.
+- **IO stabilization**: Implemented robust connection polling and rate-limited background WAL replay.
+
+## [v0.4.3] - 2026-02-19
+### Changed
+- **License Headers**: Standardized all source files to SPDX format.
+
+### Improved
+- **Documentation**: Comprehensive audit of 40+ public docs — fixed typos, standardized terminology, improved accuracy.
+- **Website**: Docusaurus-based documentation site with Mermaid diagram support and full-text search.
+
+## [v0.4.2] - 2026-02-12
+### Added
+- **Spec & Scenario Manager**: CAS-backed spec/scenario management with CLI (`fluxrig spec`, `fluxrig scenario`) and API integration.
+- **E2E Test Suite**: Comprehensive test runner for spec lifecycle, API scenarios, and concurrent access.
+
+### Changed
+- **E2E Tests**: Renamed from flat naming to numbered convention (`01_simple/`, `09_io_tcp/`, etc.).
+- **Gear Rename**: `io_tcp` → `simple_tcp`.
+
+### Removed
+- **Coat Check Gear**: Removed in favor of Spec Manager pattern.
+- **Bus KV**: Removed (~3,084 lines deleted across 63 files).
 
 ## [v0.4.1] - 2026-02-09
 ### Added
@@ -42,7 +72,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Snake Protocol**: Secure tunneling implementation for Rack-to-Mixer connectivity.
 - **FluxMsg**: Canonical JSON schema for inter-gear communication.
 
-[Unreleased]: https://github.com/jaab-tech/fluxrig/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/jaab-tech/fluxrig/compare/v0.4.3...HEAD
+[v0.4.3]: https://github.com/jaab-tech/fluxrig/releases/tag/v0.4.3
+[v0.4.2]: https://github.com/jaab-tech/fluxrig/releases/tag/v0.4.2
 [v0.4.1]: https://github.com/jaab-tech/fluxrig/releases/tag/v0.4.1
 [v0.4.0]: https://github.com/jaab-tech/fluxrig/releases/tag/v0.4.0
 [v0.3.0]: https://github.com/jaab-tech/fluxrig/releases/tag/v0.3.0

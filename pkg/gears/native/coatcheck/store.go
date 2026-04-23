@@ -7,9 +7,9 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/fxamacker/cbor/v2"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/jaab-tech/fluxrig/pkg/sdk"
-	"github.com/vmihailenco/msgpack/v5"
 )
 
 type StoreLogic struct {
@@ -50,8 +50,8 @@ func (s *StoreLogic) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxms
 		val = partial
 	}
 
-	// Use vmihailenco msgpack
-	valBytes, err := msgpack.Marshal(val)
+	// Use CBOR
+	valBytes, err := cbor.Marshal(val)
 	if err != nil {
 		return nil, fmt.Errorf("coatcheck store: serialize failed: %w", err)
 	}

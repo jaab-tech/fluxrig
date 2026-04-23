@@ -12,12 +12,12 @@ import (
 	"testing"
 
 	"github.com/ThreeDotsLabs/watermill/message"
+	"github.com/fxamacker/cbor/v2"
 	"github.com/jaab-tech/fluxrig/pkg/controller"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/jaab-tech/fluxrig/pkg/pki"
 	"github.com/jaab-tech/fluxrig/pkg/registry"
 	"github.com/jaab-tech/fluxrig/pkg/router"
-	"github.com/vmihailenco/msgpack/v5"
 	"log/slog"
 	"time"
 )
@@ -107,7 +107,7 @@ func TestEnrollment_Deduplication(t *testing.T) {
 	data, _ := hello.ToData()
 	fm := fluxmsg.New()
 	fm.Data = data
-	raw, _ := msgpack.Marshal(fm)
+	raw, _ := cbor.Marshal(fm)
 	msg := message.NewMessage("1", raw)
 
 	// Call 1
@@ -157,7 +157,7 @@ func TestEnrollment_RegistryError(t *testing.T) {
 	data, _ := hello.ToData()
 	fm := fluxmsg.New()
 	fm.Data = data
-	raw, _ := msgpack.Marshal(fm)
+	raw, _ := cbor.Marshal(fm)
 	msg := message.NewMessage("1", raw)
 
 	resp, err := ctrl.HandleHello(msg)
@@ -183,7 +183,7 @@ func TestEnrollment_PublisherError(t *testing.T) {
 	data, _ := hello.ToData()
 	fm := fluxmsg.New()
 	fm.Data = data
-	raw, _ := msgpack.Marshal(fm)
+	raw, _ := cbor.Marshal(fm)
 	msg := message.NewMessage("1", raw)
 
 	_, err := ctrl.HandleHello(msg)
@@ -229,7 +229,7 @@ func TestEnrollment_ScenarioPush(t *testing.T) {
 	data, _ := hello.ToData()
 	fm := fluxmsg.New()
 	fm.Data = data
-	raw, _ := msgpack.Marshal(fm)
+	raw, _ := cbor.Marshal(fm)
 	msg := message.NewMessage("1", raw)
 
 	_, err := ctrl.HandleHello(msg)

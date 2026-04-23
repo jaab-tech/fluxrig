@@ -1,5 +1,5 @@
 fluxrig
-Copyright 2025 Juan Andrés Antoniuk & JAAB TECH SAS
+Copyright 2025-2026 Juan Andrés Antoniuk & JAAB TECH SAS
 
 This product includes software developed by Juan Andrés Antoniuk and JAAB TECH SAS.
 
@@ -7,6 +7,31 @@ JAAB TECH SAS
 Rambla 25 de Agosto 292
 11000 Montevideo, Uruguay
 Email: info@jaab.tech
+
+================================================================================
+
+AI-ASSISTED DEVELOPMENT
+
+This project was developed with significant assistance from AI coding tools.
+We believe in full transparency about our development process.
+
+During development, multiple AI platforms were evaluated. The project initially
+explored several tools before settling on Antigravity as the primary agentic
+coding assistant. The following AI platforms and models contributed to code
+generation, architecture design, documentation, research, and code review:
+
+  * Antigravity (Google DeepMind) — Primary agentic coding assistant (Gemini
+    models). Settled as the main development tool for its deep agentic workflow.
+  * Claude (Anthropic) — Code generation, architecture design, documentation,
+    and deep research.
+  * Gemini (Google) — Code generation, research, and documentation.
+  * Cursor (Cursor, Inc.) — AI-powered IDE used during early development phases.
+  * GitHub Copilot (GitHub / Microsoft) — Code completion and inline suggestions.
+
+Human engineers direct the architecture, review structural relationships,
+validate consistency across the codebase, and make all final decisions.
+AI-generated code is treated with the same scrutiny as third-party dependencies
+and scanned for license compliance.
 
 ================================================================================
 

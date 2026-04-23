@@ -10,24 +10,24 @@ import (
 	"testing"
 
 	"github.com/ThreeDotsLabs/watermill/message"
+	"github.com/fxamacker/cbor/v2"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/jaab-tech/fluxrig/pkg/pki"
 	"github.com/jaab-tech/fluxrig/pkg/registry"
-	"github.com/vmihailenco/msgpack/v5"
 	"log/slog"
 	"time"
 )
 
 // Mock Registry
 type MockRegistry struct {
-	RegisterFunc  func(ctx context.Context, name string, secret string, ip string, port int, version string, mixerID uint64) (*registry.Rack, error)
+	RegisterFunc  func(ctx context.Context, name string, secret string, ip string, port int, version string, config map[string]any, mixerID uint64) (*registry.Rack, error)
 	HeartbeatFunc func(ctx context.Context, machineID uint16, stats map[string]any) error
 	GetFunc       func(ctx context.Context, machineID uint16) (*registry.Rack, error)
 }
 
-func (m *MockRegistry) Register(ctx context.Context, machineID string, entityType string, name string, port int, ip string, attrs map[string]any, fluxID uint64) (*registry.Rack, error) {
+func (m *MockRegistry) Register(ctx context.Context, name string, secret string, ip string, port int, version string, config map[string]any, mixerID uint64) (*registry.Rack, error) {
 	if m.RegisterFunc != nil {
-		return m.RegisterFunc(ctx, name, "", ip, port, "v1", fluxID) // Mapper
+		return m.RegisterFunc(ctx, name, secret, ip, port, version, config, mixerID) // Mapper
 	}
 	return &registry.Rack{MachineID: 1, Name: name, Status: "active", Secret: "test-secret"}, nil
 }
@@ -57,6 +57,7 @@ func (m *MockRegistry) Remove(ctx context.Context, machineID uint16) error {
 func (m *MockRegistry) UpdateStatus(ctx context.Context, machineID uint16, status string) error {
 	return nil
 }
+func (m *MockRegistry) SetAutoAdopt(enabled bool) {}
 func (m *MockRegistry) QueryLogs(ctx context.Context, query registry.LogQuery) ([]registry.LogEntry, error) {
 	return nil, nil
 }
@@ -95,12 +96,13 @@ func TestEnrollmentController_HandleHello(t *testing.T) {
 		IP:        "10.0.0.1",
 		Port:      8080,
 		Secret:    "",
+		Nonce:     "test-nonce",
 	}
 	helloData, _ := hello.ToData()
 
 	fm := fluxmsg.New()
 	fm.Data = helloData
-	payload, _ := msgpack.Marshal(fm)
+	payload, _ := cbor.Marshal(fm)
 
 	msg := message.NewMessage("test-uuid", payload)
 
@@ -111,7 +113,7 @@ func TestEnrollmentController_HandleHello(t *testing.T) {
 	}
 
 	// Verify
-	if mockPub.PublishedTopic != "fluxrig.agent.enrollment.test-rack" {
+	if mockPub.PublishedTopic != "fluxrig.agent.enrollment.test-rack.test-nonce" {
 		t.Errorf("Wrong topic: %s", mockPub.PublishedTopic)
 	}
 	if mockPub.PublishedMessage == nil {
@@ -137,7 +139,7 @@ func TestEnrollmentController_HandleHeartbeat(t *testing.T) {
 
 	fm := fluxmsg.New()
 	fm.Data = hbData
-	payload, _ := msgpack.Marshal(fm)
+	payload, _ := cbor.Marshal(fm)
 
 	msg := message.NewMessage("test-uuid", payload)
 
@@ -162,7 +164,7 @@ func TestEnrollmentController_Garbage(t *testing.T) {
 	// Must provide signer to avoid panic if validation mistakenly passes
 	ctrl := NewEnrollmentController(slog.Default(), mockReg, mockPub, signer, 0x0200010000000001, time.Second)
 
-	// Test 1: Malformed MsgPack
+	// Test 1: Malformed CBOR
 	msg := message.NewMessage("test", []byte("garbage"))
 	resp, err := ctrl.HandleHello(msg)
 	if resp != nil || err != nil {
@@ -172,7 +174,7 @@ func TestEnrollmentController_Garbage(t *testing.T) {
 	// Test 2: Malformed Hello Payload
 	fm := fluxmsg.New()
 	fm.Data = map[string]any{"wrong": "field"}
-	payload, _ := msgpack.Marshal(fm)
+	payload, _ := cbor.Marshal(fm)
 	msg2 := message.NewMessage("test", payload)
 
 	resp, err = ctrl.HandleHello(msg2)

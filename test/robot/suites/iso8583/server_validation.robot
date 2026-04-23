@@ -5,6 +5,7 @@ Documentation     ISO8583 Server Mode Validation (Internal Loopback)
 ...               Topology: [Load Gen] -> [Server Gear] -> (Loopback) -> [Server Gear] -> [Load Gen]
 Resource          ../../resources/common.resource
 Library           FluxRigLibrary
+Library           ISO8583Library
 Library           Collections
 Suite Setup       Initialize Server Suite    ${CURDIR}
 Suite Teardown    Teardown Server Suite
@@ -30,19 +31,24 @@ Initialize Server Suite
     # --- Start Mixer ---
     Generate Cluster Key   work_dir=${WORK_DIR}/mixer
     Start Mixer    config_file=${MIXER_CONFIG}    work_dir=${WORK_DIR}/mixer    alias=mixer
-    Wait For Healthy    port=${MIXER_PORT}
+    # Start Rack
+    Start Rack    config_file=${RACK_CONFIG}    work_dir=${WORK_DIR}/rack    mixer_home=${WORK_DIR}/mixer    alias=rack
+    Sleep    5s    reason=Wait for Rack to initialize
     
-    # --- Import Scenario ---
+    # Wait for Rack Registration
+    Wait For Rack Registration    mixer_port=${MIXER_PORT}    rack_name=iso-node-01
+    Log Registry Contents        mixer_port=${MIXER_PORT}
+
+    # Import Scenario
     Import Scenario    mixer_port=${MIXER_PORT}    file_path=${SCENARIO_FILE}
     
-    # --- Start Rack ---
-    Start Rack    config_file=${RACK_CONFIG}    work_dir=${WORK_DIR}/rack    mixer_home=${WORK_DIR}/mixer    alias=rack
-    
-    # --- Wait for Rack to be Active ---
-    Wait For Rack Registration    mixer_port=${MIXER_PORT}    rack_name=iso-node-01
+    # Wait for Port listener (Now enabled by scenario config)
+    Wait For Port    port=${ISO_PORT}    timeout=30
     
     # --- Wait for ISO8583 Gear to start listening ---
-    Wait For Port    port=${ISO_PORT}    timeout=30
+    Wait For Port    port=${ISO_PORT}    timeout=60
+    # Technical Warm-Up: Ensure Gear internal loop is fully active
+    Sleep    2s
 
 Teardown Server Suite
     Stop All Processes
@@ -62,7 +68,7 @@ Server Loopback Validation (Functional)
     ${report}=    Run Native Load Test    target=${ISO_HOST}:${ISO_PORT}    concurrency=5    rate=10    duration=5s    report_file=${WORK_DIR}/r_server_valid.json    warmup=1s
     Assert Response Rate Above   ${report}    100.0
     Assert Latency P99 Below     ${report}    50.0
-    Sleep    5s
+    Sleep    2s    reason=Zero-Warning Stabilization: Wait for OTel flush
     Record Performance Result  ${WORK_DIR}/r_server_valid.json    name=Functional    description=Functional validation verifiying MTI 0800 loopback with BCD encoding and 12-byte correlation headers.    work_dir=${WORK_DIR}
 
 Server Loopback Performance (Baseline 100 TPS)
@@ -71,7 +77,7 @@ Server Loopback Performance (Baseline 100 TPS)
     ${report}=    Run Native Load Test    target=${ISO_HOST}:${ISO_PORT}    concurrency=10    rate=100    duration=60s    report_file=${WORK_DIR}/r_server_100tps.json    warmup=2s
     Assert Response Rate Above   ${report}    95.0
     Assert Latency P99 Below     ${report}    100.0
-    Sleep    5s
+    Sleep    2s    reason=Zero-Warning Stabilization: Wait for OTel flush
     Record Performance Result  ${WORK_DIR}/r_server_100tps.json    name=Baseline    description=Baseline performance measurement at 100 Transactons Per Second with 10 parallel connections.    work_dir=${WORK_DIR}
 
 Server Loopback Performance (Stress 1000 TPS)
@@ -82,5 +88,5 @@ Server Loopback Performance (Stress 1000 TPS)
     # Latency warning threshold
     ${p99}=    Get From Dictionary    ${report}    latency_p99_ms
     Run Keyword If    ${p99} > 200    Log    Critical Latency Detected: ${p99}ms    WARN
-    Sleep    5s
+    Sleep    2s    reason=Zero-Warning Stabilization: Wait for OTel flush
     Record Performance Result  ${WORK_DIR}/r_server_1000tps.json    name=Stress    description=High-load stress test at 1000 TPS with 10 concurrent connections over 60 seconds to identify system saturation points.    work_dir=${WORK_DIR}

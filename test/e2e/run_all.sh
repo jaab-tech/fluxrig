@@ -3,6 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 set -u
+# Support common binary paths (Mac/Homebrew, Linux/usr/local)
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 
 BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
 

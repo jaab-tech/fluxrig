@@ -5,39 +5,73 @@ package commands
 
 import (
 	"bytes"
-	"io"
-	"os"
-	"strings"
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+
+	"github.com/jaab-tech/fluxrig/pkg/telemetry/wal"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-func TestVersionCommand(t *testing.T) {
-	// Capture output
-	oldStdout := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
+func TestInspectConfig_Success(t *testing.T) {
+	// 1. Mock Mixer API
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/config", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"version":"0.4.3","mode":"mixer"}`)
+	})
+	mux.HandleFunc("/api/v1/racks", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `[{"machine_id":1,"name":"rack1","status":"online","config":{"port":8080}}]`)
+	})
 
-	// Set args to "version"
-	rootCmd.SetArgs([]string{"version"})
-	if err := os.Setenv("FLUXRIG_HOME", "/tmp"); err != nil {
-		t.Fatal(err)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	// 2. Execute Command
+	var out bytes.Buffer
+	err := showMixerConfig(context.Background(), ts.URL, &out)
+	assert.NoError(t, err)
+	assert.Contains(t, out.String(), `"version": "0.4.3"`)
+
+	out.Reset()
+	err = showRacksConfig(context.Background(), ts.URL, &out)
+	assert.NoError(t, err)
+	assert.Contains(t, out.String(), "rack1")
+	assert.Contains(t, out.String(), "online")
+}
+
+func TestInspectLogs_Success(t *testing.T) {
+	// 1. Prepare Mock WAL
+	tmpDir := t.TempDir()
+	w, err := wal.Open(tmpDir, nil)
+	require.NoError(t, err)
+
+	// Create a dummy FluxMsg envelope in CBOR
+	msg := map[string]interface{}{
+		"flux_id": uint64(1),
+		"data":    map[string]interface{}{"msg": "test"},
 	}
-
-	// Execute
-	// Execute
-	if err := Execute(); err != nil {
-		t.Fatalf("Execute failed: %v", err)
-	}
-
-	// Restore
+	err = w.Write(msg)
+	require.NoError(t, err)
 	_ = w.Close()
-	os.Stdout = oldStdout
 
-	var buf bytes.Buffer
-	_, _ = io.Copy(&buf, r)
-	output := buf.String()
+	// 2. Execute Command
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	err = inspectLogs(tmpDir, &out, &errOut)
+	assert.NoError(t, err)
+	assert.Contains(t, errOut.String(), "Inspecting WAL")
+	assert.Contains(t, out.String(), `[1] {"data":{"msg":"test"},"flux_id":1}`)
+}
 
-	if !strings.Contains(output, "fluxrig") {
-		t.Errorf("Expected output to contain 'fluxrig', got: %s", output)
-	}
+func TestInspectLogs_NotFound(t *testing.T) {
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	err := inspectLogs("/non/existent/path/that/does/not/exist", &out, &errOut)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to open WAL")
 }

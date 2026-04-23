@@ -13,7 +13,6 @@ import (
 )
 
 // RackConfig defines the startup configuration for a Rack instance.
-// Reference: ops/docs/internal/implementation.md
 type RackConfig struct {
 	Logging   LoggingConfig   `koanf:"logging"`
 	Store     StoreConfig     `koanf:"store"`
@@ -23,16 +22,11 @@ type RackConfig struct {
 
 // TelemetryConfig configures self-reporting metrics and logs.
 type TelemetryConfig struct {
-	// ServiceName as reported in traces.
-	ServiceName string `koanf:"service_name" example:"flux-mixer"`
-	// BatchInterval for OTel exports.
-	BatchInterval string `koanf:"batch_interval" example:"5s"`
-	// BaseSubject for telemetry NATS messages.
-	BaseSubject string `koanf:"base_subject" example:"flux.telemetry"`
-	// MaxBatchSize items per export.
-	MaxBatchSize int `koanf:"max_batch_size" example:"512"`
-	// Metrics configuration for granular control.
-	Metrics MetricsConfig `koanf:"metrics"`
+	ServiceName   string        `koanf:"service_name"`
+	BatchInterval string        `koanf:"batch_interval"`
+	BaseSubject   string        `koanf:"base_subject"`
+	MaxBatchSize  int           `koanf:"max_batch_size"`
+	Metrics       MetricsConfig `koanf:"metrics"`
 }
 
 type MetricsConfig struct {
@@ -43,78 +37,59 @@ type MetricsConfig struct {
 
 // LoggingConfig configures the local text logger.
 type LoggingConfig struct {
-	// Level of logging (debug, info, warn, error).
-	Level string `koanf:"level" example:"info"`
-	// Filename relative to log root.
-	Filename string `koanf:"filename" example:"logs/fluxrig.log"`
-	// MaxSizeMB before rotation.
-	MaxSizeMB int `koanf:"max_size_mb" example:"100"`
-	// MaxBackups kept.
-	MaxBackups int `koanf:"max_backups" example:"7"`
-	// Compress rotated logs.
-	Compress bool `koanf:"compress" example:"true"`
-	// Throttling configuration for logs.
+	Level      string           `koanf:"level"`
+	Filename   string           `koanf:"filename"`
+	MaxSizeMB  int              `koanf:"max_size_mb"`
+	MaxBackups int              `koanf:"max_backups"`
+	Compress   bool             `koanf:"compress"`
 	Throttling ThrottlingConfig `koanf:"throttling"`
 }
 
 // StoreConfig configures persistent storage locations.
 type StoreConfig struct {
-	// Dir is the root directory for data storage.
-	Dir string `koanf:"dir" example:"./data"`
-	// WalMaxSizeMB is the safe limit for write-ahead log growth.
-	WALMaxSizeMB int `koanf:"wal_max_size_mb" example:"500"`
-	// StateFile is the filename for the Rack's state envelope.
-	StateFile string `koanf:"state_file" example:"state.flux"`
-	// DatabaseFile is the DuckDB filename.
-	DatabaseFile string `koanf:"database_file" example:"fluxrig.duckdb"`
-	// ClusterKeyFile is the filename for the public cluster key.
-	ClusterKeyFile string `koanf:"cluster_key_file" example:"cluster.key"`
+	Dir            string `koanf:"dir"`
+	WALMaxSizeMB   int    `koanf:"wal_max_size_mb"`
+	StateFile      string `koanf:"state_file"`
+	DatabaseFile   string `koanf:"database_file"`
+	ClusterKeyFile string `koanf:"cluster_key_file"`
 }
 
 // ThrottlingConfig limits log volume.
 type ThrottlingConfig struct {
-	// Enabled toggles log throttling.
-	Enabled bool `koanf:"enabled" example:"true"`
-	// Rate of allowed log lines per second.
-	Rate float64 `koanf:"rate" example:"100.0"`
-	// Burst capacity.
-	Burst int `koanf:"burst" example:"10"`
+	Enabled bool    `koanf:"enabled"`
+	Rate    float64 `koanf:"rate"`
+	Burst   int     `koanf:"burst"`
 }
 
-// RackSettings defines the identity of this Rack instance.
+// RackSettings defines identity and lifecycle timeouts.
 type RackSettings struct {
-	// Name of the rack (unique in the cluster).
-	Name string `koanf:"name" example:"rack-01"`
-	// NamePrefix for auto-generated names.
-	NamePrefix string `koanf:"name_prefix" example:"node-"`
-	// MachineID is the unique physical ID (if assigned).
-	MachineID uint16 `koanf:"machine_id" example:"10"`
-	// HeartbeatInterval for sending status updates.
-	HeartbeatInterval string `koanf:"heartbeat_interval" example:"30s"`
-	// EnrollmentTimeout for waiting for adoption.
-	EnrollmentTimeout string `koanf:"enrollment_timeout" example:"2s"`
-	// Bus configuration for NATS connection.
-	Bus BusConfig `koanf:"bus"`
+	Name               string    `koanf:"name"`
+	NamePrefix         string    `koanf:"name_prefix"`
+	MachineID          uint16    `koanf:"machine_id"`
+	ConvergenceTimeout string    `koanf:"convergence_timeout"`
+	HandshakeInterval  string    `koanf:"handshake_interval"`
+	HeartbeatInterval  string    `koanf:"heartbeat_interval"`
+	CleanupTimeout     string    `koanf:"cleanup_timeout"`
+	EnrollmentTimeout  string    `koanf:"enrollment_timeout"`
+	Bus                BusConfig `koanf:"bus"`
 }
 
 // BusConfig configures the NATS client connection.
 type BusConfig struct {
-	// URL of the NATS server.
-	URL string `koanf:"url" example:"nats://localhost:4222"`
-	// StreamName for business logic.
-	StreamName string `koanf:"stream_name" example:"flux-msg"`
-	// ConnectTimeout for initial connection.
-	ConnectTimeout string `koanf:"connect_timeout" example:"10s"`
-	// ReconnectWait between attempts.
-	ReconnectWait string `koanf:"reconnect_wait" example:"1s"`
-	// OperationTimeout for pub/sub operations.
-	OperationTimeout string `koanf:"operation_timeout" example:"5s"`
-	// RootCA path to the trusted root certificate (for self-signed certs).
-	RootCA string `koanf:"root_ca" example:"ca.crt"`
+	URL                       string `koanf:"url"`
+	StreamName                string `koanf:"stream_name"`
+	Domain                    string `koanf:"domain"`
+	ConnectTimeout            string `koanf:"connect_timeout"`
+	ReconnectWait             string `koanf:"reconnect_wait"`
+	OperationTimeout          string `koanf:"operation_timeout"`
+	SubscriptionRetryWait     string `koanf:"subscription_retry_wait"`
+	SubscriptionRetryAttempts int    `koanf:"subscription_retry_attempts"`
+	ConvergenceDelay          string `koanf:"convergence_delay"`
+	RootCA                    string `koanf:"root_ca"`
+	InsecureSkipVerify        bool   `koanf:"insecure_skip_verify"`
 }
 
 // LoadRack reads configuration from a TOML file and Environment Variables.
-// Priority: Env > File > Defaults
 func LoadRack(path string) (*RackConfig, error) {
 	k := koanf.New(".")
 
@@ -123,58 +98,50 @@ func LoadRack(path string) (*RackConfig, error) {
 	_ = k.Set("logging.filename", "logs/fluxrig.log")
 	_ = k.Set("logging.max_size_mb", 100)
 	_ = k.Set("logging.max_backups", 7)
-	_ = k.Set("logging.max_backups", 7)
 	_ = k.Set("logging.compress", true)
+	_ = k.Set("logging.throttling.enabled", true)
+	_ = k.Set("logging.throttling.rate", 500.0)
+	_ = k.Set("logging.throttling.burst", 50)
 
-	// Defaults: Telemetry
 	_ = k.Set("telemetry.service_name", "flux-rack")
 	_ = k.Set("telemetry.batch_interval", "5s")
 	_ = k.Set("telemetry.base_subject", "flux.telemetry")
 	_ = k.Set("telemetry.max_batch_size", 512)
 
-	// Defaults: Throttling (QoS)
-	_ = k.Set("logging.throttling.enabled", true)
-	_ = k.Set("logging.throttling.rate", 500.0)
-	_ = k.Set("logging.throttling.burst", 50)
-
-	// Defaults: Store
 	_ = k.Set("store.dir", "./data")
 	_ = k.Set("store.wal_max_size_mb", 500)
 	_ = k.Set("store.state_file", "state.flux")
 
-	_ = k.Set("rack.bus.url", "nats://localhost:4222")
 	_ = k.Set("rack.name_prefix", "node-")
 	_ = k.Set("rack.machine_id", 0)
+	_ = k.Set("rack.cleanup_timeout", "2s")
+	_ = k.Set("rack.convergence_timeout", "5s")
+	_ = k.Set("rack.handshake_interval", "500ms")
 	_ = k.Set("rack.heartbeat_interval", "30s")
 	_ = k.Set("rack.enrollment_timeout", "2s")
-	_ = k.Set("rack.bus.connect_timeout", "10s")
+
+	_ = k.Set("rack.bus.url", "nats://localhost:4222")
+	_ = k.Set("rack.bus.domain", "flux")
+	_ = k.Set("rack.bus.stream_name", "flux-msg")
 	_ = k.Set("rack.bus.connect_timeout", "10s")
 	_ = k.Set("rack.bus.reconnect_wait", "1s")
 	_ = k.Set("rack.bus.operation_timeout", "5s")
-	// Stream Name defaults to flux-msg (Business)
-	_ = k.Set("rack.bus.stream_name", "flux-msg")
+	_ = k.Set("rack.bus.subscription_retry_wait", "200ms")
+	_ = k.Set("rack.bus.subscription_retry_attempts", 5)
+	_ = k.Set("rack.bus.convergence_delay", "100ms")
 
-	// 2. File (if provided)
+	// 2. Load from File
 	if path != "" {
 		if err := k.Load(file.Provider(path), toml.Parser()); err != nil {
-			// If file is optional we might ignore this, but usually explicit path means explicit load.
-			// For now, return error if load fails.
 			return nil, err
 		}
 	}
 
-	// 3. Environment Variables
-	// Mapped as FLUXRIG_RACK_NAME -> rack.name
-	// FLUXRIG_LOGGING_LEVEL -> logging.level
-	// Custom Environment Variable Provider
-	// Maps FLUXRIG_ structure to nested config keys.
-	// Specific overrides are needed for keys containing underscores (e.g., data_dir)
-	// which conflict with the standard "_" to "." separator replacement.
+	// 3. Environment Variables (FLUX_ prefix)
 	err := k.Load(env.Provider("FLUXRIG_", ".", func(s string) string {
 		s = strings.TrimPrefix(s, "FLUXRIG_")
 		s = strings.ToLower(s)
 
-		// 1. Handle Known Hierarchies explicitely to preserve internal underscores
 		if strings.HasPrefix(s, "rack_bus_") {
 			return strings.Replace(s, "rack_bus_", "rack.bus.", 1)
 		}
@@ -184,8 +151,6 @@ func LoadRack(path string) (*RackConfig, error) {
 		if strings.HasPrefix(s, "logging_") {
 			return strings.Replace(s, "logging_", "logging.", 1)
 		}
-
-		// 2. Default: Replace all underscores with dots
 		return strings.Replace(s, "_", ".", -1)
 	}), nil)
 
@@ -193,7 +158,6 @@ func LoadRack(path string) (*RackConfig, error) {
 		return nil, err
 	}
 
-	// Unmarshal
 	var cfg RackConfig
 	if err := k.Unmarshal("", &cfg); err != nil {
 		return nil, err

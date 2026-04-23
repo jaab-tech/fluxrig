@@ -99,6 +99,9 @@ database_file = "fluxrig.duckdb"
 
 [logging]
 level = "debug"
+
+[enrollment]
+auto_adopt = true
 EOF
 
     "${FLUXRIG_BIN}" keys gen-cluster -o "./data/cluster.key" > /dev/null

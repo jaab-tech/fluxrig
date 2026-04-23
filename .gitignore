@@ -34,10 +34,12 @@ __pycache__/
 
 # Test Artifacts
 test/test_logs/
-test/e2e_*/work_*/
-test/e2e_*/work_*/
-test/e2e_*/work
+test/e2e/**/work*/
+test/e2e/**/work
+test/robot/**/work
+test/robot/**/results
 test/e2e/iso8583/prod/
+scratch/
 
 # Unit Test Artifacts
 pkg/ingest/comprehensive-mixer/
@@ -46,3 +48,6 @@ pkg/ingest/test-mixer/
 
 # Temporary
 tmp/
+.gomod_cache/
+test_output*.txt
+coverage.out

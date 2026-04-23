@@ -10,9 +10,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/fxamacker/cbor/v2"
 	"github.com/jaab-tech/fluxrig/pkg/bus"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
-	"github.com/vmihailenco/msgpack/v5"
 )
 
 type DaemonLogic struct {
@@ -65,7 +65,7 @@ func (d *DaemonLogic) Start(ctx context.Context, emit func(*fluxmsg.FluxMsg)) er
 		// d.gear.ctx.Logger().Info("Daemon Raw Event", "key", key, "len", len(data))
 
 		// Heuristic: Non-empty data = PUT, Empty data = DEL/PURGE
-		// (Safe for CoatCheck because we always store MsgPack blobs, never empty bytes)
+		// (Safe for CoatCheck because we always store CBOR blobs, never empty bytes)
 		if len(data) > 0 {
 			d.scheduleExpiry(key, data, emit)
 		} else {
@@ -112,7 +112,7 @@ func (d *DaemonLogic) scheduleExpiry(key string, value []byte, emit func(*fluxms
 	if d.gear.config.IncludeValues {
 		var msg fluxmsg.FluxMsg
 		// We ignore error here to allow robust governance (fallback to default TTL)
-		if err := msgpack.Unmarshal(value, &msg); err == nil {
+		if err := cbor.Unmarshal(value, &msg); err == nil {
 			// Check Metadata override
 			if val, ok := msg.Metadata[fluxmsg.MetaCoatCheckTTL]; ok {
 				if parsed, parseErr := time.ParseDuration(val); parseErr == nil {
@@ -178,7 +178,7 @@ func (d *DaemonLogic) handleTimeout(key string, value []byte, emit func(*fluxmsg
 		// Attach original as payload or raw?
 		// Trying to unmarshal original
 		var orig fluxmsg.FluxMsg
-		if err := msgpack.Unmarshal(value, &orig); err == nil {
+		if err := cbor.Unmarshal(value, &orig); err == nil {
 			// Merge important fields or attach as data
 			event.Data["expired_ctx"] = orig.Data // or raw?
 			event.Metadata["expired.src_id"] = fmt.Sprint(orig.SrcGearID)

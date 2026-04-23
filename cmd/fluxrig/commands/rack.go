@@ -11,6 +11,7 @@ import (
 	"github.com/jaab-tech/fluxrig/pkg/config"
 	loggerPkg "github.com/jaab-tech/fluxrig/pkg/logger"
 	"github.com/jaab-tech/fluxrig/pkg/telemetry"
+	"github.com/jaab-tech/fluxrig/pkg/version"
 	"github.com/spf13/cobra"
 )
 
@@ -24,13 +25,17 @@ var rackCmd = &cobra.Command{
 	Long:  `Initializes the fluxrig Rack, connects to the Bus (NATS), loads the Registry, and begins processing.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// 1. Setup Logging (Basic for startup)
+		initLevel := "info"
+		if os.Getenv("FLUXRIG_TRACE") == "true" || os.Getenv("FLUXRIG_TRACE") == "1" {
+			initLevel = "trace"
+		}
 		logger = loggerPkg.New(loggerPkg.Config{
-			Level:      "info",
+			Level:      initLevel,
 			EntityType: loggerPkg.TypeRack,
 			Name:       "fluxrig-rack-init",
 			Writer:     os.Stdout,
 		})
-		// logger.Info("Starting FluxRig Rack...") // Removed to avoid double print with main logger
+		logger.Log(cmd.Context(), loggerPkg.ParseLevel(initLevel), "Initializing FluxRig Rack CLI...")
 
 		// 2. Load Configuration
 		// We load config first to know WHERE to log.
@@ -38,6 +43,11 @@ var rackCmd = &cobra.Command{
 		cfg, err := config.LoadRack(configFile)
 		if err != nil {
 			return fmt.Errorf("failed to load config: %w", err)
+		}
+
+		// Override config level if TRACE environment is active
+		if os.Getenv("FLUXRIG_TRACE") == "true" || os.Getenv("FLUXRIG_TRACE") == "1" {
+			cfg.Logging.Level = "trace"
 		}
 
 		// 3. Setup Standard Logger
@@ -52,7 +62,8 @@ var rackCmd = &cobra.Command{
 		bufLogger := slog.New(bufHandler)
 		slog.SetDefault(bufLogger)
 
-		bufLogger.Info("Starting FluxRig Rack...", "version", "v0.1.0-alpha")
+		bufLogger.Info("Starting FluxRig Rack...", "version", version.Version)
+		bufLogger.Debug("Diagnostic: Logger calibrated for Debug/Trace visibility")
 
 		// 3. Connect to Bus & Start Agent
 		if err := RunAgent(cfg, bufLogger, bufHandler); err != nil {

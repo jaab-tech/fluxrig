@@ -12,10 +12,15 @@ import (
 
 // ConnectOptions holds parameters for establishing a connection.
 type ConnectOptions struct {
-	Name           string
-	ConnectTimeout time.Duration
-	ReconnectWait  time.Duration
-	RootCA         string
+	Name                      string
+	Domain                    string
+	ConnectTimeout            time.Duration
+	ReconnectWait             time.Duration
+	OperationTimeout          time.Duration
+	SubscriptionRetryWait     time.Duration
+	SubscriptionRetryAttempts int
+	RootCA                    string // Optional path to Root CA for TLS
+	InsecureSkipVerify        bool   // Optional bypass for local testing
 }
 
 // Bus defines the standard behavior for our messaging layer.
@@ -28,7 +33,7 @@ type Bus interface {
 	// It must respect the context for cancellation and tracing propagation.
 	Publish(ctx context.Context, subject string, msg *fluxmsg.FluxMsg) error
 
-	// PublishRaw sends pre-serialized data (MsgPack) with a specific deduplication ID.
+	// PublishRaw sends pre-serialized data (CBOR) with a specific deduplication ID.
 	PublishRaw(ctx context.Context, subject string, data []byte, fluxID uint64) error
 
 	// Subscribe listens for messages on a subject.
@@ -45,6 +50,9 @@ type Bus interface {
 
 	// KV returns the KeyValue interface for distributed state management.
 	KV() KeyValue
+
+	// Core returns the underlying core NATS connection (if applicable).
+	Core() any
 
 	// Close cleans up the connection.
 	Close()

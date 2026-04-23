@@ -10,7 +10,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/vmihailenco/msgpack/v5"
+	"github.com/fxamacker/cbor/v2"
 )
 
 // --- Mixer Side ---
@@ -24,7 +24,7 @@ type ClusterKey struct {
 // Sign creates a StateEnvelope for a Rack.
 func (c *ClusterKey) Sign(state *RackState) (*StateEnvelope, error) {
 	// 1. Serialize Payload
-	payload, err := msgpack.Marshal(state)
+	payload, err := cbor.Marshal(state)
 	if err != nil {
 		return nil, err
 	}
@@ -81,7 +81,7 @@ func LoadClusterKey(path string) (*ClusterKey, error) {
 
 // StateEnvelope is the signed passport persisted on the Rack.
 type StateEnvelope struct {
-	Payload   []byte // MsgPack(RackState)
+	Payload   []byte // CBOR(RackState)
 	Signature []byte // Sig(Payload)
 }
 
@@ -90,21 +90,21 @@ type StateEnvelope struct {
 // The Scenario field is optional and contains the projected scenario for this rack.
 // When present, it is signed along with the identity for tamper-proof storage.
 type RackState struct {
-	MixerID     uint64            `msgpack:"mixer_id"`     // Mixer's fluxEntityID (binary)
-	MachineID   uint16            `msgpack:"machine_id"`   // Rack's unique machine ID
-	Name        string            `msgpack:"name"`         // Rack's display name
-	Status      string            `msgpack:"status"`       // e.g. "pending", "active"
-	Secret      string            `msgpack:"secret"`       // Bearer Token
-	MixerPublic ed25519.PublicKey `msgpack:"mixer_pub"`    // Mixer's signing key (for verification)
-	Scenario    []byte            `msgpack:"scenario"`     // YAML-encoded projected scenario (optional)
-	ScenarioVer string            `msgpack:"scenario_ver"` // Scenario version for quick check
+	MixerID     uint64            `cbor:"mixer_id"`     // Mixer's fluxEntityID (binary)
+	MachineID   uint16            `cbor:"machine_id"`   // Rack's unique machine ID
+	Name        string            `cbor:"name"`         // Rack's display name
+	Status      string            `cbor:"status"`       // e.g. "pending", "active"
+	Secret      string            `cbor:"secret"`       // Bearer Token
+	MixerPublic ed25519.PublicKey `cbor:"mixer_pub"`    // Mixer's signing key (for verification)
+	Scenario    []byte            `cbor:"scenario"`     // YAML-encoded projected scenario (optional)
+	ScenarioVer string            `cbor:"scenario_ver"` // Scenario version for quick check
 }
 
 // Verify checks the envelope's signature using the embedded Public Key.
 func (e *StateEnvelope) Verify() (*RackState, error) {
 	// 1. Unmarshal Payload to get Public Key
 	var state RackState
-	if err := msgpack.Unmarshal(e.Payload, &state); err != nil {
+	if err := cbor.Unmarshal(e.Payload, &state); err != nil {
 		return nil, fmt.Errorf("invalid payload format: %w", err)
 	}
 
@@ -122,7 +122,7 @@ func (e *StateEnvelope) Verify() (*RackState, error) {
 
 // Save writes the envelope to disk.
 func (e *StateEnvelope) Save(path string) error {
-	data, err := msgpack.Marshal(e)
+	data, err := cbor.Marshal(e)
 	if err != nil {
 		return err
 	}
@@ -136,7 +136,7 @@ func LoadStateEnvelope(path string) (*StateEnvelope, error) {
 		return nil, err
 	}
 	var env StateEnvelope
-	if err := msgpack.Unmarshal(data, &env); err != nil {
+	if err := cbor.Unmarshal(data, &env); err != nil {
 		return nil, err
 	}
 	return &env, nil

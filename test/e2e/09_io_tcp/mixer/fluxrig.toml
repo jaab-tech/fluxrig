@@ -26,3 +26,6 @@ tier = "embedded"
 
 [observability.embedded]
 flush_interval = "2s"
+
+[enrollment]
+auto_adopt = true

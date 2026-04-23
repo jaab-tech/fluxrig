@@ -119,7 +119,7 @@ RACK_A_PID=$!
 cd "${BASE_DIR}"
 
 sleep 2
-CHECK_RECOVERY=$(tail -n 20 "$RACK_A_DIR/logs/rack.log" | grep "Loaded Cached Passport")
+CHECK_RECOVERY=$(grep -a "Loaded Cached Passport" "$RACK_A_DIR/logs/rack.log")
 if [ -z "$CHECK_RECOVERY" ]; then
     fail "Rack A did not load cached passport"
 fi
@@ -138,8 +138,8 @@ RACK_C_PID=$!
 cd "${BASE_DIR}"
 sleep 2
 
-ID_C=$(grep "Passport Verified" "$RACK_C_DIR/logs/rack.log" | grep -o 'id=[0-9]*' | xargs | cut -d= -f2)
-NAME_C=$(grep "Passport Verified" "$RACK_C_DIR/logs/rack.log" | grep -o 'name=[^ ]*' | xargs | cut -d= -f2)
+ID_C=$(grep "Passport Verified" "$RACK_C_DIR/rack.stdout" | grep -o 'id=[0-9]*' | xargs | cut -d= -f2)
+NAME_C=$(grep "Passport Verified" "$RACK_C_DIR/rack.stdout" | grep -o 'name=[^ ]*' | xargs | cut -d= -f2)
 if [ -z "$ID_C" ]; then
     fail "Rack C failed to register"
 fi
@@ -157,8 +157,8 @@ RACK_D_PID=$!
 cd "${BASE_DIR}"
 sleep 2
 
-ID_D=$(grep "Passport Verified" "$RACK_D_DIR/logs/rack.log" | grep -o 'id=[0-9]*' | xargs | cut -d= -f2)
-NAME_D=$(grep "Passport Verified" "$RACK_D_DIR/logs/rack.log" | grep -o 'name=[^ ]*' | xargs | cut -d= -f2)
+ID_D=$(grep "Passport Verified" "$RACK_D_DIR/rack.stdout" | grep -o 'id=[0-9]*' | xargs | cut -d= -f2)
+NAME_D=$(grep "Passport Verified" "$RACK_D_DIR/rack.stdout" | grep -o 'name=[^ ]*' | xargs | cut -d= -f2)
 if [ -z "$ID_D" ]; then
     fail "Rack D failed to register"
 fi
@@ -186,8 +186,8 @@ RACK_E_PID=$!
 cd "${BASE_DIR}"
 sleep 2
 
-ID_E=$(grep "Passport Verified" "$RACK_E_DIR/logs/rack.log" | grep -o 'id=[0-9]*' | xargs | cut -d= -f2)
-NAME_E=$(grep "Passport Verified" "$RACK_E_DIR/logs/rack.log" | grep -o 'name=[^ ]*' | xargs | cut -d= -f2)
+ID_E=$(grep "Passport Verified" "$RACK_E_DIR/rack.stdout" | grep -o 'id=[0-9]*' | xargs | cut -d= -f2)
+NAME_E=$(grep "Passport Verified" "$RACK_E_DIR/rack.stdout" | grep -o 'name=[^ ]*' | xargs | cut -d= -f2)
 if [ -z "$ID_E" ]; then
     fail "Rack E failed to register"
 fi

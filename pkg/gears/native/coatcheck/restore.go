@@ -7,8 +7,8 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/fxamacker/cbor/v2"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
-	"github.com/vmihailenco/msgpack/v5"
 )
 
 type RestoreLogic struct {
@@ -37,7 +37,7 @@ func (r *RestoreLogic) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*flux
 	// 3. Decode Context Blob (The "Coat")
 	// We expect a FluxMsg envelope.
 	var savedMsg fluxmsg.FluxMsg
-	if err := msgpack.Unmarshal(valBytes, &savedMsg); err != nil {
+	if err := cbor.Unmarshal(valBytes, &savedMsg); err != nil {
 		return nil, fmt.Errorf("coatcheck restore: decode failed: %w", err)
 	}
 

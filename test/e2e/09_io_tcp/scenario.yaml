@@ -17,14 +17,14 @@ meta:
   version: "1.0.0"
 
 racks:
-  - name: "comp-node-01"
+  - name: "rack-tcp-01"
     labels:
       tier: "edge"
 
 gears:
   - name: "gateway-server"
     type: "io_tcp"
-    deploy: "comp-node-01" # Target the Rack Name
+    deploy: "rack-tcp-01" # Target the Rack Name
     config:
       mode: "server"
       bind: ":9001"

@@ -101,10 +101,12 @@ func (k *natsKV) Watch(bucket, keys string, handler KVHandler) (Subscription, er
 			select {
 			case <-ctx.Done():
 				return
-			case entry := <-watcher.Updates():
-				if entry == nil {
-					// Channel closed?
+			case entry, ok := <-watcher.Updates():
+				if !ok {
 					return
+				}
+				if entry == nil {
+					continue
 				}
 
 				op := "PUT"

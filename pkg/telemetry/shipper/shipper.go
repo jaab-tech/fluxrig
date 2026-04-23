@@ -11,10 +11,10 @@ import (
 
 	"golang.org/x/time/rate"
 
+	"github.com/fxamacker/cbor/v2"
 	"github.com/jaab-tech/fluxrig/pkg/bus"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/jaab-tech/fluxrig/pkg/telemetry/wal"
-	"github.com/vmihailenco/msgpack/v5"
 )
 
 // LogShipper tails the WAL and ships logs to the bus.
@@ -180,8 +180,22 @@ func (s *LogShipper) loop() {
 
 func (s *LogShipper) process(ctx context.Context, payload []byte) error {
 	var msg fluxmsg.FluxMsg
-	if err := msgpack.Unmarshal(payload, &msg); err != nil {
-		return err
+	if err := cbor.Unmarshal(payload, &msg); err != nil {
+		// 1. Explicit Alarm: Publish Error Metric
+		metricMsg := fluxmsg.New()
+		metricMsg.Metadata["type"] = "telemetry.metric"
+		metricMsg.Metadata["metric.name"] = "fluxrig_telemetry_decode_failures_total"
+		metricMsg.Data = map[string]any{
+			"name":  "fluxrig_telemetry_decode_failures_total",
+			"value": 1.0,
+			"error": err.Error(),
+		}
+		// QoS: Optional/Best effort
+		_ = s.bus.Publish(ctx, s.baseSubject+".metrics", metricMsg)
+
+		// 2. Explicit Diagnostic Log
+		slog.Error("Telemetry Decode Failure", "error", err, "size", len(payload))
+		return nil // Skip and continue
 	}
 
 	// Determine Subject suffix based on type
@@ -189,6 +203,8 @@ func (s *LogShipper) process(ctx context.Context, payload []byte) error {
 	if t, ok := msg.Metadata["type"]; ok {
 		if t == "telemetry.log" {
 			suffix = ".logs"
+		} else if t == "telemetry.metric" {
+			suffix = ".metrics"
 		}
 	}
 

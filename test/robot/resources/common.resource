@@ -1,5 +1,5 @@
-*** Settings ***
-Library    ../lib/ISO8583Library.py
+Library    ISO8583Library
+Library    FluxRigLibrary
 
 *** Variables ***
 ${ISO_HOST}      localhost

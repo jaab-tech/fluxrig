@@ -45,6 +45,9 @@ type GearContext interface {
 
 	// Manager returns the Spec/Scenario Manager
 	Manager() manager.Manager
+
+	// ControlPlane returns the global signaling interface
+	ControlPlane() any
 }
 
 // NativeGear defines the contract for Go-based components (Internal/Native Gears).

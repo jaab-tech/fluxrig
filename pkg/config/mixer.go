@@ -37,6 +37,9 @@ type IngestConfig struct {
 type EnrollmentConfig struct {
 	// PushDelay is the time to wait before pushing state to a newly enrolled Rack.
 	PushDelay string `koanf:"push_delay" example:"1s"`
+	// AutoAdopt, if true, will automatically mark newly enrolled Racks as 'active'.
+	// If false (default), new Racks start as 'pending'.
+	AutoAdopt bool `koanf:"auto_adopt" example:"false"`
 }
 
 // ObservabilityConfig controls the global observability tier.
@@ -141,8 +144,8 @@ func LoadMixer(path string) (*MixerConfig, error) {
 	_ = k.Set("telemetry.base_subject", "flux.telemetry")
 	_ = k.Set("telemetry.max_batch_size", 512)
 	_ = k.Set("snake.cluster_name", "flux")
-	_ = k.Set("snake.stream_name", "")
-	_ = k.Set("snake.stream_subjects", []string{})
+	_ = k.Set("snake.stream_name", "flux-msg")
+	_ = k.Set("snake.stream_subjects", []string{"flux.msg.>", "flux.gear.>", "fluxrig.>"})
 	_ = k.Set("snake.durable", false)
 	_ = k.Set("snake.operation_timeout", "5s")
 	_ = k.Set("snake.business_stream_max_age", "720h") // 30 days
@@ -156,6 +159,7 @@ func LoadMixer(path string) (*MixerConfig, error) {
 	_ = k.Set("observability.embedded.flush_interval", "5s")
 	_ = k.Set("observability.embedded.retention_days", 30)
 	_ = k.Set("enrollment.push_delay", "1s")
+	_ = k.Set("enrollment.auto_adopt", false)
 
 	// 2. File (if provided)
 	if path != "" {

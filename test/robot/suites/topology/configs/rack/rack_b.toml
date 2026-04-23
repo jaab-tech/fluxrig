@@ -1,10 +1,20 @@
+# Rack B - Secondary
 [rack]
 name = "rack-b"
+machine_id = 101
+enrollment_timeout = "10s"
+
+[bus]
+url = "nats://localhost:4222"
+stream_name = "flux-msg"
 
 [logging]
-level = "trace"
+level = "debug"
 filename = "logs/rack.log"
+max_size_mb = 100
+max_backups = 7
+compress = true
 
-[telemetry]
-export_interval = "100ms"
-batch_size = 1
+[enrollment]
+timeout = "10s"
+push_delay = "100ms"

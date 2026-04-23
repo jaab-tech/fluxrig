@@ -277,7 +277,7 @@ func TestTelemetrySink_MiscLogs(t *testing.T) {
 	}
 	_ = mockBus.Publish(context.Background(), "flux.telemetry.log.json", jsonMsg)
 
-	// 2. Single Log MsgPack (WAL style)
+	// 2. Single Log CBOR (WAL style)
 	walMsg := fluxmsg.New()
 	walMsg.Metadata["type"] = "telemetry.log"
 	// Data IS the log

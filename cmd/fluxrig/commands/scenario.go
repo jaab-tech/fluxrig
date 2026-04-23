@@ -45,7 +45,11 @@ var scenarioImportCmd = &cobra.Command{
 
 		if apiMode {
 			// --- API mode: POST to running Mixer ---
-			mixerURL := "http://localhost:9000/api/v1/scenario/import"
+			baseURL := os.Getenv("FLUXRIG_API_URL")
+			if baseURL == "" {
+				baseURL = "http://localhost:8090"
+			}
+			mixerURL := fmt.Sprintf("%s/api/v1/scenario/import", baseURL)
 			if dryRun {
 				mixerURL += "?dry_run=true"
 			}

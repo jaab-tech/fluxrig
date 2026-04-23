@@ -1,0 +1,20 @@
+# Copyright 2025 JAAB Tech SAS, Uruguay
+[rack]
+name = "iso-node-01"
+machine_id = 1
+enrollment_timeout = "10s"
+
+[bus]
+url = "nats://localhost:4222"
+stream_name = "flux-msg"
+
+[logging]
+level = "debug"
+filename = "logs/fluxrig.log"
+max_size_mb = 100
+max_backups = 7
+compress = true
+
+[enrollment]
+timeout = "10s"
+push_delay = "100ms"

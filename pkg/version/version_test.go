@@ -63,20 +63,31 @@ func TestString(t *testing.T) {
 }
 
 func TestFullInfo(t *testing.T) {
-	// Smoke test for format
-	// Current implementation: fmt.Sprintf("FluxRig %s (%s, %s/%s)", String(), BuildDate, runtime.GOOS, runtime.GOARCH)
+	// Backup
+	origDirty := Dirty
+	defer func() { Dirty = origDirty }()
 
+	// 1. Clean Info
+	Dirty = ""
 	info := FullInfo()
-	if len(info) == 0 {
-		t.Error("FullInfo returned empty string")
+	if strings.Contains(info, "-dirty") {
+		t.Error("FullInfo should not contain -dirty when Dirty is empty")
 	}
+
+	// 2. Dirty Info
+	Dirty = "-dirty"
+	infoDirty := FullInfo()
+	if !strings.Contains(infoDirty, "-dirty") {
+		t.Error("FullInfo should contain -dirty when Dirty is set")
+	}
+
 	expectedOS := runtime.GOOS
 	expectedArch := runtime.GOARCH
 
-	if !strings.Contains(info, expectedOS) {
-		t.Errorf("FullInfo missing OS: %s", info)
+	if !strings.Contains(infoDirty, expectedOS) {
+		t.Errorf("FullInfo missing OS: %s", infoDirty)
 	}
-	if !strings.Contains(info, expectedArch) {
-		t.Errorf("FullInfo missing Arch: %s", info)
+	if !strings.Contains(infoDirty, expectedArch) {
+		t.Errorf("FullInfo missing Arch: %s", infoDirty)
 	}
 }

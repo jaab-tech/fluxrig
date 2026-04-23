@@ -56,15 +56,17 @@ Setup Server Suite
     Start Mixer    config_file=${MIXER_CONFIG}    work_dir=${WORK_DIR}/mixer    alias=mixer
     Wait For Healthy    port=${MIXER_PORT}
     
-    # Import Scenario
-    Import Scenario    mixer_port=${MIXER_PORT}    file_path=${SCENARIO_FILE}
-
     # Start Rack
     Start Rack    config_file=${RACK_CONFIG}    work_dir=${WORK_DIR}/rack    mixer_home=${WORK_DIR}/mixer    alias=rack
     Sleep    5s    reason=Wait for Rack to initialize
     
     # Wait for Rack Registration
     Wait For Rack Registration    mixer_port=${MIXER_PORT}    rack_name=iso-node-01
+
+    # Import Scenario
+    Import Scenario    mixer_port=${MIXER_PORT}    file_path=${SCENARIO_FILE}
+    
+    # Wait for Port listener
     Wait For Port    port=${ISO_PORT}    timeout=30
 
 Teardown Server Suite

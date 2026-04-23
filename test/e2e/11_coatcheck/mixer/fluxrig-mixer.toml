@@ -3,7 +3,7 @@ level = "debug"
 filename = "logs/mixer.log"
 
 [api]
-port = 8090
+port = 8080
 
 [snake]
 port = 4223
@@ -13,3 +13,6 @@ url = "nats://localhost:4223"
 dir = "./data"
 database_file = "coatcheck_e2e.duckdb"
 cluster_key_file = "cluster.key"
+
+[enrollment]
+auto_adopt = true

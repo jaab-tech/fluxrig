@@ -100,8 +100,8 @@ wires:
 	}
 
 	// Pre-register rack-1 (Simulate enrollment)
-	// Create Registry wrapper to access high-level Register method
 	reg := registry.NewDuckDBRegistry(store)
+	reg.SetAutoAdopt(true) // Ensure it's active immediately for scenario registration
 	if _, err := reg.Register(ctx, "rack-1", "sec", "ip", 80, "v1", nil, 1); err != nil {
 		t.Fatalf("Failed to pre-register rack: %v", err)
 	}
@@ -183,6 +183,13 @@ racks:
 	}
 	if name == "" {
 		t.Error("Returned empty name")
+	}
+
+	// Pre-enroll test-rack (Required for Activate to succeed without timeout)
+	reg := registry.NewDuckDBRegistry(store)
+	reg.SetAutoAdopt(true)
+	if _, err := reg.Register(ctx, "test-rack", "sec", "ip", 80, "v1", nil, 1); err != nil {
+		t.Fatalf("Failed to pre-register rack: %v", err)
 	}
 
 	// 5. Test Activate
