@@ -8,6 +8,7 @@ import (
 	"fmt"
 
 	"github.com/fxamacker/cbor/v2"
+
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 )
 
@@ -83,7 +84,7 @@ func (r *RestoreLogic) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*flux
 	// 5. Cleanup?
 	// Do we delete the key after restore? "Claim Check" implies getting item back.
 	// But in some flows, we might want multiple restores (broadcast)?
-	// ADR 0029 doesn't specify "Delete on Restore".
+	// The specification doesn't specify "Delete on Restore".
 	// Usually Coat Check is one-time use.
 	// Let's assume one-time use requires an explicit "delete_on_restore" config?
 	// Default: Keep it until TTL (Safer for retries).

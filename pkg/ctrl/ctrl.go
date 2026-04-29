@@ -3,7 +3,7 @@
 
 package ctrl
 
-// Command matches the JSON schema defined in ADR 0020.
+// Command matches the JSON schema defined in the control plane specification.
 type Command struct {
 	Cmd  string            `json:"cmd"`  // e.g., "conn.close"
 	Args map[string]string `json:"args"` // e.g., {"conn_id": "123", "reason": "timeout"}

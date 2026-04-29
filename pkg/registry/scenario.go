@@ -9,9 +9,9 @@ import (
 )
 
 // Scenario represents the static definition of the system topology.
-// Reference: ADR 0005
+// Reference: Topology Specification
 // Scenario represents the static definition of the system topology.
-// Reference: ADR 0005
+// Reference: Topology Specification
 type Scenario struct {
 	Meta  ScenarioMeta `json:"meta" yaml:"meta"`
 	Racks []RackTarget `json:"racks,omitempty" yaml:"racks,omitempty"`

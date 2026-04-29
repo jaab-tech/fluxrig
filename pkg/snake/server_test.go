@@ -7,8 +7,9 @@ import (
 	"os"
 	"testing"
 
-	"github.com/jaab-tech/fluxrig/pkg/snake"
 	"github.com/nats-io/nats.go"
+
+	"github.com/jaab-tech/fluxrig/pkg/snake"
 )
 
 func TestNewServer_Provisioning(t *testing.T) {

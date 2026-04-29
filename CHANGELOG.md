@@ -19,9 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **Certification & Core Test Hardening**: Achieved 100% pass rate in critical certification shards (Mixer, PKI, ISO8583 IO).
 - **Certified Coverage**: Consolidated core code coverage reached 60.1%.
-- **Enrollment Architecture (ADR 0034)**: Implemented configuration-driven rack adoption with secure nonce-based passports.
-- **CBOR Migration (ADR 0033)**: Transitioned internal wire-format to deterministic CBOR for 100% binary stability.
-- **Data-Plane Integrity (ADR 0037)**: Enforced technical UTF-8 validation and hex-encoded binary metadata handling.
+- **Enrollment Architecture**: Implemented configuration-driven rack adoption with secure nonce-based passports.
+- **CBOR Migration**: Transitioned internal wire-format to deterministic CBOR for 100% binary stability.
+- **Data-Plane Integrity**: Enforced technical UTF-8 validation and hex-encoded binary metadata handling.
 - **IO stabilization**: Implemented robust connection polling and rate-limited background WAL replay.
 
 ## [v0.4.3] - 2026-02-19

@@ -561,7 +561,7 @@ func (s *TelemetrySink) persistCborLog(msg *fluxmsg.FluxMsg) error {
 	baseName := str("entity_name")
 	eType, eName, sFile, sFunc, sLine := extractIdentityAndSource(baseName, log)
 
-	// Attributes might need marshalling if they are map/slice
+	// Attributes might need encoding if they are map/slice
 	attrJSON := []byte("{}")
 	if attrs, ok := log["attributes"]; ok {
 		j, err := json.Marshal(cleanMap(attrs))

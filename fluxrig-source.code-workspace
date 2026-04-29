@@ -5,6 +5,9 @@
 		},
 		{
 			"path": "../fluxrig-ops"
+		},
+		{
+			"path": "../fluxrig.org"
 		}
 	]
 }

@@ -18,6 +18,9 @@ import (
 	"syscall"
 	"time"
 
+	"crypto/ed25519"
+	"crypto/rand"
+
 	"github.com/jaab-tech/fluxrig/pkg/bus"
 	"github.com/jaab-tech/fluxrig/pkg/config"
 	"github.com/jaab-tech/fluxrig/pkg/controller"
@@ -62,12 +65,22 @@ func (a *App) Run() error {
 
 	// 2. Load Security State
 	clusterKeyPath := filepath.Join(cfg.Store.Dir, cfg.Store.ClusterKeyFile)
-	slog.Info("Loading Cluster Authority", "path", clusterKeyPath)
 	ck, err := pki.LoadClusterKey(clusterKeyPath)
 	if err != nil {
-		return fmt.Errorf("failed to load cluster key (run 'fluxrig keys gen-cluster'): %w", err)
+		slog.Warn("Cluster Authority not found. Generating a new keypair for Zero-Config operation.", "path", clusterKeyPath)
+		pub, priv, errGen := ed25519.GenerateKey(rand.Reader)
+		if errGen != nil {
+			return fmt.Errorf("failed to generate cluster key: %w", errGen)
+		}
+		ck = &pki.ClusterKey{Private: priv, Public: pub}
+		// Save it so it's persistent for this environment
+		if errSave := ck.Save(clusterKeyPath); errSave != nil {
+			slog.Warn("Failed to persist generated cluster key", "error", errSave)
+		} else {
+			slog.Info("Persistent Cluster Authority generated and saved", "path", clusterKeyPath)
+		}
 	}
-	slog.Info("Cluster Authority Loaded", "public_key", hex.EncodeToString(ck.Public))
+	slog.Info("Cluster Authority Active", "public_key", hex.EncodeToString(ck.Public))
 
 	slog.Info("Starting FluxRig Mixer",
 		"version", version.String(),
@@ -127,7 +140,7 @@ func (a *App) Run() error {
 		TLSKey:         cfg.Snake.TLSKeyFile,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to start embedded nats: %w", err)
+		return fmt.Errorf("failed to start embedded nats (Snake): %w", err)
 	}
 	defer snakeSrv.Shutdown()
 

@@ -280,3 +280,22 @@ class ProcessKeywords:
                 pass
             time.sleep(1)
         raise RuntimeError(f"Timeout waiting for port {port}")
+    @keyword
+    def fluxrig_check(self, config_file: str, work_dir: str):
+        """
+        Runs 'fluxrig check' to verify the environment health.
+        """
+        bin_path = os.path.join(self.root_dir, "bin", "fluxrig")
+        if not os.path.isabs(config_file):
+            config_file = os.path.abspath(config_file)
+            
+        cmd = [bin_path, "check", "-c", config_file]
+        logger.info(f"Running Check: {' '.join(cmd)}")
+        
+        try:
+            output = subprocess.check_output(cmd, stderr=subprocess.STDOUT, cwd=work_dir).decode()
+            logger.info(output)
+            if "FAIL" in output:
+                 raise AssertionError(f"FluxRig Check Failed:\n{output}")
+        except subprocess.CalledProcessError as e:
+            raise AssertionError(f"FluxRig Check Error (Code {e.returncode}):\n{e.output.decode()}")

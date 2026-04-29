@@ -8,6 +8,7 @@ import (
 	"fmt"
 
 	"github.com/fxamacker/cbor/v2"
+
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/jaab-tech/fluxrig/pkg/sdk"
 )
@@ -67,7 +68,7 @@ func (s *StoreLogic) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxms
 	// Wait, we need to KNOW when it expires.
 	// Strategy: We can't rely on NATS to auto-expire individual keys if bucket has MAX_AGE.
 	// But if bucket has TTL, ALL keys expire.
-	// ADR says: "Daemon... Schedules timers...".
+	// The specification says: "Daemon... Schedules timers...".
 	// So the Daemon needs to know the specific expiry time.
 	// We should probably check if we need to store "ExpireAt" in metadata?
 	// Or Daemon calculates it from "TsInit + TTL"? Yes.

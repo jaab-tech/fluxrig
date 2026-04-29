@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/fxamacker/cbor/v2"
+
 	"github.com/jaab-tech/fluxrig/pkg/bus"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 )
@@ -163,9 +164,9 @@ func (d *DaemonLogic) handleTimeout(key string, value []byte, emit func(*fluxmsg
 
 	// 1. Emit Timeout Event (to Bus)
 	// We use the 'emit' function passed in Start (which emits to OUT port of Daemon).
-	// ADR says Daemon is Source.
+	// The specification says Daemon is Source.
 	// We wrap the expired coat in a new FluxMsg? Or emit the original?
-	// ADR 0029 section 4: "Payload Config: include_values: true ensures event contains Context Blob".
+	// The specification section 4: "Payload Config: include_values: true ensures event contains Context Blob".
 
 	// If we can unmarshal, we emit the original enriched with error?
 	// Or we create a new Event Msg.

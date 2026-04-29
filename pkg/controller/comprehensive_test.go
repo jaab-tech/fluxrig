@@ -11,15 +11,17 @@ import (
 	"sync"
 	"testing"
 
+	"log/slog"
+	"time"
+
 	"github.com/ThreeDotsLabs/watermill/message"
 	"github.com/fxamacker/cbor/v2"
+
 	"github.com/jaab-tech/fluxrig/pkg/controller"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/jaab-tech/fluxrig/pkg/pki"
 	"github.com/jaab-tech/fluxrig/pkg/registry"
 	"github.com/jaab-tech/fluxrig/pkg/router"
-	"log/slog"
-	"time"
 )
 
 // Reusing MockRegistry from enrollment_test.go (copying minimal needed or assuming package level visibility if same package?)

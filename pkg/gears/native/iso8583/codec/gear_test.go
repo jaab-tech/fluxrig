@@ -9,11 +9,12 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
-	"github.com/jaab-tech/fluxrig/pkg/sdk"
 	"github.com/moov-io/iso8583"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
+	"github.com/jaab-tech/fluxrig/pkg/sdk"
 )
 
 type mockGearContext struct {

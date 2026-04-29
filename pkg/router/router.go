@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/ThreeDotsLabs/watermill"
-	wnats "github.com/ThreeDotsLabs/watermill-nats/v2/pkg/nats"
+	watermillNats "github.com/ThreeDotsLabs/watermill-nats/v2/pkg/nats"
 	"github.com/ThreeDotsLabs/watermill/message"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -135,7 +135,7 @@ func (r *RouterWrapper) ConfigureJetStream(url string, domain string, durable bo
 		)
 	}
 
-	jsConfig := wnats.JetStreamConfig{
+	jsConfig := watermillNats.JetStreamConfig{
 		Disabled:       false,
 		AutoProvision:  false, // Handled manually above
 		ConnectOptions: []nats.JSOpt{
@@ -149,8 +149,8 @@ func (r *RouterWrapper) ConfigureJetStream(url string, domain string, durable bo
 	}
 
 	// Publisher (Writes to Watermill wires -> NATS Streams)
-	pub, err := wnats.NewPublisher(
-		wnats.PublisherConfig{
+	pub, err := watermillNats.NewPublisher(
+		watermillNats.PublisherConfig{
 			URL:         url,
 			Marshaler:   RawNATSMarshaler{}, // Passthrough for FluxMsg (CBOR)
 			JetStream:   jsConfig,
@@ -163,8 +163,8 @@ func (r *RouterWrapper) ConfigureJetStream(url string, domain string, durable bo
 	}
 
 	// Subscriber (Reads from NATS Consumer -> Watermill handlers)
-	sub, err := wnats.NewSubscriber(
-		wnats.SubscriberConfig{
+	sub, err := watermillNats.NewSubscriber(
+		watermillNats.SubscriberConfig{
 			URL:         url,
 			Unmarshaler: RawNATSMarshaler{}, // Passthrough for FluxMsg (CBOR)
 			JetStream:   jsConfig,

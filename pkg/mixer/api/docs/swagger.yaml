@@ -489,16 +489,15 @@ definitions:
 host: localhost:8090
 info:
   contact:
-    email: support@jaab.tech
+    email: fluxrig@jaab.tech
     name: JAAB Tech Support
-    url: https://jaab.tech
+    url: https://fluxrig.org
   description: Control Plane API for FluxRig Orchestration.
   license:
     name: Apache 2.0
     url: http://www.apache.org/licenses/LICENSE-2.0.html
-  termsOfService: http://swagger.io/terms/
   title: FluxRig Mixer API
-  version: 0.1.0
+  version: v0.4.5-dev
 paths:
   /config:
     get:
@@ -597,6 +596,19 @@ paths:
       summary: Rack Actions
       tags:
       - registry
+  /scenario/active:
+    get:
+      description: Returns the currently active scenario as YAML.
+      produces:
+      - application/yaml
+      responses:
+        "200":
+          description: Scenario YAML
+          schema:
+            type: string
+      summary: Get Active Scenario
+      tags:
+      - scenario
   /scenario/import:
     post:
       consumes:
@@ -665,6 +677,20 @@ paths:
       summary: Query Telemetry
       tags:
       - telemetry
+  /topology/list:
+    get:
+      description: Returns the projected topology with rack and gear details.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      summary: List Topology
+      tags:
+      - topology
   /topology/status:
     get:
       description: Returns synchronization status of the fleet

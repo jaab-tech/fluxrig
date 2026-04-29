@@ -4,8 +4,9 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 )
 
 func TestFluxMsgTransparentSanitization(t *testing.T) {

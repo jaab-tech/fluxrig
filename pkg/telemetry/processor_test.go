@@ -7,9 +7,10 @@ import (
 	"context"
 	"testing"
 
-	"github.com/jaab-tech/fluxrig/pkg/telemetry"
 	"go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+
+	"github.com/jaab-tech/fluxrig/pkg/telemetry"
 )
 
 func TestDualIDSpanProcessor_OnStart(t *testing.T) {

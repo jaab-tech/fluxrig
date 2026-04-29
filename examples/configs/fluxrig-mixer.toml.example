@@ -1,0 +1,24 @@
+[logging]
+level = "info"
+filename = "logs/mixer.log"
+
+[mixer]
+mixer_name = "mixer-default"
+machine_id = 1
+# Reference to a scenario to load on startup (file path or URN)
+# startup_scenario = "scenarios/getting_started.yaml"
+
+[api]
+port = 8090
+
+[store]
+dir = "./data"
+database_file = "fluxrig.duckdb"
+cluster_key_file = "cluster.key"
+
+[snake]
+port = 4222
+url = "nats://localhost:4222"
+cluster_name = "flux"
+store_dir = "data/js"
+durable = false

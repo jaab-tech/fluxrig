@@ -10,8 +10,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/jaab-tech/fluxrig/pkg/pki"
 	"github.com/spf13/cobra"
+
+	"github.com/jaab-tech/fluxrig/pkg/pki"
 )
 
 // keysCmd represents the keys command

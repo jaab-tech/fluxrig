@@ -7,8 +7,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/jaab-tech/fluxrig/pkg/manager"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/jaab-tech/fluxrig/pkg/manager"
 )
 
 func TestDefaultContext_Certification(t *testing.T) {

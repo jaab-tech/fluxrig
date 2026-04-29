@@ -6,8 +6,9 @@ package bento
 import (
 	"fmt"
 
-	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/warpstreamlabs/bento/public/service"
+
+	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 )
 
 // ToBentoMessage converts a FluxMsg to a Bento Service Message.
