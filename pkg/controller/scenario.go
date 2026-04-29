@@ -13,11 +13,12 @@ import (
 	"sync"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/jaab-tech/fluxrig/pkg/idgen"
 	"github.com/jaab-tech/fluxrig/pkg/registry"
 	"github.com/jaab-tech/fluxrig/pkg/store/duckdb"
-	"gopkg.in/yaml.v3"
 )
 
 // ScenarioPublisher defines the interface for publishing scenarios to racks.
@@ -149,7 +150,7 @@ func (c *ScenarioController) PushActiveToRack(ctx context.Context, rackName stri
 		return fmt.Errorf("failed to marshal active scenario: %w", err)
 	}
 
-	return c.pushScenarioToRacks(ctx, active, content)
+	return c.pushScenarioToRacks(ctx, active, content, rackName)
 }
 
 func (c *ScenarioController) Activate(ctx context.Context, name string) error {
@@ -190,7 +191,7 @@ func (c *ScenarioController) Activate(ctx context.Context, name string) error {
 
 	// 5. Push scenario to connected racks via NATS
 	if c.bus != nil {
-		if err := c.pushScenarioToRacks(ctx, &s, content); err != nil {
+		if err := c.pushScenarioToRacks(ctx, &s, content, ""); err != nil {
 			c.log.Warn("failed to push scenario to racks", "error", err)
 		}
 	}
@@ -423,26 +424,36 @@ func (c *ScenarioController) ensureScenariosRepo() error {
 	return nil
 }
 
-// pushScenarioToRacks publishes the scenario to all racks defined in it.
-// Each rack receives a ScenarioPayload via NATS on topic: fluxrig.rack.{name}.scenario
-func (c *ScenarioController) pushScenarioToRacks(ctx context.Context, s *registry.Scenario, content []byte) error {
+// pushScenarioToRacks publishes the scenario to racks.
+// If specificRack is provided, it only pushes to that one.
+// Otherwise, it iterates over s.Racks.
+func (c *ScenarioController) pushScenarioToRacks(ctx context.Context, s *registry.Scenario, content []byte, specificRack string) error {
 	now := time.Now().Unix()
 	scenarioName := s.Meta.Name
 	if scenarioName == "" {
 		scenarioName = fmt.Sprintf("scenario-%s", s.Meta.Version)
 	}
 
-	for _, rack := range s.Racks {
-		if rack.Name == "" {
-			continue
+	// Determine targets
+	var targets []string
+	if specificRack != "" {
+		targets = []string{specificRack}
+	} else {
+		for _, r := range s.Racks {
+			if r.Name != "" {
+				targets = append(targets, r.Name)
+			}
 		}
+	}
 
+	for _, rackName := range targets {
 		// Get rack machineID from registry with retry
 		var machineID uint16 = 0
 		if c.store != nil {
-			mid, err := c.waitForRack(ctx, rack.Name)
+			mid, err := c.waitForRack(ctx, rackName)
 			if err != nil {
-				return fmt.Errorf("failed to push scenario: rack %s not in registry: %w", rack.Name, err)
+				c.log.Warn("skipping scenario push: rack not in registry", "rack", rackName)
+				continue
 			}
 			machineID = mid
 		}
@@ -451,7 +462,7 @@ func (c *ScenarioController) pushScenarioToRacks(ctx context.Context, s *registr
 		payload := &fluxmsg.ScenarioPayload{
 			Version:   s.Meta.Version,
 			Name:      scenarioName,
-			RackName:  rack.Name,
+			RackName:  rackName,
 			MachineID: machineID,
 			Timestamp: now,
 		}
@@ -468,7 +479,7 @@ func (c *ScenarioController) pushScenarioToRacks(ctx context.Context, s *registr
 
 		data, err := payload.ToData()
 		if err != nil {
-			c.log.Warn("failed to serialize scenario payload", "rack", rack.Name, "error", err)
+			c.log.Warn("failed to serialize scenario payload", "rack", rackName, "error", err)
 			continue
 		}
 
@@ -478,11 +489,11 @@ func (c *ScenarioController) pushScenarioToRacks(ctx context.Context, s *registr
 		}
 		msg.Data = data
 
-		subject := fluxmsg.SubjectScenarioPrefix + rack.Name + fluxmsg.SubjectScenarioSuffix
+		subject := fluxmsg.SubjectScenarioPrefix + rackName + fluxmsg.SubjectScenarioSuffix
 		if err := c.bus.Publish(ctx, subject, msg); err != nil {
-			c.log.Warn("failed to publish scenario to rack", "rack", rack.Name, "subject", subject, "error", err)
+			c.log.Warn("failed to publish scenario to rack", "rack", rackName, "subject", subject, "error", err)
 		} else {
-			c.log.Info("pushed scenario to rack", "rack", rack.Name, "version", s.Meta.Version)
+			c.log.Info("pushed scenario to rack", "rack", rackName, "version", s.Meta.Version)
 		}
 	}
 

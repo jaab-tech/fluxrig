@@ -11,8 +11,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jaab-tech/fluxrig/pkg/pki"
 	"github.com/spf13/cobra"
+
+	"github.com/jaab-tech/fluxrig/pkg/pki"
 )
 
 // params: args to pass to command

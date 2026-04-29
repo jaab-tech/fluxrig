@@ -8,12 +8,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jaab-tech/fluxrig/pkg/bus"
-	"github.com/jaab-tech/fluxrig/pkg/idgen"
-	"github.com/jaab-tech/fluxrig/pkg/telemetry"
 	"go.opentelemetry.io/otel/log"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	"go.opentelemetry.io/otel/sdk/trace"
+
+	"github.com/jaab-tech/fluxrig/pkg/bus"
+	"github.com/jaab-tech/fluxrig/pkg/idgen"
+	"github.com/jaab-tech/fluxrig/pkg/telemetry"
 )
 
 func TestSpanExporter_ExportSpans(t *testing.T) {

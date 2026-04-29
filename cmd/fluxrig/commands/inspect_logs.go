@@ -10,8 +10,9 @@ import (
 	"os"
 
 	"github.com/fxamacker/cbor/v2"
-	"github.com/jaab-tech/fluxrig/pkg/telemetry/wal"
 	"github.com/spf13/cobra"
+
+	"github.com/jaab-tech/fluxrig/pkg/telemetry/wal"
 )
 
 var inspectLogsCmd = &cobra.Command{

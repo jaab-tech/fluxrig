@@ -10,8 +10,9 @@ import (
 
 	"github.com/ThreeDotsLabs/watermill"
 	"github.com/ThreeDotsLabs/watermill/message"
-	"github.com/jaab-tech/fluxrig/pkg/snake"
 	"github.com/nats-io/nats.go"
+
+	"github.com/jaab-tech/fluxrig/pkg/snake"
 )
 
 func TestRouter_Lifecycle(t *testing.T) {

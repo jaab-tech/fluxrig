@@ -9,9 +9,10 @@ import (
 	"time"
 
 	"github.com/fxamacker/cbor/v2"
+	"github.com/stretchr/testify/assert"
+
 	"github.com/jaab-tech/fluxrig/pkg/bus"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
-	"github.com/stretchr/testify/assert"
 )
 
 func TestSourceHandler_Decorators(t *testing.T) {

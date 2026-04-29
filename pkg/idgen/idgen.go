@@ -9,8 +9,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/sony/sonyflake"
 	"sync/atomic"
+
+	"github.com/sony/sonyflake"
 )
 
 // IDGenerator provides unique IDs for messages (fluxID) and components (fluxEntityID).

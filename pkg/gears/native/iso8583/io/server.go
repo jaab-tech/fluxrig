@@ -16,13 +16,14 @@ import (
 	"syscall"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/jaab-tech/fluxrig/pkg/idgen"
 	"github.com/jaab-tech/fluxrig/pkg/logger"
 	"github.com/jaab-tech/fluxrig/pkg/sdk"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/metric"
 )
 
 // Server handles inbound ISO8583 connections with length-prefixed framing.
@@ -231,7 +232,7 @@ func (s *Server) handleConn(conn net.Conn) {
 		// Heuristic validation and telemetry (using raw payload for inspection logic)
 		frameInfo := s.inspect(payload, connID, headerMeta)
 
-		// Fail Fast: Disconnect on invalid frames to preserve synchronization integrity (ISO8583 Framework Style)
+		// Fail Fast: Disconnect on invalid frames to preserve synchronization integrity
 		if !frameInfo.Valid {
 			s.log.Warn("Disconnecting due to invalid frame (Fail Fast)",
 				"conn_id", connID,
@@ -396,7 +397,7 @@ func (s *Server) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.Fl
 		return nil, fmt.Errorf("write error: %w", err)
 	}
 
-	// Telemetry - Frame Sent (DEBUG per ADR 0026)
+	// Telemetry - Frame Sent (DEBUG)
 	s.log.Debug("Frame Sent",
 		"conn_id", connID,
 		"remote", conn.conn.RemoteAddr().String(),
@@ -561,7 +562,7 @@ func (s *Server) inspect(payload []byte, connID string, meta map[string]string) 
 		}
 	}
 
-	// Telemetry - Log "Frame Received" at DEBUG level for valid frames (per ADR 0026)
+	// Telemetry - Log "Frame Received" at DEBUG level for valid frames
 	if info.Valid {
 		args := []any{
 			"conn_id", connID,

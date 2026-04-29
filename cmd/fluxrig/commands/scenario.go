@@ -11,11 +11,15 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
+
+	"github.com/fatih/color"
+	"github.com/pmezard/go-difflib/difflib"
+	"github.com/spf13/cobra"
 
 	"github.com/jaab-tech/fluxrig/pkg/manager"
 	"github.com/jaab-tech/fluxrig/pkg/manager/cas"
-	"github.com/spf13/cobra"
 )
 
 var (
@@ -32,10 +36,12 @@ var scenarioCmd = &cobra.Command{
 //   - CAS import (default): stores the YAML directly into the local CAS store.
 //   - API import (--api): sends the YAML to the running Mixer for hot-reload.
 var scenarioImportCmd = &cobra.Command{
-	Use:   "import",
+	Use:   "import <file>",
 	Short: "Import and validate a scenario file",
+	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		apiMode, _ := cmd.Flags().GetBool("api")
+		scenarioFile = args[0]
 
 		// 1. Read File
 		content, err := os.ReadFile(filepath.Clean(scenarioFile))
@@ -161,19 +167,88 @@ var scenarioExportCmd = &cobra.Command{
 	},
 }
 
+var scenarioDiffCmd = &cobra.Command{
+	Use:   "diff <scenario-file>",
+	Short: "Show differences between a local file and the active scenario",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		scenarioFile = args[0]
+		// 1. Read Local File
+		localContent, err := os.ReadFile(filepath.Clean(scenarioFile))
+		if err != nil {
+			return fmt.Errorf("failed to read local file: %w", err)
+		}
+
+		// 2. Fetch Remote (Active) Scenario
+		baseURL := os.Getenv("FLUXRIG_API_URL")
+		if baseURL == "" {
+			baseURL = "http://localhost:8090"
+		}
+		activeURL := fmt.Sprintf("%s/api/v1/scenario/active", baseURL)
+
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Get(activeURL)
+		if err != nil {
+			return fmt.Errorf("failed to fetch active scenario from mixer: %w", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("mixer returned error (%d): ensure a scenario is active", resp.StatusCode)
+		}
+
+		remoteContent, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("failed to read mixer response: %w", err)
+		}
+
+		// 3. Generate Diff
+		diff := difflib.UnifiedDiff{
+			A:        difflib.SplitLines(string(remoteContent)),
+			B:        difflib.SplitLines(string(localContent)),
+			FromFile: "Mixer (Active)",
+			ToFile:   filepath.Base(scenarioFile),
+			Context:  3,
+		}
+
+		text, _ := difflib.GetUnifiedDiffString(diff)
+		if text == "" {
+			fmt.Println(color.GreenString("✓ Local file matches active scenario."))
+			return nil
+		}
+
+		// 4. Colorize and Print
+		fmt.Println(color.CyanString("Scenario Diff:"))
+		lines := strings.Split(text, "\n")
+		for _, line := range lines {
+			if strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++") {
+				fmt.Println(color.GreenString(line))
+			} else if strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "---") {
+				fmt.Println(color.RedString(line))
+			} else if strings.HasPrefix(line, "@@") {
+				fmt.Println(color.CyanString(line))
+			} else {
+				fmt.Println(line)
+			}
+		}
+
+		return nil
+	},
+}
+
 func init() {
 	// Persistent flag inherited by all subcommands
 	scenarioCmd.PersistentFlags().String("store-dir", "", "CAS store directory (default: ~/.fluxrig/store)")
 
-	scenarioImportCmd.Flags().StringVarP(&scenarioFile, "file", "f", "", "Scenario YAML file")
 	scenarioImportCmd.Flags().BoolVarP(&dryRun, "dry-run", "d", false, "Validate without applying")
 	scenarioImportCmd.Flags().Bool("api", false, "Send to running Mixer API instead of CAS store")
 	scenarioImportCmd.Flags().String("name", "", "Logical name for the scenario")
 	scenarioImportCmd.Flags().String("tag", "", "Version tag (e.g. v1.0.0)")
-	_ = scenarioImportCmd.MarkFlagRequired("file")
 
 	scenarioCmd.AddCommand(scenarioImportCmd)
+
 	scenarioCmd.AddCommand(scenarioListCmd)
 	scenarioCmd.AddCommand(scenarioExportCmd)
-	rootCmd.AddCommand(scenarioCmd) // Assuming rootCmd is exported or we register in root.go
+	scenarioCmd.AddCommand(scenarioDiffCmd)
+	rootCmd.AddCommand(scenarioCmd)
 }

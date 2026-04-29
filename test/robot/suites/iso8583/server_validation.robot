@@ -33,6 +33,10 @@ Initialize Server Suite
     Start Mixer    config_file=${MIXER_CONFIG}    work_dir=${WORK_DIR}/mixer    alias=mixer
     # Start Rack
     Start Rack    config_file=${RACK_CONFIG}    work_dir=${WORK_DIR}/rack    mixer_home=${WORK_DIR}/mixer    alias=rack
+    
+    # Verify Health via CLI (Integrated Testing)
+    FluxRig Check    config_file=${RACK_CONFIG}    work_dir=${WORK_DIR}/rack
+    
     Sleep    5s    reason=Wait for Rack to initialize
     
     # Wait for Rack Registration

@@ -8,13 +8,14 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	_ "github.com/duckdb/duckdb-go/v2"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
+
+	_ "github.com/duckdb/duckdb-go/v2"
 )
 
 // Store manages the DuckDB connection.

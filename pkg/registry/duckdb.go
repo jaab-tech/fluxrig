@@ -114,55 +114,41 @@ func (r *DuckDBRegistry) Register(ctx context.Context, name string, secret strin
 }
 
 func (r *DuckDBRegistry) Approve(ctx context.Context, machineID uint16, newName string) (*Rack, error) {
-	// Check name conflict
-	if existing, err := r.getByName(ctx, newName); err == nil {
-		// If existing rack found, check if it's the same rack (allow self-rename)
-		if existing.MachineID != machineID {
+	// 1. Check name conflict and obtain current state in a single transaction
+	tx, err := r.store.DB().BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Check if newName is already taken by another rack
+	var conflictID uint16
+	err = tx.QueryRowContext(ctx, "SELECT machine_id FROM registry WHERE name = ? AND type_id = 4", newName).Scan(&conflictID)
+	if err == nil {
+		if conflictID != machineID {
 			return nil, ErrNameConflict
 		}
-	}
-
-	rack, err := r.Get(ctx, machineID)
-	if err != nil {
+	} else if !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
 	}
 
-	// Carry over existing Stats/Config or let Get handle it.
-	// Synchronize configuration using the provided rack object.
-	attrs := map[string]any{
-		"secret": rack.Secret,
-	}
-	attrsJSON, _ := json.Marshal(attrs)
-	statsJSON := []byte("{}")
-	if b, errJSON := json.Marshal(cleanMap(rack.Stats)); errJSON == nil && string(b) != "null" {
-		statsJSON = b
-	}
-	configJSON := []byte("{}")
-	if b, errJSON := json.Marshal(cleanMap(rack.Config)); errJSON == nil && string(b) != "null" {
-		configJSON = b
-	}
+	// 2. Perform Atomic Update
+	// We only update name, status, and last_seen. Stats/Config/Attributes are preserved.
 	now := time.Now()
-
-	// 1. Get EntityID and MixerID
-	var entityID uint64
-	var mixerID uint64
-	err = r.store.DB().QueryRowContext(ctx, "SELECT entity_id, mixer_id FROM registry WHERE machine_id = ? AND type_id = 4", machineID).Scan(&entityID, &mixerID)
-	if err != nil {
-		return nil, err
-	}
-
-	// 2. Delete (Auto-Commit)
-	_, err = r.store.DB().ExecContext(ctx, "DELETE FROM registry WHERE entity_id = ?", entityID)
-	if err != nil {
-		return nil, err
-	}
-
-	// 3. Insert (Auto-Commit)
-	_, err = r.store.DB().ExecContext(ctx,
-		"INSERT INTO registry (entity_id, type_id, machine_id, mixer_id, name, status, version, started_at, last_seen, stats, config, attributes) VALUES (?, 4, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)",
-		entityID, machineID, mixerID, newName, rack.Version, rack.FirstSeen, now, string(statsJSON), string(configJSON), string(attrsJSON),
+	res, err := tx.ExecContext(ctx,
+		"UPDATE registry SET name = ?, status = 'active', last_seen = ? WHERE machine_id = ? AND type_id = 4",
+		newName, now, machineID,
 	)
 	if err != nil {
+		return nil, err
+	}
+
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		return nil, ErrNotFound
+	}
+
+	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 

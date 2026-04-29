@@ -10,11 +10,12 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
-	"github.com/jaab-tech/fluxrig/pkg/sdk"
 	_ "github.com/warpstreamlabs/bento/public/components/io"   // File/Std I/O
 	_ "github.com/warpstreamlabs/bento/public/components/pure" // Standard plugins
 	"github.com/warpstreamlabs/bento/public/service"
+
+	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
+	"github.com/jaab-tech/fluxrig/pkg/sdk"
 )
 
 // Gear implements the NativeGear interface for Bento.

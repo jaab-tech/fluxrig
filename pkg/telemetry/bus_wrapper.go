@@ -5,15 +5,18 @@ package telemetry
 
 import (
 	"context"
+	"fmt"
+	"strconv"
 	"time"
 
-	"github.com/jaab-tech/fluxrig/pkg/bus"
-	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/jaab-tech/fluxrig/pkg/bus"
+	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 )
 
 // InstrumentedBus wraps a bus.Bus to capture telemetry metrics.
@@ -55,7 +58,12 @@ func (ib *InstrumentedBus) Publish(ctx context.Context, subject string, msg *flu
 	if span.SpanContext().IsValid() {
 		// Field Mapping (Explicit)
 		msg.TraceID = span.SpanContext().TraceID().String()
-		msg.RefFluxID = 0 // Optional: Could put SpanID here if needed, keeping 0 for now as per logic
+		// Try to extract FluxID from context for RefFluxID correlation
+		if fid := FluxIDFromContext(ctx); fid != "" {
+			if ufid, err := strconv.ParseUint(fid, 10, 64); err == nil {
+				msg.RefFluxID = ufid
+			}
+		}
 
 		// W3C Header Injection (Interoperability)
 		if msg.Metadata == nil {
@@ -134,7 +142,8 @@ func (ib *InstrumentedBus) Subscribe(subject string, handler bus.Handler) (bus.S
 			trace.WithAttributes(
 				attribute.String("messaging.system", "nats"),
 				attribute.String("messaging.destination", subject),
-				attribute.String("messaging.flux_id", msg.TraceID),
+				attribute.String("messaging.trace_id", msg.TraceID),
+				attribute.String("flux.id", fmt.Sprintf("%d", msg.FluxID)),
 			),
 		)
 		defer span.End()

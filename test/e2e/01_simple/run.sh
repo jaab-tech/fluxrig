@@ -95,6 +95,13 @@ cd "${WORK_DIR}/rack"
 RACK_PID=$!
 log_info "Rack PID: $RACK_PID"
 
+# 5.5 Verify Health via CLI (Integrated Testing)
+log_info "Running Health Check..."
+"${ROOT_DIR}/bin/fluxrig" check -c "rack.toml"
+if [ $? -ne 0 ]; then
+    fail "FluxRig Check FAILED"
+fi
+
 # 6. Verify Registration (Loop)
 log_info "Verifying Registration (Expecting 'rack-e2e-01')..."
 FOUND=0

@@ -9,13 +9,15 @@ import (
 	"crypto/rand"
 	"testing"
 
+	"log/slog"
+	"time"
+
 	"github.com/ThreeDotsLabs/watermill/message"
 	"github.com/fxamacker/cbor/v2"
+
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/jaab-tech/fluxrig/pkg/pki"
 	"github.com/jaab-tech/fluxrig/pkg/registry"
-	"log/slog"
-	"time"
 )
 
 // Mock Registry

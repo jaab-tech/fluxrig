@@ -7,12 +7,13 @@ import (
 	"context"
 	"testing"
 
-	"github.com/jaab-tech/fluxrig/pkg/gears/native/bento"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+
+	"github.com/jaab-tech/fluxrig/pkg/gears/native/bento"
 )
 
 func TestBentoBridge(t *testing.T) {

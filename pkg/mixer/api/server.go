@@ -16,20 +16,25 @@ import (
 	"syscall"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/ThreeDotsLabs/watermill"
 	"github.com/ThreeDotsLabs/watermill/message"
+
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/jaab-tech/fluxrig/pkg/registry"
 
 	"github.com/fxamacker/cbor/v2"
+
 	"github.com/jaab-tech/fluxrig/pkg/pki"
 	"github.com/jaab-tech/fluxrig/pkg/telemetry"
 	"github.com/jaab-tech/fluxrig/pkg/version"
 
+	httpSwagger "github.com/swaggo/http-swagger"
+
 	"github.com/jaab-tech/fluxrig/pkg/config"
 	"github.com/jaab-tech/fluxrig/pkg/controller"
 	_ "github.com/jaab-tech/fluxrig/pkg/mixer/api/docs" // Swagger docs
-	httpSwagger "github.com/swaggo/http-swagger"
 )
 
 type Server struct {
@@ -42,8 +47,13 @@ type Server struct {
 	cfg          *config.MixerConfig
 }
 
-func NewServer(reg registry.Registry, pub message.Publisher, signer *pki.ClusterKey, sc controller.ScenarioManager, cache *telemetry.MetricsCache, mixerID uint64, cfg *config.MixerConfig) *Server {
-	return &Server{reg: reg, pub: pub, signer: signer, scenarioCtrl: sc, metricsCache: cache, mixerID: mixerID, cfg: cfg}
+func NewServer(reg registry.Registry, pub message.Publisher, signer *pki.ClusterKey,
+	sc controller.ScenarioManager, cache *telemetry.MetricsCache,
+	mixerID uint64, cfg *config.MixerConfig) *Server {
+	return &Server{
+		reg: reg, pub: pub, signer: signer, scenarioCtrl: sc,
+		metricsCache: cache, mixerID: mixerID, cfg: cfg,
+	}
 }
 
 func (s *Server) Start(addr string) error {
@@ -59,6 +69,7 @@ func (s *Server) Start(addr string) error {
 	mux.HandleFunc("GET /api/v1/telemetry/{type}", s.handleTelemetry)
 	mux.HandleFunc("GET /api/v1/entities/stats", s.handleEntityStats)
 	mux.HandleFunc("POST /api/v1/scenario/import", s.handleScenarioImport)
+	mux.HandleFunc("GET /api/v1/scenario/active", s.handleScenarioActive)
 	mux.HandleFunc("GET /api/v1/topology/status", s.handleTopologyStatus)
 	mux.HandleFunc("GET /api/v1/topology/list", s.handleTopologyList)
 
@@ -79,7 +90,7 @@ func (s *Server) Start(addr string) error {
 			return opErr
 		},
 	}
-	// Resilient Bind-Retry Loop (ADR 0032)
+	// Resilient Bind-Retry Loop
 	// Handles transient port conflicts on macOS during rapid CI cycles.
 	var l net.Listener
 	var err error
@@ -548,6 +559,32 @@ func (s *Server) handleScenarioImport(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
+// handleScenarioActive godoc
+// @Summary Get Active Scenario
+// @Description Returns the currently active scenario as YAML.
+// @Tags scenario
+// @Produce application/yaml
+// @Success 200 {string} string "Scenario YAML"
+// @Router /scenario/active [get]
+func (s *Server) handleScenarioActive(w http.ResponseWriter, r *http.Request) {
+	if s.scenarioCtrl == nil {
+		http.Error(w, "Scenario controller not initialized", http.StatusServiceUnavailable)
+		return
+	}
+
+	scenario := s.scenarioCtrl.GetActiveScenario()
+	if scenario == nil {
+		http.Error(w, "No active scenario", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/yaml")
+	w.WriteHeader(http.StatusOK)
+	if err := yaml.NewEncoder(w).Encode(scenario); err != nil {
+		slog.Error("Failed to encode active scenario", "error", err)
+	}
+}
+
 // handleTopologyStatus returns the current synchronization status.
 // Queries registry for actual rack count.
 // handleTopologyStatus godoc
@@ -581,7 +618,13 @@ func (s *Server) handleTopologyStatus(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(status)
 }
 
-// handleTopologyList returns the projected topology with rack and gear details.
+// handleTopologyList godoc
+// @Summary List Topology
+// @Description Returns the projected topology with rack and gear details.
+// @Tags topology
+// @Produce json
+// @Success 200 {object} map[string]interface{}
+// @Router /topology/list [get]
 func (s *Server) handleTopologyList(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 

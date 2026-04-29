@@ -6,8 +6,9 @@ package io
 import (
 	"encoding/hex"
 	"fmt"
-	"github.com/stretchr/testify/assert"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 // PcapPayloads contains raw payloads extracted from Wireshark samples

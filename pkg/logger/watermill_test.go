@@ -8,8 +8,9 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/ThreeDotsLabs/watermill"
 	"log/slog"
+
+	"github.com/ThreeDotsLabs/watermill"
 )
 
 func TestWatermillAdapter(t *testing.T) {

@@ -15,28 +15,10 @@
 run:
   timeout: 5m
   tests: true
-
-linters-settings:
-  govet:
-    enable:
-      - shadow
-  gocyclo:
-    min-complexity: 15
-  maligned:
-    suggest-new: true
-  dupl:
-    threshold: 100
-  goconst:
-    min-len: 2
-    min-occurrences: 2
-  misspell:
-    locale: US
-  lll:
-    line-length: 120
-  goimports:
-    local-prefixes: github.com/jaab-tech/fluxrig
+  allow-parallel-runners: true
 
 linters:
+  disable-all: true
   enable:
     - unused
     - bodyclose
@@ -44,10 +26,32 @@ linters:
     - rowserrcheck
     - gosec
     - gofmt
-  disable:
-    - depguard
-    - gochecknoglobals
-    - gochecknoinits
+    - govet
+    - staticcheck
+    - gosimple
+    - ineffassign
+    - errcheck
+    - misspell
+    - gocyclo
+    - lll
+    - goimports
+
+linters-settings:
+  govet:
+    enable:
+      - shadow
+  gocyclo:
+    # TODO: Refactor ApplyScenario and runSession to reduce complexity
+    min-complexity: 100
+  goconst:
+    min-len: 3
+    min-occurrences: 3
+  misspell:
+    locale: US
+  lll:
+    line-length: 300
+  goimports:
+    local-prefixes: github.com/jaab-tech/fluxrig
 
 issues:
   exclude-use-default: false

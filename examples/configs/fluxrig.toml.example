@@ -1,0 +1,21 @@
+[logging]
+level = "info"
+filename = "logs/fluxrig.log"
+
+[rack]
+name = "node-default"
+# If machine_id is 0, it will be assigned by the Mixer upon enrollment
+machine_id = 0
+state_file = "state.flux"
+
+[rack.bus]
+url = "nats://localhost:4222"
+domain = "flux"
+
+[store]
+dir = "./data"
+
+[telemetry]
+enabled = true
+service_name = "flux-rack"
+batch_interval = "5s"

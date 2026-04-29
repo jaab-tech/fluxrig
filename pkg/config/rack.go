@@ -90,6 +90,7 @@ type BusConfig struct {
 }
 
 // LoadRack reads configuration from a TOML file and Environment Variables.
+// Priority: Env > File > Defaults. If path is empty, it returns the default configuration.
 func LoadRack(path string) (*RackConfig, error) {
 	k := koanf.New(".")
 

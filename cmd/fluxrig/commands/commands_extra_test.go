@@ -8,11 +8,12 @@ import (
 	"path/filepath"
 	"testing"
 
+	"log/slog"
+	"os"
+
 	"github.com/jaab-tech/fluxrig/pkg/config"
 	loggerPkg "github.com/jaab-tech/fluxrig/pkg/logger"
 	"github.com/jaab-tech/fluxrig/pkg/telemetry"
-	"log/slog"
-	"os"
 )
 
 func TestRunAgent_Failures(t *testing.T) {

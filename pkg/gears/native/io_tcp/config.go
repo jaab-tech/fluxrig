@@ -105,7 +105,7 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// SchemaJSON returns the JSON Schema for validation (ADR 0005 Requirement).
+// SchemaJSON returns the JSON Schema for validation.
 // Hardcoded for Phase 3.
 func SchemaJSON() string {
 	return `{

@@ -5,6 +5,7 @@ package fluxmsg
 
 import (
 	"fmt"
+
 	"github.com/fxamacker/cbor/v2"
 )
 

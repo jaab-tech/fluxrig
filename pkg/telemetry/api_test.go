@@ -8,12 +8,13 @@ import (
 	"log/slog"
 	"testing"
 
-	"github.com/jaab-tech/fluxrig/pkg/bus"
-	"github.com/jaab-tech/fluxrig/pkg/idgen"
-	"github.com/jaab-tech/fluxrig/pkg/telemetry"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+
+	"github.com/jaab-tech/fluxrig/pkg/bus"
+	"github.com/jaab-tech/fluxrig/pkg/idgen"
+	"github.com/jaab-tech/fluxrig/pkg/telemetry"
 )
 
 func TestStartSpan(t *testing.T) {

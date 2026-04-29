@@ -35,7 +35,7 @@ func (m *MockBus) Publish(ctx context.Context, subject string, msg *fluxmsg.Flux
 	if m.handlers == nil {
 		m.handlers = make(map[string]bus.Handler)
 	}
-	// Simulated Reflection for Sync Probes (ADR 0036)
+	// Simulated Reflection for Sync Probes
 	if msg.Flags&fluxmsg.FlagSyncProbe != 0 && !m.DisableReflect {
 		if h, ok := m.handlers[subject]; ok {
 			// Deliver in goroutine to simulate real bus behavior and prevent deadlocks (m.mu)

@@ -9,11 +9,10 @@ const docTemplate = `{
     "info": {
         "description": "{{escape .Description}}",
         "title": "{{.Title}}",
-        "termsOfService": "http://swagger.io/terms/",
         "contact": {
             "name": "JAAB Tech Support",
-            "url": "https://jaab.tech",
-            "email": "support@jaab.tech"
+            "url": "https://fluxrig.org",
+            "email": "fluxrig@jaab.tech"
         },
         "license": {
             "name": "Apache 2.0",
@@ -170,6 +169,26 @@ const docTemplate = `{
                 }
             }
         },
+        "/scenario/active": {
+            "get": {
+                "description": "Returns the currently active scenario as YAML.",
+                "produces": [
+                    "application/yaml"
+                ],
+                "tags": [
+                    "scenario"
+                ],
+                "summary": "Get Active Scenario",
+                "responses": {
+                    "200": {
+                        "description": "Scenario YAML",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
         "/scenario/import": {
             "post": {
                 "description": "Upload a YAML scenario definition to update the topology.",
@@ -268,6 +287,27 @@ const docTemplate = `{
                                 "type": "object",
                                 "additionalProperties": true
                             }
+                        }
+                    }
+                }
+            }
+        },
+        "/topology/list": {
+            "get": {
+                "description": "Returns the projected topology with rack and gear details.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "topology"
+                ],
+                "summary": "List Topology",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
                         }
                     }
                 }
@@ -986,7 +1026,7 @@ const docTemplate = `{
 
 // SwaggerInfo holds exported Swagger Info so clients can modify it
 var SwaggerInfo = &swag.Spec{
-	Version:          "0.1.0",
+	Version:          "v0.4.5-dev",
 	Host:             "localhost:8090",
 	BasePath:         "/api/v1",
 	Schemes:          []string{"http"},

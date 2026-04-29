@@ -1,0 +1,24 @@
+meta:
+  name: Getting Started
+  version: v1.0.0
+
+# This scenario demonstrates a basic telemetry generator using the Bento gear.
+# It simulates a node generating periodic data and logging it to the console.
+
+gears:
+  - name: generator
+    type: bento
+    config:
+      bento:
+        input:
+          generate:
+            mapping: |
+              root.flux_id = uuid_v4()
+              root.timestamp = now()
+              root.status = "UP"
+              root.metrics.cpu_pct = random_int(min:10, max:85)
+              root.metrics.mem_mb = random_int(min:512, max:4096)
+              root.message = "Hello from FluxRig Getting Started!"
+            interval: 2s
+        output:
+          stdout: {}

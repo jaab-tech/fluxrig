@@ -6,8 +6,9 @@ package commands
 import (
 	"fmt"
 
-	"github.com/jaab-tech/fluxrig/pkg/version"
 	"github.com/spf13/cobra"
+
+	"github.com/jaab-tech/fluxrig/pkg/version"
 )
 
 var rootCmd = &cobra.Command{
