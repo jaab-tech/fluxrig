@@ -10,14 +10,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
-	"github.com/jaab-tech/fluxrig/pkg/gears/native/iso8583/codec/sdl"
-	"github.com/jaab-tech/fluxrig/pkg/logger"
-	"github.com/jaab-tech/fluxrig/pkg/sdk"
 	"github.com/moov-io/iso8583"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+
+	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
+	"github.com/jaab-tech/fluxrig/pkg/gears/native/iso8583/codec/sdl"
+	"github.com/jaab-tech/fluxrig/pkg/logger"
+	"github.com/jaab-tech/fluxrig/pkg/sdk"
 )
 
 // Config holds the configuration for the ISO8583 Codec gear.

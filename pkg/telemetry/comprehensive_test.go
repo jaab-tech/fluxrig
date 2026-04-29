@@ -11,12 +11,13 @@ import (
 	"github.com/jaab-tech/fluxrig/pkg/bus"
 	"github.com/jaab-tech/fluxrig/pkg/idgen"
 
-	"github.com/jaab-tech/fluxrig/pkg/telemetry"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/jaab-tech/fluxrig/pkg/telemetry"
 )
 
 func TestTelemetry_ContextHelpers(t *testing.T) {

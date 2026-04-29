@@ -11,13 +11,14 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+
 	"github.com/jaab-tech/fluxrig/pkg/bus"
 	"github.com/jaab-tech/fluxrig/pkg/config"
 	"github.com/jaab-tech/fluxrig/pkg/idgen"
 	"github.com/jaab-tech/fluxrig/pkg/pki"
 	"github.com/jaab-tech/fluxrig/pkg/store/duckdb"
 	"github.com/jaab-tech/fluxrig/pkg/telemetry"
-	"github.com/stretchr/testify/assert"
 )
 
 func TestInitTelemetry_Forensic(t *testing.T) {
@@ -121,17 +122,42 @@ func TestRun_ErrorPaths(t *testing.T) {
 		assert.Contains(t, err.Error(), "failed to create store directory")
 	})
 
-	t.Run("MissingClusterKey", func(t *testing.T) {
+	t.Run("ZeroConfigKeyGeneration", func(t *testing.T) {
+		// Use a sub-directory to ensure it doesn't conflict with other tests
+		subDir := filepath.Join(tmpDir, "zero-config")
+		_ = os.MkdirAll(subDir, 0750)
+
 		cfg := &config.MixerConfig{
 			Store: config.StoreConfig{
-				Dir:            tmpDir,
-				ClusterKeyFile: "nonexistent.key",
+				Dir:            subDir,
+				DatabaseFile:   "mixer.db",
+				ClusterKeyFile: "generated.key",
+			},
+			Snake: config.SnakeConfig{
+				Port: -1, // Use random port to avoid conflicts
+			},
+			API: config.ApiConfig{
+				Port: 0, // Use random port
 			},
 		}
 		app := NewApp(cfg, "")
+		// We expect Run() to eventually fail on NATS start or similar if we don't mock it,
+		// but we want to see if it gets past the Key check.
+		// Actually, let's just test that the key is generated if we call a helper or Run() briefly.
+		// Since Run() blocks, we can't easily test it here without goroutines.
+		// But we can check that it doesn't return an error IMMEDIATELY for missing key.
+
+		// For now, let's just fix the test to not expect a "failed to load" error,
+		// as it's no longer an error.
 		err := app.Run()
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "failed to load cluster key")
+		// It should fail later (e.g. store init or snake start), but NOT on cluster key load.
+		assert.NotContains(t, err.Error(), "failed to load cluster key")
+
+		// Verify key was generated
+		keyPath := filepath.Join(subDir, "generated.key")
+		_, statErr := os.Stat(keyPath)
+		assert.NoError(t, statErr, "Cluster key should have been auto-generated")
 	})
 
 	t.Run("StoreInitFailure", func(t *testing.T) {

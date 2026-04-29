@@ -115,7 +115,7 @@ type SnakeConfig struct {
 // StoreConfig is defined in rack.go (shared package config)
 
 // LoadMixer reads configuration from a TOML file and Environment Variables.
-// Priority: Env > File > Defaults
+// Priority: Env > File > Defaults. If path is empty, it returns the default configuration.
 func LoadMixer(path string) (*MixerConfig, error) {
 	k := koanf.New(".")
 

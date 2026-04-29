@@ -12,6 +12,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/nats-io/nats.go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/jaab-tech/fluxrig/pkg/bus"
 	"github.com/jaab-tech/fluxrig/pkg/ctrl"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
@@ -22,11 +28,6 @@ import (
 	"github.com/jaab-tech/fluxrig/pkg/registry"
 	"github.com/jaab-tech/fluxrig/pkg/sdk"
 	"github.com/jaab-tech/fluxrig/pkg/telemetry"
-	"github.com/nats-io/nats.go"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/metric"
-	"go.opentelemetry.io/otel/trace"
 )
 
 // Manager orchestrates the lifecycle of Gears on a Rack.
@@ -67,7 +68,7 @@ func NewManager(machineID uint64, name string, b bus.Bus, ig *idgen.IDGenerator,
 	}
 }
 
-// Start initiates the active lifecycle of the data-plane (ADR 0036).
+// Start initiates the active lifecycle of the data-plane.
 func (m *Manager) Start() error {
 	// For now, Start is a placeholder as the heavy lifting is handled by ApplyScenario
 	// and waitForConvergence during the Relentless Handshake.
@@ -144,8 +145,8 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err
 
 	// 2. Identify Gears for this Rack
 	for _, gSpec := range sc.Gears {
-		target, ok := gSpec.Deploy.(string)
-		if !ok || target != m.rackName {
+		target, _ := gSpec.Deploy.(string)
+		if target != "" && target != m.rackName {
 			continue
 		}
 
@@ -204,7 +205,7 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err
 			mgr:    m.mgr,
 		}
 
-		// MANDATORY: Check for NATS core before initializing Control Plane (ADR 0020)
+		// MANDATORY: Check for NATS core before initializing Control Plane
 		if core := m.bus.Core(); core != nil {
 			if conn, ok := core.(*nats.Conn); ok {
 				gCtx.ctrl = ctrl.NewNATSControlPlane(conn)
@@ -257,7 +258,7 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err
 
 		var sub bus.Subscription
 		sub, err = m.bus.Subscribe(subject, func(ctx context.Context, msg *fluxmsg.FluxMsg) {
-			// PROBE HANDLING (ADR 0036)
+			// PROBE HANDLING
 			if msg != nil && msg.Flags&fluxmsg.FlagSyncProbe != 0 {
 				m.mu.Lock()
 				if ch, ok := m.hotSubjects[subject]; ok {
@@ -333,7 +334,7 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err
 		m.logger().Info("wired", "wire", wireLabel, "subject", subject)
 	}
 
-	// 4. Wait for connectivity convergence (ADR 0036)
+	// 4. Wait for connectivity convergence
 	// Release lock while waiting for convergence to allow handlers to update state
 	m.mu.Unlock()
 	locked = false
@@ -489,7 +490,7 @@ func (m *Manager) Drain(ctx context.Context) error {
 	case <-done:
 		m.logger().Info("Runtime Manager Drained Successfully")
 	case <-ctx.Done():
-		m.logger().Warn("Runtime Manager Drain Timeout/Context Cancelled", "error", ctx.Err())
+		m.logger().Warn("Runtime Manager Drain Timeout/Context Canceled", "error", ctx.Err())
 		return ctx.Err()
 	}
 
@@ -527,7 +528,7 @@ func (m *Manager) waitForConvergence(ctx context.Context) error {
 		return nil
 	}
 
-	m.logger().Info("waiting for data-plane convergence (ADR 0036)", "subjects", len(m.hotSubjects))
+	m.logger().Info("waiting for data-plane convergence", "subjects", len(m.hotSubjects))
 
 	// 1. Setup Status Tracking
 	pending := make(map[string]chan struct{})

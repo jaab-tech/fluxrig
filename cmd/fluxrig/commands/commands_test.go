@@ -11,9 +11,10 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/jaab-tech/fluxrig/pkg/telemetry/wal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/jaab-tech/fluxrig/pkg/telemetry/wal"
 )
 
 func TestInspectConfig_Success(t *testing.T) {

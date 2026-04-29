@@ -385,12 +385,12 @@ func Init(ctx context.Context, cfg Config, b bus.Bus, logBuffer *BufferHandler, 
 	return cleanup, nil
 }
 
-// VerifyConnectivity performs a mandatory handshake with the telemetry bus (ADR 0036).
+// VerifyConnectivity performs a mandatory handshake with the telemetry bus.
 // It publishes sync probes relentlessly and waits for loopback.
 func VerifyConnectivity(ctx context.Context, b bus.Bus, nodeName string, handshakeTimeout, handshakeInterval time.Duration) error {
 	subject := fmt.Sprintf("flux.telemetry.%s.logs", nodeName)
 
-	slog.Info("Waiting for telemetry-plane convergence (ADR 0036)", "subject", subject)
+	slog.Info("Waiting for telemetry-plane convergence", "subject", subject)
 
 	hotCh := make(chan struct{})
 	sub, err := b.Subscribe(subject, func(_ context.Context, msg *fluxmsg.FluxMsg) {

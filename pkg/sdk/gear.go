@@ -63,7 +63,7 @@ type NativeGear interface {
 	// - For Source Gears (e.g. TCP Listener): Spawn goroutines and use 'emit' to inject messages.
 	// - For Filter Gears: You can leave this empty or start background tasks.
 	//
-	// The context passed here is the "Run Context". If it is cancelled, the Gear should stop.
+	// The context passed here is the "Run Context". If it is canceled, the Gear should stop.
 	Start(ctx context.Context, emit func(*fluxmsg.FluxMsg)) error
 
 	// Process handles an incoming message (Filter/Sink Mode).

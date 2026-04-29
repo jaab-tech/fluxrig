@@ -9,11 +9,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
-	"github.com/jaab-tech/fluxrig/pkg/snake"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
+
+	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
+	"github.com/jaab-tech/fluxrig/pkg/snake"
 )
 
 // TestMockBus verifies the memory-based bus implementation used for testing elsewhere.
@@ -184,5 +185,16 @@ func TestNatsBus_Integration(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Error("Timeout waiting for message")
+	}
+
+	// 7. PublishRaw
+	if err := nb.PublishRaw(context.Background(), "fluxrig.test.raw", []byte("raw data"), 999); err != nil {
+		t.Fatalf("PublishRaw failed: %v", err)
+	}
+
+	// 8. Error paths
+	nbErr := NewNatsBus("err")
+	if err := nbErr.PublishRaw(context.Background(), "any", nil, 0); err == nil {
+		t.Error("Expected error on PublishRaw with disconnected bus")
 	}
 }

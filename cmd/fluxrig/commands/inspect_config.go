@@ -89,10 +89,10 @@ func showRacksConfig(ctx context.Context, apiURL string, out io.Writer) error {
 	}
 
 	var racks []struct {
-		MachineID uint16         `json:"machine_id"`
 		Name      string         `json:"name"`
 		Status    string         `json:"status"`
 		Config    map[string]any `json:"config"`
+		MachineID uint16         `json:"machine_id"`
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&racks); err != nil {

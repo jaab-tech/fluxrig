@@ -9,9 +9,10 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/spf13/cobra"
+
 	"github.com/jaab-tech/fluxrig/pkg/manager"
 	"github.com/jaab-tech/fluxrig/pkg/manager/cas"
-	"github.com/spf13/cobra"
 )
 
 var specCmd = &cobra.Command{

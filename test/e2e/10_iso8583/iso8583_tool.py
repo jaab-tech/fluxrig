@@ -260,7 +260,7 @@ def run_e2e(args):
     mock_server = MockServer(args.mock_port, expectation_queue, args.variant, 
                              endian=args.endian, header_bytes=args.header_bytes)
     mock_server.start()
-    time.sleep(1) # Allow bind
+    time.sleep(3) # Allow bind and allow egress gear to connect on its retry cycle
     
     spec = SPECS[args.encoding]
     exit_code = 0

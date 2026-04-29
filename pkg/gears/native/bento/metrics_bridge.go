@@ -7,10 +7,11 @@ import (
 	"context"
 	"log/slog"
 
-	"github.com/jaab-tech/fluxrig/pkg/telemetry"
 	"github.com/warpstreamlabs/bento/public/service"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+
+	"github.com/jaab-tech/fluxrig/pkg/telemetry"
 )
 
 // Bridge implements service.MetricsExporter to pipe Bento metrics to OTel.

@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/ThreeDotsLabs/watermill/message"
+
 	"github.com/jaab-tech/fluxrig/pkg/config"
 	"github.com/jaab-tech/fluxrig/pkg/pki"
 	"github.com/jaab-tech/fluxrig/pkg/registry"

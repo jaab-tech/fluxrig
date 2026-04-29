@@ -26,7 +26,7 @@ LDFLAGS := -w -s \
 
 all: lint test build
 
-build: lint catalog iso8583-tool ## Build fluxrig binary
+build: lint catalog openapi iso8583-tool ## Build fluxrig binary
 	@echo "--------------------------------------------------"
 	@echo "Building fluxrig..."
 	@echo "  Version:  $(VERSION)"
@@ -36,11 +36,9 @@ build: lint catalog iso8583-tool ## Build fluxrig binary
 	@echo "--------------------------------------------------"
 	mkdir -p bin
 	go build $(GO_FLAGS) -ldflags "$(LDFLAGS)" -o bin/fluxrig ./cmd/fluxrig
-
-# Mixer (Requires CGO)
 	go build $(GO_FLAGS) -ldflags "$(LDFLAGS)" -o bin/fluxrig-mixer ./cmd/fluxrig-mixer
 
-build-bin: catalog ## Build fluxrig binary without linting
+build-bin: catalog openapi ## Build fluxrig binary without linting
 	@echo "--------------------------------------------------"
 	@echo "Building fluxrig (No Lint)..."
 	@echo "--------------------------------------------------"
@@ -48,8 +46,9 @@ build-bin: catalog ## Build fluxrig binary without linting
 	go build $(GO_FLAGS) -ldflags "$(LDFLAGS)" -o bin/fluxrig ./cmd/fluxrig
 	go build $(GO_FLAGS) -ldflags "$(LDFLAGS)" -o bin/fluxrig-mixer ./cmd/fluxrig-mixer
 
-# Ops Directory (Default to sibling repo)
-OPS_DIR ?= ../fluxrig-ops
+# Repository Strategy
+OPS_DIR  ?= ../fluxrig-ops
+DOCS_DIR ?= ../fluxrig.org
 
 catalog: ## Generate log message catalog
 	@echo "Generating log catalog..."
@@ -175,16 +174,20 @@ clean-robot: ## Clean Robot Framework artifacts
 
 .PHONY: openapi
 openapi: ## Generate OpenAPI specification and sync to ops
-	@echo "Generating OpenAPI spec..."
+	@echo "Generating OpenAPI spec for version $(VERSION) (Clean Source Strategy)..."
+	@cp cmd/fluxrig-mixer/main.go cmd/fluxrig-mixer/main_gen.go
+	@sed -i '' 's/@version 0.0.0-dev/@version $(VERSION)/' cmd/fluxrig-mixer/main_gen.go
 	@mkdir -p pkg/mixer/api/docs
 	@if command -v swag >/dev/null; then \
-		swag init -g cmd/fluxrig-mixer/main.go -o pkg/mixer/api/docs --outputTypes yaml,go; \
+		swag init -g cmd/fluxrig-mixer/main_gen.go -o pkg/mixer/api/docs --outputTypes yaml,go; \
 	else \
-		$(shell go env GOPATH)/bin/swag init -g cmd/fluxrig-mixer/main.go -o pkg/mixer/api/docs --outputTypes yaml,go; \
-	fi
-	@cp pkg/mixer/api/docs/swagger.yaml $(OPS_DIR)/docs/public/reference/openapi.yaml
-	@cp pkg/mixer/api/docs/swagger.yaml $(OPS_DIR)/website/static/openapi.yaml
-	@echo "Spec generated at pkg/mixer/api/docs/ and synced to $(OPS_DIR)"
+		$(shell go env GOPATH)/bin/swag init -g cmd/fluxrig-mixer/main_gen.go -o pkg/mixer/api/docs --outputTypes yaml,go; \
+	fi; \
+	EXIT_CODE=$$?; \
+	rm cmd/fluxrig-mixer/main_gen.go; \
+	if [ $$EXIT_CODE -ne 0 ]; then exit $$EXIT_CODE; fi
+	@cp pkg/mixer/api/docs/swagger.yaml $(DOCS_DIR)/docs/reference/openapi.yaml
+	@echo "Spec generated at pkg/mixer/api/docs/ and synced to $(DOCS_DIR)"
 
 .PHONY: iso8583-tool
 iso8583-tool: ## Build iso8583-tool (Load Gen & Echo Server)

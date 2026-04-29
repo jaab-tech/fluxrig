@@ -19,6 +19,9 @@ import (
 	"syscall"
 
 	"github.com/fxamacker/cbor/v2"
+	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
+
 	"github.com/jaab-tech/fluxrig/pkg/bus"
 	"github.com/jaab-tech/fluxrig/pkg/config"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
@@ -31,8 +34,6 @@ import (
 	rt "github.com/jaab-tech/fluxrig/pkg/runtime"
 	"github.com/jaab-tech/fluxrig/pkg/telemetry"
 	"github.com/jaab-tech/fluxrig/pkg/version"
-	"github.com/spf13/cobra"
-	"gopkg.in/yaml.v3"
 )
 
 // ErrReconnect indicates the agent needs to restart its session (e.g. identity change)
@@ -102,7 +103,7 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 	enrollTimeout, _ := time.ParseDuration(cfg.Rack.EnrollmentTimeout)
 	hbInterval, _ := time.ParseDuration(cfg.Rack.HeartbeatInterval)
 
-	// Synchronization Contexts (ADR 0036/ADR 0014)
+	// Synchronization Contexts
 	// These are now strictly configuration-driven with safe defaults in pkg/config
 	cleanupTimeout, errParse := time.ParseDuration(cfg.Rack.CleanupTimeout)
 	if errParse != nil {
@@ -124,7 +125,7 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 		return fmt.Errorf("invalid rack.bus.subscription_retry_wait: %w", errParse)
 	}
 
-	// 2. Identify effective name for Enrollment and Bus (ADR 0020/ADR 0036)
+	// 2. Identify effective name for Enrollment and Bus
 	helloName := cfg.Rack.Name
 	if helloName == "" {
 		prefix := cfg.Rack.NamePrefix
@@ -381,7 +382,7 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 						}
 					}
 				} else {
-					logger.Info("Rack is PENDING adoption. Deferring telemetry and runtime.")
+					logger.Info("Rack is PENDING adoption. Run 'fluxrig admin racks approve <ID>' to activate.", "id", mID)
 					isSessionActive = false
 				}
 			} else {
@@ -695,7 +696,7 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 			telShutdown = sDown
 			telBusCleanup = telBus
 
-			// MANDATORY Telemetry Handshake (ADR 0036)
+			// MANDATORY Telemetry Handshake
 			if errTel := telemetry.VerifyConnectivity(context.Background(), telBus, state.Name, convTimeout, handshakeInterval); errTel != nil {
 				logger.Error("Telemetry convergence failure. Aborting promotion.", "error", errTel)
 				cleanupTelemetry()

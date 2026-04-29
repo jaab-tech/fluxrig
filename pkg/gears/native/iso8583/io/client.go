@@ -14,13 +14,14 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/jaab-tech/fluxrig/pkg/idgen"
 	loggerPkg "github.com/jaab-tech/fluxrig/pkg/logger"
 	"github.com/jaab-tech/fluxrig/pkg/sdk"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/metric"
 )
 
 // Client handles outbound ISO8583 connections with length-prefixed framing.
@@ -313,7 +314,7 @@ func (c *Client) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.Fl
 		return nil, fmt.Errorf("write error: %w", err)
 	}
 
-	// Telemetry - Frame Sent (DEBUG per ADR 0026)
+	// Telemetry - Frame Sent (DEBUG)
 	c.log.Debug("Frame Sent",
 		"len", len(fullPayload),
 		"hex", fmt.Sprintf("0x%x", fullPayload[:min(64, len(fullPayload))]),
@@ -436,7 +437,7 @@ func (c *Client) inspect(payload []byte, meta map[string]string) FrameInfo {
 		}
 	}
 
-	// Telemetry - Log "Frame Received" at DEBUG level for valid frames (per ADR 0026)
+	// Telemetry - Log "Frame Received" at DEBUG level for valid frames
 	if info.Valid {
 		args := []any{
 			"len", len(payload),

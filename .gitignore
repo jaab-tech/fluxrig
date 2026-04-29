@@ -38,7 +38,8 @@ test/e2e/**/work*/
 test/e2e/**/work
 test/robot/**/work
 test/robot/**/results
-test/e2e/iso8583/prod/
+test/e2e/10_iso8583/prod/
+pkg/telemetry/logs/
 scratch/
 
 # Unit Test Artifacts
@@ -51,3 +52,4 @@ tmp/
 .gomod_cache/
 test_output*.txt
 coverage.out
+coverage.html

@@ -6,9 +6,10 @@ package snake
 import (
 	"context"
 	"crypto/tls"
-	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -66,6 +67,16 @@ func NewServer(cfg Config) (*Server, error) {
 	// JetStream Configuration
 	// opts.JetStreamDomain = cfg.ClusterName // Disabled for restoration (use default)
 
+	// Pre-flight check: is the port available?
+	if cfg.Port > 0 {
+		addr := net.JoinHostPort("0.0.0.0", strconv.Itoa(cfg.Port))
+		l, err := net.Listen("tcp", addr)
+		if err != nil {
+			return nil, fmt.Errorf("snake port %d is already in use: %w", cfg.Port, err)
+		}
+		_ = l.Close()
+	}
+
 	ns, err := server.NewServer(opts)
 	if err != nil {
 		return nil, err
@@ -76,7 +87,7 @@ func NewServer(cfg Config) (*Server, error) {
 
 	// Wait for readiness
 	if !ns.ReadyForConnections(5 * time.Second) {
-		return nil, errors.New("nats server failed to start")
+		return nil, fmt.Errorf("nats server failed to start on port %d (timeout)", cfg.Port)
 	}
 
 	s := &Server{ns: ns, domain: cfg.ClusterName}
@@ -103,7 +114,7 @@ func (s *Server) ProvisionStream(name string, subjects []string) error {
 		natsOpts = append(natsOpts, nats.Secure(&tls.Config{InsecureSkipVerify: true}))
 	}
 
-	// Connect to self with retry resilience (ADR 0032 follow-up)
+	// Connect to self with retry resilience
 	var nc *nats.Conn
 	var err error
 	for i := 1; i <= 3; i++ {

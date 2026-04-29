@@ -7,10 +7,11 @@ import (
 	"context"
 	"testing"
 
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+
 	"github.com/jaab-tech/fluxrig/pkg/bus"
 	"github.com/jaab-tech/fluxrig/pkg/idgen"
 	"github.com/jaab-tech/fluxrig/pkg/telemetry"
-	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
 func TestMetricExporter_Export(t *testing.T) {

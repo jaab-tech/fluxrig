@@ -11,10 +11,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
-	"github.com/jaab-tech/fluxrig/pkg/idgen"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
+	"github.com/jaab-tech/fluxrig/pkg/idgen"
 )
 
 func TestIO_CertificationBlitz(t *testing.T) {

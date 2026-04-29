@@ -14,9 +14,10 @@ import (
 	"time"
 
 	"github.com/fxamacker/cbor/v2"
-	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+
+	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 )
 
 // NatsBus is the concrete implementation of the Bus interface using NATS JetStream.
@@ -45,7 +46,7 @@ func (n *NatsBus) Connect(url string, opts ConnectOptions) error {
 		nats.MaxReconnects(-1), // Infinite reconnects
 	}
 
-	// --- Advanced TLS Configuration (ADR 0020) ---
+	// --- Advanced TLS Configuration ---
 	if opts.InsecureSkipVerify || opts.RootCA != "" {
 		tlsConfig := &tls.Config{
 			InsecureSkipVerify: opts.InsecureSkipVerify, //nolint:gosec // allowed for dev/test environments
@@ -86,7 +87,7 @@ func (n *NatsBus) Connect(url string, opts ConnectOptions) error {
 		n.retryAttempts = 1 // At least one attempt
 	}
 
-	// 3. Initialize JetStream (ADR 0020)
+	// 3. Initialize JetStream
 	js, err := jetstream.New(nc)
 	if err != nil {
 		return fmt.Errorf("failed to initialize jetstream: %w", err)

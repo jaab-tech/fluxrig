@@ -74,7 +74,7 @@ func (g *Gear) Start(ctx context.Context, emit func(*fluxmsg.FluxMsg)) error {
 		}
 	}
 
-	// --- Control Plane Integration (ADR 0020) ---
+	// --- Control Plane Integration ---
 	if cp, ok := g.ctx.ControlPlane().(ctrl.ControlPlane); ok {
 		cmdChan, err := cp.Subscribe(g.ctx.GearName())
 		if err != nil {

@@ -12,9 +12,10 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/jaab-tech/fluxrig/pkg/manager/cas"
 	"golang.org/x/mod/semver"
 	"gopkg.in/yaml.v3"
+
+	"github.com/jaab-tech/fluxrig/pkg/manager/cas"
 )
 
 type DefaultManager struct {

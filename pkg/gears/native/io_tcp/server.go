@@ -49,7 +49,7 @@ func NewServer(cfg *Config, log *slog.Logger, emit func(*fluxmsg.FluxMsg), idGen
 func (s *Server) Start(ctx context.Context) error {
 	listenConfig := net.ListenConfig{Control: reusePortControl}
 
-	// Resilient Bind-Retry Loop (ADR 0032)
+	// Resilient Bind-Retry Loop
 	// Handles transient port conflicts on macOS during rapid CI cycles.
 	var listener net.Listener
 	var err error
