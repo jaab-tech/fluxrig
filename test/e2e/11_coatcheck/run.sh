@@ -11,7 +11,7 @@
 #   ./run_single_rack.sh TC01         # Run specific test
 #
 # Prerequisites:
-#   - FluxRig binaries built (make build)
+#   - fluxrig binaries built (make build)
 
 # NOTE: Do NOT use set -e as it causes issues with process cleanup and signals
 set -u
@@ -64,6 +64,12 @@ start_echo_server() {
     log_success "TCP Echo Server started (PID: $ECHO_PID)"
 }
 
+purge_rack() {
+    local name=$1
+    log_info "Purging stale registry for '$name'..."
+    curl -s -X DELETE "$FLUXRIG_API_URL/api/v1/racks/$name" > /dev/null || true
+}
+
 
 
 
@@ -94,6 +100,7 @@ start_rack_local() {
     sed "s/name = \"proxy-rack\"/name = \"$rack_name\"/" "$WORK_DIR/rack/fluxrig.toml" > "$WORK_DIR/rack/fluxrig.toml.tmp" && mv "$WORK_DIR/rack/fluxrig.toml.tmp" "$WORK_DIR/rack/fluxrig.toml"
     sed "s/4233/$SNAKE_PORT/" "$WORK_DIR/rack/fluxrig.toml" > "$WORK_DIR/rack/fluxrig.toml.tmp" && mv "$WORK_DIR/rack/fluxrig.toml.tmp" "$WORK_DIR/rack/fluxrig.toml"
     
+    purge_rack "$rack_name"
     cd "$WORK_DIR/rack"
     "${ROOT_DIR}/bin/fluxrig" run -c "fluxrig.toml" > "rack.stdout" 2>&1 &
     RACK_PID=$!
@@ -138,7 +145,6 @@ cleanup_all_quiet() {
     # HTTP Echo Server
     if [[ -n "$ECHO_PID" ]]; then
         kill -TERM $ECHO_PID 2>/dev/null || true
-        # Don't wait indefinitely
     fi
     
     # Rack
@@ -162,6 +168,12 @@ cleanup_all_quiet() {
     # Final sweep of ports (quietly)
     lsof -ti :$MIXER_API_PORT -ti :$SNAKE_PORT -ti :9180 -ti :9000 2>/dev/null | xargs kill -9 2>/dev/null || true
     
+    # ISOLATION HARDENING: Clean data directories between tests
+    if [[ -d "$WORK_DIR" ]]; then
+        rm -rf "$WORK_DIR/mixer/data" "$WORK_DIR/rack/data"
+        mkdir -p "$WORK_DIR/mixer/data" "$WORK_DIR/rack/data"
+    fi
+
     MIXER_PID=""
     RACK_PID=""
     ECHO_PID=""
@@ -385,14 +397,13 @@ main() {
     lsof -ti :$MIXER_API_PORT -ti :$SNAKE_PORT -ti :9180 -ti :9000 2>/dev/null | xargs kill -9 2>/dev/null || true
     
     # 2. Kill only specific test binaries from our repo
-    pkill -f "$ROOT_DIR/bin/fluxrig" 2>/dev/null || true
-    pkill -f "$ROOT_DIR/bin/fluxrig-mixer" 2>/dev/null || true
-    
-    sleep 1
+    pkill fluxrig 2>/dev/null || true
+    pkill fluxrig-mixer 2>/dev/null || true
+    sleep 1 # Allow graceful exit
     
     # Build if needed
     if [[ ! -f "$ROOT_DIR/bin/fluxrig" ]]; then
-        log_info "Building FluxRig..."
+        log_info "Building fluxrig..."
         make -C "$ROOT_DIR" build
     fi
     

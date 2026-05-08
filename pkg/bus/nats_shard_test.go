@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -26,7 +27,7 @@ func TestNatsBus_Certification(t *testing.T) {
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "not connected")
 
-		err = b.PublishRaw(ctx, "test", []byte("raw"), 123)
+		err = b.PublishRaw(ctx, "test", []byte("raw"), uuid.New())
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "not connected")
 

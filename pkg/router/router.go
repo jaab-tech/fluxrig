@@ -11,8 +11,11 @@ import (
 	"github.com/ThreeDotsLabs/watermill"
 	watermillNats "github.com/ThreeDotsLabs/watermill-nats/v2/pkg/nats"
 	"github.com/ThreeDotsLabs/watermill/message"
+	"github.com/fxamacker/cbor/v2"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+
+	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 )
 
 // RouterWrapper wraps the Watermill router to provide fluxrig-specific functionality.
@@ -35,7 +38,7 @@ func NewRouter(logger watermill.LoggerAdapter) (*RouterWrapper, error) {
 // ConfigureJetStream sets up NATS JetStream Publisher and Subscriber.
 // url: NATS URL (e.g. "nats://localhost:4222")
 
-func (r *RouterWrapper) ConfigureJetStream(url string, domain string, durable bool, rootCA string, businessMaxAgeStr string, telemetryMaxAgeStr string, logger watermill.LoggerAdapter) error {
+func (r *RouterWrapper) ConfigureJetStream(url string, domain string, durable bool, rootCA string, businessStream string, businessSubjects []string, telemetryStream string, telemetrySubjects []string, businessMaxAgeStr string, telemetryMaxAgeStr string, logger watermill.LoggerAdapter) error {
 	// 1. Manually Ensure Stream Exists using V2 SDK
 	connOpts := []nats.Option{}
 	if rootCA != "" {
@@ -69,36 +72,54 @@ func (r *RouterWrapper) ConfigureJetStream(url string, domain string, durable bo
 		telemetryMaxAge = 24 * time.Hour // Fallback default
 	}
 
-	// Check if stream exists
-	// A. Business Stream (WorkQueue or Limits, Durable)
-	businessStream := "flux-msg"
-	businessSubjects := []string{"fluxrig.>", "flux.msg.>"}
+	// 1. Determine Streams to Create/Update
+	streams := make(map[string][]string)
+	maxAges := make(map[string]time.Duration)
 
-	_, err = js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-		Name:      businessStream,
-		Subjects:  businessSubjects,
-		Retention: jetstream.LimitsPolicy,
-		Storage:   jetstream.FileStorage,
-		MaxAge:    businessMaxAge,
-		Replicas:  1,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create/update business stream: %w", err)
+	if businessStream != "" {
+		streams[businessStream] = businessSubjects
+		maxAges[businessStream] = businessMaxAge
 	}
 
-	// B. Telemetry Stream (Limits, Short-lived)
-	telemetryStream := "flux-telemetry"
-	_, err = js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-		Name:      telemetryStream,
-		Subjects:  []string{"flux.telemetry.>"},
-		Retention: jetstream.LimitsPolicy,
-		Storage:   jetstream.FileStorage,
-		MaxAge:    telemetryMaxAge,
-		MaxMsgs:   100000, // Cap number of logs
-		Replicas:  1,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create/update telemetry stream: %w", err)
+	if telemetryStream != "" {
+		if subjects, exists := streams[telemetryStream]; exists {
+			// Merge subjects if names match
+			seen := make(map[string]bool)
+			for _, s := range subjects {
+				seen[s] = true
+			}
+			for _, s := range telemetrySubjects {
+				if !seen[s] {
+					streams[telemetryStream] = append(streams[telemetryStream], s)
+					seen[s] = true
+				}
+			}
+			if businessMaxAge > telemetryMaxAge {
+				maxAges[telemetryStream] = businessMaxAge
+			}
+		} else {
+			streams[telemetryStream] = telemetrySubjects
+			maxAges[telemetryStream] = telemetryMaxAge
+		}
+	}
+
+	// 2. Create/Update Streams
+	for name, subjects := range streams {
+		logger.Info("Configuring JetStream Stream", watermill.LogFields{
+			"stream":   name,
+			"subjects": subjects,
+		})
+		_, err = js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+			Name:      name,
+			Subjects:  subjects,
+			Retention: jetstream.LimitsPolicy,
+			Storage:   jetstream.FileStorage,
+			MaxAge:    maxAges[name],
+			Replicas:  1,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to create/update stream %s: %w", name, err)
+		}
 	}
 
 	// Log confirmation
@@ -110,7 +131,7 @@ func (r *RouterWrapper) ConfigureJetStream(url string, domain string, durable bo
 
 	// 2. Configure Watermill
 	natsOpts := []nats.Option{
-		nats.Name("FluxRig Router"),
+		nats.Name("fluxrig Router"),
 		nats.Timeout(10 * time.Second),
 		nats.ReconnectWait(1 * time.Second),
 		nats.MaxReconnects(-1),
@@ -122,30 +143,28 @@ func (r *RouterWrapper) ConfigureJetStream(url string, domain string, durable bo
 	subscribeOpts := []nats.SubOpt{}
 	if durable {
 		// [PROD] Durable Mode: Resumes from last acked message. Zero data loss.
-		logger.Info("NATS Consumer Mode: DURABLE (DeliverAll)", nil)
+		// Note: We don't specify a global Durable name here because it would cause
+		// "subject does not match consumer" errors for multiple subscriptions.
+		// Watermill will handle consumer creation.
+		logger.Info("NATS Consumer Mode: DURABLE (DeliverLastPerSubject)", nil)
 		subscribeOpts = append(subscribeOpts,
-			nats.DeliverAll(),
-			nats.Durable("flux-router"), // Shared Durable Name
+			nats.DeliverLastPerSubject(),
 		)
 	} else {
-		// [DEV] Ephemeral Mode: Catch up from beginning of stream to avoid race conditions
-		logger.Info("NATS Consumer Mode: EPHEMERAL (DeliverAll/Catchup)", nil)
+		// [DEV] Ephemeral Mode: Only get the latest state per subject
+		logger.Info("NATS Consumer Mode: EPHEMERAL (DeliverLastPerSubject)", nil)
 		subscribeOpts = append(subscribeOpts,
-			nats.DeliverAll(),
+			nats.DeliverLastPerSubject(),
 		)
 	}
 
 	jsConfig := watermillNats.JetStreamConfig{
-		Disabled:       false,
-		AutoProvision:  false, // Handled manually above
-		ConnectOptions: []nats.JSOpt{
-			// Enforce default domain mapping
-		},
+		Disabled:         false,
+		AutoProvision:    false, // Handled manually above
+		ConnectOptions:   []nats.JSOpt{},
 		SubscribeOptions: subscribeOpts,
-		PublishOptions:   []nats.PubOpt{
-			// Sync publish by default for durability
-		},
-		AckAsync: false,
+		PublishOptions:   []nats.PubOpt{},
+		AckAsync:         false,
 	}
 
 	// Publisher (Writes to Watermill wires -> NATS Streams)
@@ -168,7 +187,6 @@ func (r *RouterWrapper) ConfigureJetStream(url string, domain string, durable bo
 			URL:         url,
 			Unmarshaler: RawNATSMarshaler{}, // Passthrough for FluxMsg (CBOR)
 			JetStream:   jsConfig,
-			// QueueGroupPrefix: "flux_consumer", // Disabled for Ephemeral Mode
 			NatsOptions: natsOpts,
 		},
 		logger,
@@ -185,6 +203,19 @@ func (r *RouterWrapper) ConfigureJetStream(url string, domain string, durable bo
 // Run starts the router (blocking).
 func (r *RouterWrapper) Run(ctx context.Context) error {
 	return r.Router.Run(ctx)
+}
+
+// Publish implements ScenarioPublisher interface (high-level fluxmsg).
+func (r *RouterWrapper) Publish(ctx context.Context, subject string, fm *fluxmsg.FluxMsg) error {
+	if r.Pub == nil {
+		return fmt.Errorf("publisher not initialized")
+	}
+	payload, err := cbor.Marshal(fm)
+	if err != nil {
+		return err
+	}
+	msg := message.NewMessage(watermill.NewUUID(), payload)
+	return r.Pub.Publish(subject, msg)
 }
 
 // RawNATSMarshaler passes raw bytes through without Watermill envelope

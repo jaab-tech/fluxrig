@@ -39,6 +39,14 @@ cp "${BASE_DIR}/mixer/fluxrig.toml" "${WORK_DIR}/mixer/fluxrig.toml"
 cp "${BASE_DIR}/rack/fluxrig.toml" "${WORK_DIR}/rack/fluxrig.toml"
 cp "${BASE_DIR}/scenario.yaml" "${WORK_DIR}/mixer/scenario.yaml"
 
+# Helper to purge registry by name
+purge_rack() {
+    local name=$1
+    local api_url="http://127.0.0.1:${MIXER_API_PORT}/api/v1"
+    log_info "Purging stale registry for '$name'..."
+    curl -s -X DELETE "$api_url/racks/$name" > /dev/null || true
+}
+
 # 2. Compile
 log_info "Compiling..."
 cd "${ROOT_DIR}"
@@ -55,6 +63,7 @@ wait_for_port $MIXER_API_PORT 10 || fail "Mixer failed to start"
 
 cd "${WORK_DIR}/rack"
 unset FLUXRIG_DISABLE_TELEMETRY
+purge_rack "rack-tcp-01"
 FLUXRIG_TRACE=1 "${ROOT_DIR}/bin/fluxrig" run -c "fluxrig.toml" > "rack.stdout" 2>&1 &
 AGENT_PID=$!
 sleep 5
@@ -75,6 +84,8 @@ RESPONSE=$( (echo "TEST_MSG"; sleep 1) | nc -w 2 127.0.0.1 9001 )
 log_info "Response: $RESPONSE"
 [[ "$RESPONSE" == "TEST_MSG"* ]] || fail "I/O P1 Failed: '$RESPONSE'"
 log_success "Phase 1 OK"
+# Allow telemetry to flush before shutdown
+sleep 10
 
 # 3.5 Runtime Visibility Check
 log_info "--- Visibility: CLI Configuration ---"
@@ -82,6 +93,7 @@ log_info "--- Visibility: CLI Configuration ---"
 log_success "CLI Visibility OK"
 
 # 4. Graceful Shutdown & Restart
+purge_rack "rack-tcp-01"
 log_info "--- Transition: Graceful Shutdown ---"
 # Stop Agent First
 kill $AGENT_PID 2>/dev/null || true
@@ -97,8 +109,8 @@ kill -9 $MIXER_PID 2>/dev/null || true
 wait $MIXER_PID 2>/dev/null || true
 log_info "Mixer Shutdown Cleanly"
 
-# Wait for sockets to settle (optional but safer for high-frequency CI)
-sleep 10
+# Wait for sockets to settle
+sleep 5
 
 # 5. Phase 2 (Client Mode)
 log_info "--- Phase 2: Client Mode (Same Ports) ---"
@@ -106,6 +118,18 @@ cd "${WORK_DIR}/mixer"
 "${ROOT_DIR}/bin/fluxrig-mixer" -c "fluxrig.toml" >> "mixer.stdout" 2>&1 &
 MIXER_PID=$!
 wait_for_port $MIXER_API_PORT 10 || fail "Mixer Phase 2 failed to restart"
+
+# Second purge to ensure clean state
+purge_rack "rack-tcp-01"
+
+log_info "Starting Rack Phase 2..."
+cd "${WORK_DIR}/rack"
+unset FLUXRIG_DISABLE_TELEMETRY
+FLUXRIG_TRACE=1 "${ROOT_DIR}/bin/fluxrig" run -c "fluxrig.toml" >> "rack.stdout" 2>&1 &
+AGENT_PID=$!
+
+# Wait for Rack to enroll
+sleep 5
 
 log_info "Starting Mock Server (:9002)..."
 python3 "${BASE_DIR}/mock_server.py" > "mock_server.stdout" 2>&1 &
@@ -116,14 +140,11 @@ curl -s -X POST "${FLUXRIG_API_URL}/api/v1/scenario/import?activate=true" \
   -H "Content-Type: application/x-yaml" \
   --data-binary @"${BASE_DIR}/scenario_client.yaml" || fail "Scenario P2 import failed"
 
-cd "${WORK_DIR}/rack"
-unset FLUXRIG_DISABLE_TELEMETRY
-FLUXRIG_TRACE=1 "${ROOT_DIR}/bin/fluxrig" run -c "fluxrig.toml" >> "rack.stdout" 2>&1 &
-AGENT_PID=$!
-
 log_info "Waiting for Mock Server verification..."
 wait $MOCK_PID || fail "Phase 2 Verification Failed"
 log_success "Phase 2 OK"
+# Allow telemetry to flush before shutdown
+sleep 10
 
 log_info "--- Visibility: CLI Configuration (Phase 2) ---"
 "${ROOT_DIR}/bin/fluxrig" configuration --api-url "http://127.0.0.1:${MIXER_API_PORT}" || fail "CLI configuration failed"
@@ -149,7 +170,7 @@ sleep 1
 
 log_info "--- Registry: Full Contents ---"
 if command -v duckdb >/dev/null 2>&1; then
-  duckdb -c "SELECT entity_id, type_id, machine_id, name, status FROM registry ORDER BY type_id, entity_id" "${WORK_DIR}/mixer/data/fluxrig.duckdb"
+  duckdb -c "SELECT entity_id, type_id, machine_id, name, status FROM registry ORDER BY type_id, entity_id" "${WORK_DIR}/mixer/data/flux.duckdb"
 else
   log_warn "duckdb CLI not found, skipping table dump. Use 'fluxrig configuration' for subset."
 fi
@@ -237,21 +258,29 @@ if command -v duckdb >/dev/null 2>&1; then
   # The parquet file structure: timestamp, severity, body, attributes (Map).
   
   # Wait for flush to ensure logs are there
-  sleep 10
+  # Wait for flush and ingestion
+  sleep 5
   
-  RAW_IDS=$(duckdb -c "COPY (SELECT count(DISTINCT attributes->>'eid') FROM read_parquet('${WORK_DIR}/mixer/data/telemetry/logs/**/*.parquet') WHERE body LIKE '%registered gear%') TO stdout (FORMAT CSV, HEADER FALSE)")
+  # Extract distinct Gear EIDs from Mixer's registration logs
+  # The Mixer now flushes its logs to NATS, so they should be in Parquet.
+  # We check both body and attributes as 'registered gear' might be in either depending on log mapping.
+  QUERY="SELECT count(DISTINCT json_extract_path_text(attributes, '$.eid')) FROM read_parquet('${WORK_DIR}/mixer/data/telemetry/logs/**/*.parquet') WHERE body LIKE '%registered gear%'"
+  RAW_IDS=$(duckdb -c "COPY ($QUERY) TO stdout (FORMAT CSV, HEADER FALSE)" 2>/dev/null)
   GEAR_IDS=$(echo "$RAW_IDS" | tr -d '[:space:]')
   
-  if [ "$GEAR_IDS" -lt 2 ]; then
-     # Fallback: Maybe 'msg' attribute?
-     log_warn "Gear IDs found: $GEAR_IDS. Checking legacy..."
-     RAW_IDS=$(duckdb -c "COPY (SELECT count(DISTINCT attributes->>'eid') FROM read_parquet('${WORK_DIR}/mixer/data/telemetry/logs/**/*.parquet') WHERE attributes->>'msg' LIKE '%registered gear%') TO stdout (FORMAT CSV, HEADER FALSE)")
-     GEAR_IDS=$(echo "$RAW_IDS" | tr -d '[:space:]')
+  if [ -z "$GEAR_IDS" ] || [ "$GEAR_IDS" -lt 1 ]; then
+      log_warn "Gear IDs found: $GEAR_IDS. Retrying with loose body match..."
+      QUERY="SELECT count(DISTINCT json_extract_path_text(attributes, '$.eid')) FROM read_parquet('${WORK_DIR}/mixer/data/telemetry/logs/**/*.parquet') WHERE attributes LIKE '%registered gear%'"
+      RAW_IDS=$(duckdb -c "COPY ($QUERY) TO stdout (FORMAT CSV, HEADER FALSE)" 2>/dev/null)
+      GEAR_IDS=$(echo "$RAW_IDS" | tr -d '[:space:]')
   fi
+  
+  # Phase 1 + Phase 2 = at least 2 unique gears (one in each scenario)
   if [ "$GEAR_IDS" -lt 2 ]; then
       fail "Gear ID collision or missing logs (Count: $GEAR_IDS)"
   fi
   log_success "Entity ID Uniqueness Validated ($GEAR_IDS unique gears)"
+
 else
   log_warn "DuckDB not found, skipping Gear ID check"
 fi

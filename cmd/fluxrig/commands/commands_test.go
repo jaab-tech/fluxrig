@@ -26,7 +26,7 @@ func TestInspectConfig_Success(t *testing.T) {
 	})
 	mux.HandleFunc("/api/v1/racks", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprint(w, `[{"machine_id":1,"name":"rack1","status":"online","config":{"port":8080}}]`)
+		_, _ = fmt.Fprint(w, `[{"machine_id":"019de49b-0000-7000-8000-000000000000","name":"rack1","status":"online","config":{"port":8080}}]`)
 	})
 
 	ts := httptest.NewServer(mux)

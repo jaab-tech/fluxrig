@@ -29,7 +29,9 @@ Essential for troubleshooting connectivity and permission issues before producti
 		if configPathCheck != "" {
 			// Try loading as Rack config
 			if cfg, err := config.LoadRack(configPathCheck); err == nil {
-				_ = os.Setenv("FLUXRIG_BUS_URL", cfg.Rack.Bus.URL)
+				if cfg.Snake.URL != "" {
+					_ = os.Setenv("FLUXRIG_BUS_URL", cfg.Snake.URL)
+				}
 				if cfg.Store.Dir != "" {
 					_ = os.Setenv("FLUXRIG_STORE_DIR", cfg.Store.Dir)
 				}
@@ -40,7 +42,7 @@ Essential for troubleshooting connectivity and permission issues before producti
 			}
 		}
 
-		fmt.Println(color.CyanString("FluxRig Pre-flight Check"))
+		fmt.Println(color.CyanString("fluxrig Pre-flight Check"))
 		fmt.Println(color.CyanString("========================="))
 
 		allOk := true
@@ -62,7 +64,8 @@ Essential for troubleshooting connectivity and permission issues before producti
 		}
 
 		// 4. PKI Check
-		if !checkPKI() {
+		var storeDirFlag, _ = cmd.Flags().GetString("store-dir")
+		if !checkPKI(configPathCheck, storeDirFlag) {
 			allOk = false
 		}
 
@@ -169,31 +172,69 @@ func checkStore(overridePath string) bool {
 	return true
 }
 
-func checkPKI() bool {
+func checkPKI(configPath string, overrideStoreDir string) bool {
 	fmt.Printf("%-25s ", "PKI/TLS Certificates")
-	home, _ := os.UserHomeDir()
-	pkiDir := filepath.Join(home, ".fluxrig", "pki")
 
-	requiredFiles := []string{"cluster.key", "machine.key"}
-	missing := 0
-	for _, f := range requiredFiles {
-		path := filepath.Join(pkiDir, f)
-		if _, err := os.Stat(path); os.IsNotExist(err) {
-			missing++
+	pkiDirs := []string{}
+
+	// 1. Try from Config
+	if configPath != "" {
+		// Try Mixer Config first
+		if cfg, err := config.LoadMixer(configPath); err == nil {
+			pkiDirs = append(pkiDirs, cfg.Store.Dir)
+		} else if cfg, err := config.LoadRack(configPath); err == nil {
+			pkiDirs = append(pkiDirs, cfg.Store.Dir)
 		}
 	}
 
-	if missing == len(requiredFiles) {
-		fmt.Printf("[%s] No keys found (Bootstrap required)\n", color.YellowString("WARN"))
+	// 2. Try Override
+	if overrideStoreDir != "" {
+		pkiDirs = append(pkiDirs, overrideStoreDir)
+	}
+
+	// 3. Fallback to Home
+	home, _ := os.UserHomeDir()
+	pkiDirs = append(pkiDirs, filepath.Join(home, ".fluxrig", "pki"))
+
+	requiredFiles := []string{"cluster.key", "machine.key"}
+
+	// We only need one of the directories to have the keys to consider it OK (or WARN if missing everywhere)
+	foundDir := ""
+	missingInAll := true
+	partialFound := false
+	partialDir := ""
+
+	for _, dir := range pkiDirs {
+		foundCount := 0
+		for _, f := range requiredFiles {
+			path := filepath.Join(dir, f)
+			if _, err := os.Stat(path); err == nil {
+				foundCount++
+			}
+		}
+
+		if foundCount == len(requiredFiles) {
+			foundDir = dir
+			missingInAll = false
+			partialFound = false // Found a perfect match, ignore any previous partials
+			break
+		} else if foundCount > 0 {
+			partialFound = true
+			partialDir = dir
+		}
+	}
+
+	if !missingInAll {
+		fmt.Printf("[%s] Keys present in %s\n", color.GreenString("OK"), foundDir)
 		return true
 	}
 
-	if missing > 0 {
-		fmt.Printf("[%s] Partial keys found in %s\n", color.RedString("FAIL"), pkiDir)
-		return false
+	if partialFound {
+		fmt.Printf("[%s] Partial keys found in %s (Bootstrap recommended)\n", color.YellowString("WARN"), partialDir)
+		return true
 	}
 
-	fmt.Printf("[%s] Keys present in %s\n", color.GreenString("OK"), pkiDir)
+	fmt.Printf("[%s] Awaiting first enrollment (Sovereign auto-bootstrap)\n", color.GreenString("READY"))
 	return true
 }
 

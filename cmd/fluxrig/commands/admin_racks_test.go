@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/google/uuid"
 )
 
 func TestRacksList(t *testing.T) {
@@ -16,7 +18,7 @@ func TestRacksList(t *testing.T) {
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/racks" {
 			racks := []map[string]any{
-				{"machine_id": 1, "name": "rack-1", "status": "active"},
+				{"machine_id": uuid.New().String(), "name": "rack-1", "status": "active"},
 			}
 			_ = json.NewEncoder(w).Encode(racks)
 			return
@@ -38,6 +40,7 @@ func TestRacksList(t *testing.T) {
 }
 
 func TestRacksApprove(t *testing.T) {
+	id := uuid.New().String()
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "POST" && strings.Contains(r.URL.Path, "/approve") {
 			w.WriteHeader(http.StatusOK)
@@ -47,7 +50,7 @@ func TestRacksApprove(t *testing.T) {
 	}))
 	defer mockServer.Close()
 
-	out, err := executeCommand(rootCmd, "admin", "racks", "approve", "1", "--name", "new-name", "--api-url", mockServer.URL)
+	out, err := executeCommand(rootCmd, "admin", "racks", "approve", id, "--name", "new-name", "--api-url", mockServer.URL)
 	if err != nil {
 		t.Fatalf("Approve failed: %v", err)
 	}
@@ -58,6 +61,7 @@ func TestRacksApprove(t *testing.T) {
 }
 
 func TestRacksSuspend(t *testing.T) {
+	id := uuid.New().String()
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "POST" && strings.Contains(r.URL.Path, "/suspend") {
 			w.WriteHeader(http.StatusOK)
@@ -67,7 +71,7 @@ func TestRacksSuspend(t *testing.T) {
 	}))
 	defer mockServer.Close()
 
-	out, err := executeCommand(rootCmd, "admin", "racks", "suspend", "1", "--api-url", mockServer.URL)
+	out, err := executeCommand(rootCmd, "admin", "racks", "suspend", id, "--api-url", mockServer.URL)
 	if err != nil {
 		t.Fatalf("Suspend failed: %v", err)
 	}
@@ -78,6 +82,7 @@ func TestRacksSuspend(t *testing.T) {
 }
 
 func TestRacksActivate(t *testing.T) {
+	id := uuid.New().String()
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "POST" && strings.Contains(r.URL.Path, "/activate") {
 			w.WriteHeader(http.StatusOK)
@@ -87,7 +92,7 @@ func TestRacksActivate(t *testing.T) {
 	}))
 	defer mockServer.Close()
 
-	out, err := executeCommand(rootCmd, "admin", "racks", "activate", "1", "--api-url", mockServer.URL)
+	out, err := executeCommand(rootCmd, "admin", "racks", "activate", id, "--api-url", mockServer.URL)
 	if err != nil {
 		t.Fatalf("Activate failed: %v", err)
 	}
@@ -98,6 +103,7 @@ func TestRacksActivate(t *testing.T) {
 }
 
 func TestRacksRemove(t *testing.T) {
+	id := uuid.New().String()
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "DELETE" {
 			w.WriteHeader(http.StatusOK)
@@ -107,7 +113,7 @@ func TestRacksRemove(t *testing.T) {
 	}))
 	defer mockServer.Close()
 
-	out, err := executeCommand(rootCmd, "admin", "racks", "remove", "1", "--api-url", mockServer.URL)
+	out, err := executeCommand(rootCmd, "admin", "racks", "remove", id, "--api-url", mockServer.URL)
 	if err != nil {
 		t.Fatalf("Remove failed: %v", err)
 	}

@@ -87,7 +87,7 @@ test/e2e/coatcheck/
 
 ### Key Concept: HTTP Reverse Proxy with Context Preservation
 
-**Scenario**: FluxRig acts as an HTTP reverse proxy. Internal routing metadata (`conn_id`) must NOT be forwarded to the backend, but is required to route the response back to the correct client connection.
+**Scenario**: fluxrig acts as an HTTP reverse proxy. Internal routing metadata (`conn_id`) must NOT be forwarded to the backend, but is required to route the response back to the correct client connection.
 
 | Metadata | Description | Forwarded to Backend? |
 |----------|-------------|----------------------|

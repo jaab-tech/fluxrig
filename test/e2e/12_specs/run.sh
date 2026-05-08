@@ -68,7 +68,7 @@ prepare_environment() {
     FLUXRIG_BIN="${WORK_DIR}/fluxrig"
     OUTPUT="${WORK_DIR}/output.log"
     
-    log_info "Building FluxRig..."
+    log_info "Building fluxrig..."
     make -C "$ROOT_DIR" build-bin > /dev/null
     cp "$ROOT_DIR/bin/fluxrig" "${FLUXRIG_BIN}"
     cp "$ROOT_DIR/bin/fluxrig-mixer" "${WORK_DIR}/fluxrig-mixer"
@@ -95,7 +95,7 @@ port = 8090
 
 [store]
 dir = "./data"
-database_file = "fluxrig.duckdb"
+database_file = "flux.duckdb"
 
 [logging]
 level = "debug"

@@ -37,7 +37,7 @@ func TestNewLogger(t *testing.T) {
 	if !strings.Contains(out, "Hello Debug") {
 		t.Error("Missing Message")
 	}
-	if !strings.Contains(out, `key="val"`) {
+	if !strings.Contains(out, "key=val") {
 		t.Errorf("Missing Attribute: %s", out)
 	}
 }
@@ -105,7 +105,7 @@ func TestWithAttrs(t *testing.T) {
 	l.Info("msg", "req", 123)
 
 	out := buf.String()
-	if !strings.Contains(out, `common="val"`) {
+	if !strings.Contains(out, "common=val") {
 		t.Error("Missing common attr")
 	}
 	if !strings.Contains(out, "req=123") {
@@ -132,7 +132,7 @@ func TestWithGroup(t *testing.T) {
 	l.Info("msg", "k", "v")
 
 	out := buf.String()
-	if !strings.Contains(out, `grp.k="v"`) {
+	if !strings.Contains(out, "grp.k=v") {
 		t.Errorf("Missing group prefix: %s", out)
 	}
 }

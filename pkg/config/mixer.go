@@ -14,6 +14,7 @@ import (
 
 // MixerConfig defines the startup configuration for the Mixer.
 type MixerConfig struct {
+	Base          BaseConfig          `koanf:"base"`
 	Logging       LoggingConfig       `koanf:"logging"`
 	Store         StoreConfig         `koanf:"store"`
 	Mixer         MixerSettings       `koanf:"mixer"`
@@ -40,6 +41,9 @@ type EnrollmentConfig struct {
 	// AutoAdopt, if true, will automatically mark newly enrolled Racks as 'active'.
 	// If false (default), new Racks start as 'pending'.
 	AutoAdopt bool `koanf:"auto_adopt" example:"false"`
+	// BootstrapSecret is the shared secret used for zero-config enrollment and identity adoption.
+	// Defaults to 'fluxrig' if not specified.
+	BootstrapSecret string `koanf:"bootstrap_secret" example:"fluxrig"`
 }
 
 // ObservabilityConfig controls the global observability tier.
@@ -62,14 +66,13 @@ type EmbeddedConfig struct {
 
 // MixerSettings defines the identity of this Mixer instance.
 type MixerSettings struct {
-	// MachineID is the unique physical ID of the Mixer machine.
-	MachineID uint16 `koanf:"machine_id" example:"1"`
-	// MixerName is the human-readable name of the Mixer.
-	MixerName string `koanf:"mixer_name" example:"mixer-01"`
 	// StartupScenario reference to the scenario to load on startup.
-	// Accepts: file path ("/path/to/file.yaml"), URN ("payment-flow:v1.0.0"),
-	// or empty string (resume last active scenario).
 	StartupScenario string `koanf:"startup_scenario"`
+	// Message Limits
+	MaxHops        int `koanf:"max_hops"`
+	MaxPayloadSize int `koanf:"max_payload_size"`
+	// ScenarioWaitTimeout is the time to wait for a rack to register when activating a scenario.
+	ScenarioWaitTimeout string `koanf:"scenario_wait_timeout" example:"15s"`
 }
 
 // ApiConfig settings for the Control Plane REST API.
@@ -84,42 +87,15 @@ type ApiConfig struct {
 	TLSKeyFile string `koanf:"tls_key_file" example:"server.key"`
 }
 
-// SnakeConfig settings for the embedded NATS server.
-type SnakeConfig struct {
-	// Port for NATS client connections.
-	Port int `koanf:"port" example:"4222"`
-	// URL for internal connections.
-	URL string `koanf:"url" example:"nats://localhost:4222"`
-	// ClusterName for NATS clustering.
-	ClusterName string `koanf:"cluster_name" example:"flux"`
-	// StreamName for the primary business stream.
-	StreamName string `koanf:"stream_name" example:"flux-msg"`
-	// StreamSubjects to bind to the stream.
-	StreamSubjects []string `koanf:"stream_subjects" example:"flux.msg.>"`
-	// Durable toggles file-based storage.
-	Durable bool `koanf:"durable" example:"false"`
-	// OperationTimeout for NATS requests.
-	OperationTimeout string `koanf:"operation_timeout" example:"5s"`
-	// BusinessStreamMaxAge retention policy.
-	BusinessStreamMaxAge string `koanf:"business_stream_max_age" example:"720h"`
-	// TelemetryStreamMaxAge retention policy.
-	TelemetryStreamMaxAge string `koanf:"telemetry_stream_max_age" example:"24h"`
-	// TLSCertFile for server-side TLS.
-	TLSCertFile string `koanf:"tls_cert_file"`
-	// TLSKeyFile for server-side TLS.
-	TLSKeyFile string `koanf:"tls_key_file"`
-	// RootCAFile for client connections (loopback).
-	RootCAFile string `koanf:"root_ca_file"`
-}
-
-// StoreConfig is defined in rack.go (shared package config)
-
 // LoadMixer reads configuration from a TOML file and Environment Variables.
 // Priority: Env > File > Defaults. If path is empty, it returns the default configuration.
 func LoadMixer(path string) (*MixerConfig, error) {
 	k := koanf.New(".")
 
 	// 1. Defaults
+	_ = k.Set("base.name", "fluxrig-mixer")
+	_ = k.Set("base.state_dir", "./data")
+
 	_ = k.Set("logging.level", "info")
 	_ = k.Set("logging.filename", "logs/mixer.log")
 	_ = k.Set("logging.max_size_mb", 100)
@@ -129,51 +105,63 @@ func LoadMixer(path string) (*MixerConfig, error) {
 	// Defaults: Store
 	_ = k.Set("store.dir", "./data")
 	_ = k.Set("store.wal_max_size_mb", 500)
-	_ = k.Set("store.database_file", "fluxrig.duckdb")
+	_ = k.Set("store.database_file", "flux.duckdb")
 	_ = k.Set("store.cluster_key_file", "cluster.key")
 
-	_ = k.Set("mixer.machine_id", 1)
+	_ = k.Set("mixer.max_hops", 64)
+	_ = k.Set("mixer.max_payload_size", 2*1024*1024) // 2MB
+	_ = k.Set("mixer.scenario_wait_timeout", "15s")
 	_ = k.Set("api.port", 8090)
 	_ = k.Set("api.read_header_timeout", "3s")
-	_ = k.Set("snake.port", 4222)
+
+	// Defaults: Snake
 	_ = k.Set("snake.url", "nats://localhost:4222")
+	_ = k.Set("snake.port", 4222)
+	_ = k.Set("snake.domain", "flux")
+	_ = k.Set("snake.stream_name", "flux-msg")
+	_ = k.Set("snake.operation_timeout", "5s")
+	_ = k.Set("snake.inactive_threshold", "30s")
 
 	// Defaults: Telemetry (Self-Monitoring)
-	_ = k.Set("telemetry.service_name", "flux-mixer")
+	_ = k.Set("telemetry.service_name", "flux.mixer")
 	_ = k.Set("telemetry.batch_interval", "5s")
 	_ = k.Set("telemetry.base_subject", "flux.telemetry")
 	_ = k.Set("telemetry.max_batch_size", 512)
-	_ = k.Set("snake.cluster_name", "flux")
-	_ = k.Set("snake.stream_name", "flux-msg")
-	_ = k.Set("snake.stream_subjects", []string{"flux.msg.>", "flux.gear.>", "fluxrig.>"})
-	_ = k.Set("snake.durable", false)
-	_ = k.Set("snake.operation_timeout", "5s")
-	_ = k.Set("snake.business_stream_max_age", "720h") // 30 days
-	_ = k.Set("snake.telemetry_stream_max_age", "24h")
+	_ = k.Set("telemetry.stream_name", "flux-telemetry")
 
 	_ = k.Set("ingest.flush_interval", "5s")
 	_ = k.Set("ingest.buffer_size", 1024)
 
 	_ = k.Set("observability.tier", "embedded")
-	// observability.embedded.data_dir removed
 	_ = k.Set("observability.embedded.flush_interval", "5s")
 	_ = k.Set("observability.embedded.retention_days", 30)
 	_ = k.Set("enrollment.push_delay", "1s")
 	_ = k.Set("enrollment.auto_adopt", false)
+	_ = k.Set("enrollment.bootstrap_secret", "fluxrig")
 
 	// 2. File (if provided)
 	if path != "" {
 		if err := k.Load(file.Provider(path), toml.Parser()); err != nil {
-			// If file is explicitly provided but fails, return error
 			return nil, err
 		}
 	}
 
 	// 3. Environment Variables
-	// FLUXRIG_API_PORT -> api.port
 	err := k.Load(env.Provider("FLUXRIG_", ".", func(s string) string {
 		s = strings.TrimPrefix(s, "FLUXRIG_")
 		s = strings.ToLower(s)
+
+		if s == "trace" {
+			return "logging.trace"
+		}
+		if s == "debug" {
+			return "logging.debug"
+		}
+		if s == "disable_telemetry" {
+			return "telemetry.disabled"
+		}
+
+		// Map BUS to SNAKE for consistency if needed, but here we just use snake.
 		s = strings.Replace(s, "_", ".", -1)
 		return s
 	}), nil)
@@ -185,6 +173,14 @@ func LoadMixer(path string) (*MixerConfig, error) {
 	var cfg MixerConfig
 	if err := k.Unmarshal("", &cfg); err != nil {
 		return nil, err
+	}
+
+	// Backward Compatibility: Fallback to old field names
+	if cfg.Base.Name == "" {
+		cfg.Base.Name = k.String("mixer.mixer_name")
+	}
+	if cfg.Base.StateDir == "" {
+		cfg.Base.StateDir = k.String("store.dir")
 	}
 
 	return &cfg, nil

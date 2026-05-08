@@ -24,7 +24,7 @@ banner "Bento Load Generator Smoke Test"
 # Cleanup
 log_info "Cleaning up ports: $MIXER_API_PORT, $SNAKE_PORT"
 lsof -ti :$MIXER_API_PORT -ti :$SNAKE_PORT | xargs kill -9 2>/dev/null || true
-rm -f /tmp/flux_e2e_load_out.txt
+rm -f /tmp/fluxrig_e2e_load_out.txt
 
 # 1. Configs
 log_info "Deploying Configs..."
@@ -77,8 +77,8 @@ log_info "Waiting for messages to flow (interval 1s, count 5)..."
 
 # Wait enough time (5 count * 1s interval = 5s + buffer)
 for i in {1..15}; do
-    if [ -f "/tmp/flux_e2e_load_out.txt" ]; then
-        LINES=$(wc -l < /tmp/flux_e2e_load_out.txt | tr -d ' ')
+    if [ -f "/tmp/fluxrig_e2e_load_out.txt" ]; then
+        LINES=$(wc -l < /tmp/fluxrig_e2e_load_out.txt | tr -d ' ')
         log_info "Output lines: $LINES"
         if [ "$LINES" -ge 5 ]; then
             log_success "Received 5+ messages"
@@ -88,18 +88,18 @@ for i in {1..15}; do
     sleep 1
 done
 
-if [ ! -f "/tmp/flux_e2e_load_out.txt" ]; then
+if [ ! -f "/tmp/fluxrig_e2e_load_out.txt" ]; then
    fail "Output file not found"
 fi
 
-LINES=$(wc -l < /tmp/flux_e2e_load_out.txt | tr -d ' ')
+LINES=$(wc -l < /tmp/fluxrig_e2e_load_out.txt | tr -d ' ')
 if [ "$LINES" -lt 5 ]; then
     fail "Insufficient messages: $LINES (Expected 5)"
 fi
 
 # Cat file content for verification
 log_info "Output Content:"
-cat /tmp/flux_e2e_load_out.txt
+cat /tmp/fluxrig_e2e_load_out.txt
 
 # 5.5 Telemetry & Parquet Validation
 log_info "--- Phase 4: Telemetry Validation ---"

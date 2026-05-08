@@ -8,8 +8,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"strconv"
+	"math"
+	"strings"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/jaab-tech/fluxrig/pkg/bus"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
@@ -18,14 +21,16 @@ import (
 )
 
 const (
-	// Telemetry Message Types
-	TypeBatchSpans   = "telemetry.batch.spans"
-	TypeBatchLogs    = "telemetry.batch.logs"
-	TypeBatchMetrics = "telemetry.batch.metrics"
-	TypeMetric       = "telemetry.metric"
-	TypeLogJSON      = "telemetry.log.json"
 	TypeLog          = "telemetry.log"
+	TypeLogJSON      = "telemetry.log.json"
+	TypeBatchLogs    = "telemetry.batch.logs"
+	TypeMetric       = "telemetry.metric"
+	TypeBatchMetrics = "telemetry.batch.metrics"
+	TypeSpan         = "telemetry.span"
+	TypeBatchSpans   = "telemetry.batch.spans"
+)
 
+var (
 	// SQL Queries
 	queryInsertSpan = `
 		INSERT INTO telemetry_spans (trace_id, span_id, parent_span_id, name, start_time, end_time, entity_id, entity_name, attributes)
@@ -46,49 +51,66 @@ type TelemetrySink struct {
 	bus           bus.Bus
 	store         *duckdb.Store
 	sub           bus.Subscription
+	subject       string
 	dataDir       string
 	stopCh        chan struct{}
 	flushInterval time.Duration
 	cache         *telemetry.MetricsCache
 }
 
-func NewTelemetrySink(b bus.Bus, s *duckdb.Store, dataDir string, interval time.Duration, cache *telemetry.MetricsCache) *TelemetrySink {
+func NewTelemetrySink(b bus.Bus, s *duckdb.Store, subject, dataDir string, interval time.Duration, cache *telemetry.MetricsCache) *TelemetrySink {
 	if interval <= 0 {
 		interval = 5 * time.Second
 	}
 	return &TelemetrySink{
 		bus:           b,
 		store:         s,
+		subject:       subject,
 		dataDir:       dataDir,
-		stopCh:        make(chan struct{}),
 		flushInterval: interval,
+		stopCh:        make(chan struct{}),
 		cache:         cache,
 	}
 }
 
-// Start subscribes to the telemetry stream.
-func (s *TelemetrySink) Start() error {
-	// Subscribe with a durable consumer to prevent duplicates across restarts
-	sub, err := s.bus.SubscribeDurable("flux.telemetry.>", "flux-telemetry-ingest", s.handleMessage)
+func (s *TelemetrySink) Start(ctx context.Context) error {
+	// 1. Subscribe to all telemetry
+	sub, err := s.bus.Subscribe(s.subject, s.handleMessage)
 	if err != nil {
 		return err
 	}
 	s.sub = sub
+	slog.Info("Telemetry Sink Started", "subject", s.subject)
 
-	// Start Flush Loop
+	// 2. Start Background Flusher
 	go func() {
+		// Wait a few seconds for system to stabilize before first flush
+		time.Sleep(3 * time.Second)
+
 		ticker := time.NewTicker(s.flushInterval)
 		defer ticker.Stop()
+
+		slog.Debug("Telemetry Flusher Started", "interval", s.flushInterval)
+
 		for {
 			select {
-			case <-ticker.C:
-				if s.store != nil {
-					if err := s.store.FlushTelemetry(context.Background(), s.dataDir); err != nil {
-						slog.Error("Failed to flush telemetry", "error", err)
-					}
-				}
-			case <-s.stopCh:
+			case <-ctx.Done():
+				slog.Debug("Telemetry Flusher Context Done")
 				return
+			case <-s.stopCh:
+				slog.Debug("Telemetry Flusher Stopped via channel")
+				return
+			case <-ticker.C:
+				slog.Debug("Telemetry Flusher Firing")
+				if err := s.store.FlushTelemetry(context.Background(), s.dataDir); err != nil {
+					slog.Error("Failed to flush telemetry to parquet", "error", err)
+				} else {
+					slog.Debug("Telemetry Flush Successful")
+				}
+				// Also flush archiver buffer if it has data
+				if err := s.store.FlushArchiverBuffer(context.Background(), s.dataDir); err != nil {
+					slog.Debug("Archiver buffer flush skipped or failed", "error", err)
+				}
 			}
 		}
 	}()
@@ -96,211 +118,83 @@ func (s *TelemetrySink) Start() error {
 	return nil
 }
 
-// Stop unsubscribes and performs a final flush.
 func (s *TelemetrySink) Stop() error {
 	close(s.stopCh)
-
-	// Perform final flush to ensure no data loss on shutdown
-	if s.store != nil {
-		if err := s.store.FlushTelemetry(context.Background(), s.dataDir); err != nil {
-			slog.Error("Final telemetry flush failed", "error", err)
-		}
-	}
-
 	if s.sub != nil {
 		return s.sub.Unsubscribe()
 	}
 	return nil
 }
 
-// handleMessage dispatches the batch to the appropriate handler based on type.
 func (s *TelemetrySink) handleMessage(ctx context.Context, msg *fluxmsg.FluxMsg) {
 	msgType := msg.Metadata["type"]
 
 	var err error
 	switch msgType {
-
-	case TypeBatchSpans:
-		err = s.persistSpans(msg)
-	case TypeBatchLogs:
+	case TypeLog, TypeLogJSON, TypeBatchLogs:
 		err = s.persistLogs(msg)
-	case TypeBatchMetrics:
+	case TypeMetric, TypeBatchMetrics:
 		err = s.persistMetrics(msg)
-	case TypeMetric:
-		// Individual metric (not batched)
-		err = s.persistMetrics(msg)
-	case TypeLogJSON:
-		// Individual log from JSON handler
-		err = s.persistSingleLog(msg)
-	case TypeLog:
-		// Individual log from WAL (CBOR)
-		err = s.persistCborLog(msg)
+	case TypeSpan, TypeBatchSpans:
+		err = s.persistSpans(msg)
 	default:
-		// Ignore unknown types
-		return
+		slog.Debug("Unknown telemetry type", "type", msgType)
 	}
 
 	if err != nil {
-		slog.Error("Failed to persist telemetry", "type", msgType, "error", err)
+		slog.Error("Failed to persist telemetry", "error", err, "type", msgType)
 	}
-}
-
-func (s *TelemetrySink) persistSpans(msg *fluxmsg.FluxMsg) error {
-	// Payload is msg.Data["batch"] -> []map[string]interface{}
-	batch, ok := msg.Data["batch"].([]any)
-	if !ok {
-		return fmt.Errorf("invalid batch format for spans: expected []any, got %T", msg.Data["batch"])
-	}
-
-	for _, item := range batch {
-		var span map[string]any
-		switch v := item.(type) {
-		case map[string]any:
-			span = v
-		case map[any]any:
-			span = make(map[string]any)
-			for k, val := range v {
-				span[fmt.Sprint(k)] = val
-			}
-		default:
-			continue
-		}
-
-		// Proactive Cleaning: Convert CBOR Map types to Go Native recursively
-		span = cleanMap(span).(map[string]any)
-
-		// Helper to safely get string/etc
-		str := func(k string) string { v, _ := span[k].(string); return v }
-		u64 := func(k string) uint64 {
-			switch v := span[k].(type) {
-			case uint64:
-				return v
-			case int64:
-				//nolint:gosec // conversion safe
-				return uint64(v)
-			case int:
-				//nolint:gosec // conversion safe
-				return uint64(v)
-			case float64:
-				return uint64(v)
-			case string:
-				i, _ := strconv.ParseUint(v, 10, 64)
-				return i
-			default:
-				return 0
-			}
-		}
-
-		attrJSON, _ := json.Marshal(cleanMap(span["attributes"]))
-
-		_, err := s.store.DB().Exec(queryInsertSpan,
-			str("trace_id"), str("span_id"), str("parent_span_id"), str("name"),
-			//nolint:gosec // conversion safe for this context
-			int64(u64("start_time")),
-			//nolint:gosec // conversion safe for this context
-			int64(u64("end_time")),
-			u64("entity_id"), str("entity_name"), string(attrJSON))
-
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// helper to extracting override identity from attributes
-func extractIdentityAndSource(defaultName string, log map[string]interface{}) (eType, eName, sFile, sFunc string, sLine int) {
-	eName = defaultName
-	eType = "PROCESS" // Default type
-	sLine = 0
-
-	// 1. Check Top-Level Overrides (From WAL Handler)
-	if t, ok := log["entity_type"].(string); ok && t != "" {
-		eType = t
-	}
-
-	if attrs, ok := log["attributes"]; ok {
-		if m, ok := attrs.(map[string]interface{}); ok {
-			// Extract Identity
-			// Prioritize namespaced keys to avoid collision (e.g. heartbeat metrics having "name")
-			if t, ok := m["flux.type"].(string); ok && t != "" {
-				eType = t
-			} else if c, ok := m["component"].(string); ok && c != "" {
-				// Fallback for legacy / other loggers
-				eType = c
-			}
-
-			if n, ok := m["flux.name"].(string); ok && n != "" {
-				// Only promote to Entity Name if it's a Gear or Snake.
-				// For Controllers/Scenarios, we want to preserve the Physical Entity (e.g. Mixer).
-				if eType == "GEAR" || eType == "SNAKE" || eType == "SCENARIO" {
-					eName = n
-					delete(m, "flux.name") // Remove if promoted
-				}
-				// If not promoted, it remains in m (attributes) for the DB.
-			}
-			// Note: We intentionally DO NOT fallback to "name" for EntityName
-			// because "name" is too common for metrics/events (e.g. "heartbeats_sent").
-			// The baseName (from entity_name field) is usually correct for the host/process.
-			// Only specific overrides (flux.name) should change it.
-
-			// Extract Source
-			if f, ok := m["code.file.path"].(string); ok {
-				sFile = f
-			}
-			if fn, ok := m["code.function.name"].(string); ok {
-				sFunc = fn
-			}
-			// Handle line number (various types)
-			if l, ok := m["code.line.number"]; ok {
-				switch v := l.(type) {
-				case int:
-					sLine = v
-				case float64:
-					sLine = int(v)
-				case int64:
-					sLine = int(v)
-				case string:
-					sLine, _ = strconv.Atoi(v)
-				}
-			}
-
-			// Clean up extracted attributes (Keep flux.* for trace context if needed, but maybe remove?)
-			// Keeping them in attributes is fine, but we remove the source ones to save space.
-			delete(m, "code.file.path")
-			delete(m, "code.function.name")
-			delete(m, "code.line.number")
-
-			// Clean up identity keys that were promoted to columns
-			delete(m, "flux.type")
-			delete(m, "name")
-			delete(m, "component")
-		}
-	}
-	return
 }
 
 func (s *TelemetrySink) persistLogs(msg *fluxmsg.FluxMsg) error {
-	batch, ok := msg.Data["batch"].([]any)
-	if !ok {
-		return fmt.Errorf("invalid batch format for logs: expected []any, got %T", msg.Data["batch"])
+	msgType := msg.Metadata["type"]
+	var logs []map[string]any
+
+	if msgType == TypeLog {
+		logs = []map[string]any{msg.Data}
+	} else if msgType == TypeLogJSON {
+		var record map[string]any
+		switch v := msg.Data["record"].(type) {
+		case json.RawMessage:
+			_ = json.Unmarshal(v, &record)
+		case []byte:
+			_ = json.Unmarshal(v, &record)
+		case string:
+			_ = json.Unmarshal([]byte(v), &record)
+		case map[string]any:
+			record = v
+		case map[interface{}]interface{}:
+			record = make(map[string]any)
+			for k, val := range v {
+				if ks, ok := k.(string); ok {
+					record[ks] = val
+				}
+			}
+		}
+		if record != nil {
+			logs = []map[string]any{record}
+		}
+	} else {
+		batch, ok := msg.Data["batch"].([]any)
+		if !ok {
+			return fmt.Errorf("invalid batch format for logs")
+		}
+		for _, item := range batch {
+			if l, ok := item.(map[string]any); ok {
+				logs = append(logs, l)
+			} else if lIface, okIface := item.(map[interface{}]interface{}); okIface {
+				lMap := make(map[string]any)
+				for k, v := range lIface {
+					if ks, okK := k.(string); okK {
+						lMap[ks] = v
+					}
+				}
+				logs = append(logs, lMap)
+			}
+		}
 	}
 
-	for _, item := range batch {
-		var log map[string]any
-		switch v := item.(type) {
-		case map[string]any:
-			log = v
-		case map[any]any:
-			log = make(map[string]any)
-			for k, val := range v {
-				log[fmt.Sprint(k)] = val
-			}
-		default:
-			continue
-		}
-
-		// Proactive Cleaning: Convert CBOR Map types to Go Native recursively
+	for _, log := range logs {
 		log = cleanMap(log).(map[string]any)
 
 		str := func(k string) string { v, _ := log[k].(string); return v }
@@ -308,33 +202,88 @@ func (s *TelemetrySink) persistLogs(msg *fluxmsg.FluxMsg) error {
 			switch v := log[k].(type) {
 			case uint64:
 				return v
-			case int64:
-				//nolint:gosec // conversion safe
-				return uint64(v)
-			case int:
-				//nolint:gosec // conversion safe
-				return uint64(v)
 			case float64:
 				return uint64(v)
-			case string:
-				i, _ := strconv.ParseUint(v, 10, 64)
-				return i
+			case int64:
+				if v < 0 {
+					return 0
+				}
+				return uint64(v)
+			case int:
+				if v < 0 {
+					return 0
+				}
+				return uint64(v)
 			default:
 				return 0
 			}
 		}
+		parseUUID := func(k string) uuid.UUID {
+			switch v := log[k].(type) {
+			case uuid.UUID:
+				return v
+			case string:
+				id, _ := uuid.Parse(v)
+				return id
+			case []byte:
+				id, _ := uuid.FromBytes(v)
+				return id
+			default:
+				return uuid.Nil
+			}
+		}
 
-		// Extract Identity & Source, and CLEAN attributes
 		baseName := str("entity_name")
 		eType, eName, sFile, sFunc, sLine := extractIdentityAndSource(baseName, log)
 
-		attrJSON, _ := json.Marshal(cleanMap(log["attributes"]))
+		// Collect attributes: Use existing map or collect unknown top-level fields
+		attrs, ok := log["attributes"].(map[string]any)
+		if !ok {
+			// collect unknown fields as attributes for flat JSON logs
+			a := make(map[string]any)
+			for k, v := range log {
+				switch k {
+				case "timestamp", "entity_id", "entity_type", "entity_name", "trace_id", "span_id", "severity", "body", "level", "msg", "time":
+					continue
+				default:
+					a[k] = v
+				}
+			}
+			attrs = a
+		}
+		attrJSON, _ := json.Marshal(cleanMap(attrs))
+
+		severity := str("severity")
+		if severity == "" {
+			severity = str("level")
+		}
+
+		body := str("body")
+		if body == "" {
+			body = str("msg")
+		}
+
+		var ts int64
+		tsU64 := u64("timestamp")
+		if tsU64 != 0 {
+			if tsU64 > 1e17 { // Heuristic: it's nanoseconds
+				//nolint:gosec // timestamp in micros fits in int64 until year 2262
+				ts = int64(tsU64 / 1000)
+			} else {
+				//nolint:gosec // timestamp in micros fits in int64
+				ts = int64(tsU64)
+			}
+		} else if tStr, ok := log["time"].(string); ok {
+			if t, err := time.Parse(time.RFC3339Nano, tStr); err == nil {
+				ts = t.UTC().UnixMicro()
+			} else if t, err := time.Parse(time.RFC3339, tStr); err == nil {
+				ts = t.UTC().UnixMicro()
+			}
+		}
 
 		_, err := s.store.DB().Exec(queryInsertLog,
-			//nolint:gosec // timestamp conversion safe
-			int64(u64("timestamp")), u64("entity_id"), eType, eName, str("trace_id"), str("span_id"),
-			str("severity"), sFile, sLine, sFunc, str("body"), string(attrJSON))
-
+			ts, parseUUID("entity_id"), eType, eName, str("trace_id"), str("span_id"),
+			severity, sFile, sLine, sFunc, body, string(attrJSON))
 		if err != nil {
 			return err
 		}
@@ -347,53 +296,42 @@ func (s *TelemetrySink) persistMetrics(msg *fluxmsg.FluxMsg) error {
 	var metrics []map[string]any
 
 	if msgType == TypeMetric {
-		// Single metric - msg.Data is the metric itself
 		metrics = []map[string]any{msg.Data}
-	} else if msgType == TypeBatchMetrics {
-		// Batched metrics
+	} else {
 		batch, ok := msg.Data["batch"].([]any)
 		if !ok {
-			return fmt.Errorf("invalid batch format for metrics: expected []any, got %T", msg.Data["batch"])
+			return fmt.Errorf("invalid batch format for metrics")
 		}
 		for _, item := range batch {
-			switch m := item.(type) {
-			case map[string]any:
+			if m, ok := item.(map[string]any); ok {
 				metrics = append(metrics, m)
-			case map[any]any:
-				metricStr := make(map[string]any)
-				for k, val := range m {
-					metricStr[fmt.Sprint(k)] = val
+			} else if mIface, okIface := item.(map[interface{}]interface{}); okIface {
+				mMap := make(map[string]any)
+				for k, v := range mIface {
+					if ks, okK := k.(string); okK {
+						mMap[ks] = v
+					}
 				}
-				metrics = append(metrics, metricStr)
+				metrics = append(metrics, mMap)
 			}
 		}
 	}
 
-	// Proactive Cleaning: Ensure all metrics have Go Native attribute maps
-	for i := range metrics {
-		metrics[i] = cleanMap(metrics[i]).(map[string]any)
-	}
-
-	// Persist each metric
 	for _, metric := range metrics {
+		metric = cleanMap(metric).(map[string]any)
 		str := func(k string) string { v, _ := metric[k].(string); return v }
-		u64 := func(k string) uint64 {
+		parseUUID := func(k string) uuid.UUID {
 			switch v := metric[k].(type) {
-			case uint64:
+			case uuid.UUID:
 				return v
-			case int64:
-				//nolint:gosec // conversion safe
-				return uint64(v)
-			case int:
-				//nolint:gosec // conversion safe
-				return uint64(v)
-			case float64:
-				return uint64(v)
 			case string:
-				i, _ := strconv.ParseUint(v, 10, 64)
-				return i
+				id, _ := uuid.Parse(v)
+				return id
+			case []byte:
+				id, _ := uuid.FromBytes(v)
+				return id
 			default:
-				return 0
+				return uuid.Nil
 			}
 		}
 		f64 := func(k string) float64 {
@@ -404,176 +342,175 @@ func (s *TelemetrySink) persistMetrics(msg *fluxmsg.FluxMsg) error {
 				return float64(v)
 			case int:
 				return float64(v)
-			case uint64:
-				return float64(v)
 			default:
-				return 0.0
+				return 0
 			}
 		}
 
-		// Extract Identity from attributes if missing at top-level
-		// Resource attributes are usually nested in "attributes" by the exporter.
-		eID := u64("entity_id")
+		eID := parseUUID("entity_id")
 		eName := str("entity_name")
-		if eID == 0 || eName == "" {
-			if attrs, ok := metric["attributes"].(map[string]any); ok {
-				if eID == 0 {
-					if id, ok := attrs["flux.id"].(float64); ok {
-						eID = uint64(id)
-					} else if id, ok := attrs["flux.id"].(int64); ok && id >= 0 {
-						//nolint:gosec // conversion safe after non-negative check
-						eID = uint64(id)
-					}
-				}
-				if eName == "" {
-					if name, ok := attrs["flux.name"].(string); ok {
-						eName = name
-					}
-				}
-			}
-		}
 
-		// timestamp might be time.Time or int64 (UnixMicro)
 		var ts int64
 		switch v := metric["timestamp"].(type) {
 		case time.Time:
 			ts = v.UnixMicro()
 		case int64:
-			ts = v
+			if v > 1e17 { // Nanoseconds
+				ts = v / 1000
+			} else {
+				ts = v
+			}
 		case float64:
-			ts = int64(v)
+			if v > 1e17 { // Nanoseconds
+				ts = int64(v / 1000)
+			} else {
+				ts = int64(v)
+			}
 		default:
 			ts = time.Now().UnixMicro()
 		}
 
-		// Val is mandatory for gauge/counter
 		valFloat := f64("value")
-
-		metricAttrs, _ := metric["attributes"].(map[string]any)
-
-		// DEBUG tracer (INFO level for definitive Robot audit)
-		slog.Info("Telemetry Sink Ingestion",
-			"metric", str("name"),
-			"val", valFloat,
-			"eID", eID,
-			"eName", eName,
-			"attrs_count", len(metricAttrs),
-		)
-
-		if eID == 0 {
-			// Skip if no entity identified to avoid polluting cache with 0-ID
-			continue
-		}
-
 		attrJSON, _ := json.Marshal(cleanMap(metric["attributes"]))
 
-		_, err := s.store.DB().Exec(queryInsertMetric,
-			ts, eID, eName, str("name"),
-			str("description"), str("unit"), str("type"), valFloat, string(attrJSON))
-
-		if err != nil {
-			return err
-		}
-
-		// Update In-Memory Cache
-		if s.cache != nil {
-			// Try to extract type from attributes if possible, or leave empty
-			eType := "" // Default
-			s.cache.SetGauge(eID, str("name"), valFloat, eName, eType)
+		if eID != uuid.Nil {
+			if _, err := s.store.DB().Exec(queryInsertMetric, ts, eID, eName, str("name"), str("description"), str("unit"), str("type"), valFloat, string(attrJSON)); err != nil {
+				slog.Error("Failed to insert metric", "error", err, "name", str("name"))
+			}
+			if s.cache != nil {
+				s.cache.SetGauge(eID, str("name"), valFloat, eName, "")
+			}
 		}
 	}
 	return nil
 }
 
-func (s *TelemetrySink) persistSingleLog(msg *fluxmsg.FluxMsg) error {
-	// Handle individual log from NatsWriter (telemetry.log.json)
-	record, ok := msg.Data["record"].(json.RawMessage)
-	if !ok {
-		return fmt.Errorf("invalid log record format")
-	}
+func (s *TelemetrySink) persistSpans(msg *fluxmsg.FluxMsg) error {
+	msgType := msg.Metadata["type"]
+	var spans []map[string]any
 
-	var log map[string]interface{}
-	if err := json.Unmarshal(record, &log); err != nil {
-		return err
-	}
-
-	str := func(k string) string { v, _ := log[k].(string); return v }
-	u64 := func(k string) uint64 {
-		switch v := log[k].(type) {
-		case uint64:
-			return v
-		case int64:
-			//nolint:gosec // conversion safe
-			return uint64(v)
-		case int:
-			//nolint:gosec // conversion safe
-			return uint64(v)
-		case float64:
-			return uint64(v)
-		case string:
-			i, _ := strconv.ParseUint(v, 10, 64)
-			return i
-		default:
-			return 0
+	if msgType == TypeSpan {
+		spans = []map[string]any{msg.Data}
+	} else {
+		batch, ok := msg.Data["batch"].([]any)
+		if !ok {
+			return fmt.Errorf("invalid batch format for spans")
+		}
+		for _, item := range batch {
+			if s, ok := item.(map[string]any); ok {
+				spans = append(spans, s)
+			} else if sIface, okIface := item.(map[interface{}]interface{}); okIface {
+				sMap := make(map[string]any)
+				for k, v := range sIface {
+					if ks, okK := k.(string); okK {
+						sMap[ks] = v
+					}
+				}
+				spans = append(spans, sMap)
+			}
 		}
 	}
 
-	// Extract Identity & Source, and CLEAN attributes
-	baseName := str("entity_name")
-	eType, eName, sFile, sFunc, sLine := extractIdentityAndSource(baseName, log)
+	for _, span := range spans {
+		span = cleanMap(span).(map[string]any)
+		str := func(k string) string { v, _ := span[k].(string); return v }
+		u64 := func(k string) uint64 {
+			switch v := span[k].(type) {
+			case uint64:
+				return v
+			case float64:
+				return uint64(v)
+			case int64:
+				if v < 0 {
+					return 0
+				}
+				return uint64(v)
+			default:
+				return 0
+			}
+		}
+		parseUUID := func(k string) uuid.UUID {
+			switch v := span[k].(type) {
+			case uuid.UUID:
+				return v
+			case string:
+				id, _ := uuid.Parse(v)
+				return id
+			case []byte:
+				id, _ := uuid.FromBytes(v)
+				return id
+			default:
+				return uuid.Nil
+			}
+		}
 
-	attrJSON, _ := json.Marshal(cleanMap(log["attributes"]))
+		attrJSON, _ := json.Marshal(cleanMap(span["attributes"]))
 
-	_, err := s.store.DB().Exec(queryInsertLog,
-		//nolint:gosec // timestamp conversion safe
-		int64(u64("timestamp")), u64("entity_id"), eType, eName, str("trace_id"), str("span_id"),
-		str("severity"), sFile, sLine, sFunc, str("body"), string(attrJSON))
+		if str("parent_span_id") != "" {
+			slog.Debug("Ingest: Persisting linked span", "trace_id", str("trace_id"), "span_id", str("span_id"), "parent_id", str("parent_span_id"))
+		}
+		startU64 := u64("start_time")
+		endU64 := u64("end_time")
 
-	return err
+		var startTS, endTS int64
+		if startU64 > math.MaxInt64 {
+			startTS = math.MaxInt64
+		} else {
+			startTS = int64(startU64)
+		}
+
+		if endU64 > math.MaxInt64 {
+			endTS = math.MaxInt64
+		} else {
+			endTS = int64(endU64)
+		}
+		if startTS > 1e17 {
+			startTS /= 1000
+		}
+		if endTS > 1e17 {
+			endTS /= 1000
+		}
+
+		if _, err := s.store.DB().Exec(queryInsertSpan,
+			str("trace_id"), str("span_id"), str("parent_span_id"), str("name"),
+			startTS, endTS,
+			parseUUID("entity_id"), str("entity_name"), string(attrJSON)); err != nil {
+			slog.Error("Failed to insert span", "error", err, "name", str("name"))
+		}
+	}
+	return nil
 }
 
-func (s *TelemetrySink) persistCborLog(msg *fluxmsg.FluxMsg) error {
-	// msg.Data IS the log record map[string]any
-	log := msg.Data
+func extractIdentityAndSource(baseName string, log map[string]any) (eType, eName, sFile, sFunc string, sLine int) {
+	eName = baseName
+	eType = "UNKNOWN"
 
-	str := func(k string) string { v, _ := log[k].(string); return v }
-	u64 := func(k string) uint64 {
-		switch v := log[k].(type) {
-		case uint64:
-			return v
-		case int64:
-			//nolint:gosec // conversion safe
-			return uint64(v)
-		case int:
-			//nolint:gosec // conversion safe
-			return uint64(v)
-		case float64:
-			return uint64(v)
-		case string:
-			i, _ := strconv.ParseUint(v, 10, 64)
-			return i
-		default:
-			return 0
-		}
+	// 1. Try top-level entity_type
+	if val, ok := log["entity_type"].(string); ok && val != "" {
+		eType = strings.ToUpper(val)
 	}
 
-	// Extract Identity & Source, and CLEAN attributes
-	baseName := str("entity_name")
-	eType, eName, sFile, sFunc, sLine := extractIdentityAndSource(baseName, log)
+	if log["attributes"] != nil {
+		if attrs, ok := log["attributes"].(map[string]any); ok {
+			// 2. Try attributes['entity_type'] or attributes['component']
+			if eType == "UNKNOWN" {
+				if val, ok := attrs["entity_type"].(string); ok && val != "" {
+					eType = strings.ToUpper(val)
+				} else if val, ok := attrs["component"].(string); ok && val != "" {
+					eType = strings.ToUpper(val)
+				}
+			}
 
-	// Attributes might need encoding if they are map/slice
-	attrJSON := []byte("{}")
-	if attrs, ok := log["attributes"]; ok {
-		j, err := json.Marshal(cleanMap(attrs))
-		if err == nil {
-			attrJSON = j
+			if val, ok := attrs["code.filepath"].(string); ok {
+				sFile = val
+			}
+			if val, ok := attrs["code.function"].(string); ok {
+				sFunc = val
+			}
+			if val, ok := attrs["code.lineno"].(float64); ok {
+				sLine = int(val)
+			}
 		}
 	}
-
-	_, err := s.store.DB().Exec(queryInsertLog,
-		//nolint:gosec // timestamp conversion safe
-		int64(u64("timestamp")), u64("entity_id"), eType, eName, str("trace_id"), str("span_id"),
-		str("severity"), sFile, sLine, sFunc, str("body"), string(attrJSON))
-
-	return err
+	return
 }

@@ -4,7 +4,7 @@
 
 HOST=${1:-"http://localhost:8090"}
 
-echo "[INFO] Testing FluxRig Mixer at $HOST"
+echo "[INFO] Testing fluxrig Mixer at $HOST"
 
 # 1. Health Check
 echo -n "1. Checking /health... "

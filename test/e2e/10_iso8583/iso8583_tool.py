@@ -6,10 +6,10 @@
 ISO8583 Traffic Generator & Verifier (Dual Mode).
 
 This script acts as BOTH the Traffic Source (Injector) and the Traffic Sink (Mock Server).
-It injects a message into FluxRig (Client Side) and verifies it arrives at the Mock Server (Server Side).
+It injects a message into fluxrig (Client Side) and verifies it arrives at the Mock Server (Server Side).
 
 Flow:
-  [Injector] -> (TCP) -> [FluxRig Ingress] -> [FluxRig Egress] -> (TCP) -> [Mock Server]
+  [Injector] -> (TCP) -> [fluxrig Ingress] -> [fluxrig Egress] -> (TCP) -> [Mock Server]
 
 Usage:
     python iso8583_tool.py --e2e --host 127.0.0.1 --port 8583 --mock-port 10000
@@ -164,9 +164,17 @@ class MockServer(threading.Thread):
                     
                     
                 length = struct.unpack(len_fmt, len_bytes)[0]
-                payload = conn.recv(length)
                 
-                if not payload:
+                # 2. Read Payload (Handle partial reads)
+                payload = b''
+                while len(payload) < length:
+                    chunk = conn.recv(length - len(payload))
+                    if not chunk:
+                        break
+                    payload += chunk
+                
+                if len(payload) < length:
+                    print(f"[MOCK] Truncated payload: expected {length}, got {len(payload)}")
                     break
 
                 if self.standalone:
@@ -198,9 +206,18 @@ class MockServer(threading.Thread):
                     self.expected_queue.task_done()
                 else:
                     print(f"[MOCK] ❌ MISMATCH: {desc}")
-                    print(f"   Expected: {expected_payload.hex().upper()}")
-                    print(f"   Received: {payload.hex().upper()}")
-                    # Fail hard? Or just log? For now, log.
+                    print(f"   Expected (hex): {expected_payload.hex().upper()}")
+                    print(f"   Received (hex): {payload.hex().upper()}")
+                    if len(payload) == len(expected_payload):
+                        # Diff
+                        diff = ""
+                        for i in range(len(payload)):
+                            if payload[i] != expected_payload[i]:
+                                diff += "^"
+                            else:
+                                diff += " "
+                        print(f"   Diff:           {diff}")
+                    
                     self.error = AssertionError(f"Mismatch in {desc}")
                     self.expected_queue.task_done()
                     
@@ -278,7 +295,7 @@ def run_e2e(args):
         print("\n--- Transaction 1: 0800 Sign-On ---")
         msg_0800 = build_0800_network_management()
         # What arrives at Mock?
-        # If Variant=Visa, Injector sends EBCDIC+Header, FluxRig should pass it through (Transparent Proxy logic for now)
+        # If Variant=Visa, Injector sends EBCDIC+Header, fluxrig should pass it through (Transparent Proxy logic for now)
         # Verify: The bytes we send are the bytes we expect to receive (assuming Transparent Proxy)
         payload_0800 = prepare_message_bytes(msg_0800, spec, args.variant)
         
@@ -291,25 +308,22 @@ def run_e2e(args):
         
         # Wait for Queue to drain (Validation to complete)
         # We need to ensure we don't block forever if Mock fails
-        try:
-             # Wait up to 5s for the Mock to process
-             # Since queue.join() blocks until task_done(), this works.
-             # But it doesn't support timeout natively in Python < 3.
-             # We can busy wait on empty()
-             t_start = time.time()
-             while not expectation_queue.empty():
-                 if time.time() - t_start > 5:
-                     print("[ERROR] Timeout waiting for verification")
-                     exit_code = 1
-                     break
-                 if mock_server.error:
-                     print(f"[ERROR] Mock Server reported error: {mock_server.error}")
-                     exit_code = 1
-                     break
-                 time.sleep(0.1)
-        except Exception as e:
-             print(f"[ERROR] Wait failed: {e}")
-             exit_code = 1
+        t_start = time.time()
+        while True:
+            if expectation_queue.empty():
+                 # Small grace period to ensure MockServer finished task_done() and error setting
+                 time.sleep(0.2)
+                 if expectation_queue.empty(): break
+            
+            if time.time() - t_start > 5:
+                print("[ERROR] Timeout waiting for verification")
+                exit_code = 1
+                break
+            if mock_server.error:
+                print(f"[ERROR] Mock Server reported error: {mock_server.error}")
+                exit_code = 1
+                break
+            time.sleep(0.1)
              
         if exit_code != 0: raise Exception("Verification Failed")
 
@@ -327,15 +341,20 @@ def run_e2e(args):
             
             # Wait
             t_start = time.time()
-            while not expectation_queue.empty():
-                 if time.time() - t_start > 5:
-                     print("[ERROR] Timeout waiting for verification")
-                     exit_code = 1
-                     break
-                 if mock_server.error:
-                     exit_code = 1
-                     break
-                 time.sleep(0.1)
+            while True:
+                if expectation_queue.empty():
+                     time.sleep(0.2)
+                     if expectation_queue.empty(): break
+
+                if time.time() - t_start > 5:
+                    print("[ERROR] Timeout waiting for verification")
+                    exit_code = 1
+                    break
+                if mock_server.error:
+                    print(f"[ERROR] Mock Server reported error: {mock_server.error}")
+                    exit_code = 1
+                    break
+                time.sleep(0.1)
             time.sleep(args.delay)
 
     except Exception as e:

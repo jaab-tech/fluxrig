@@ -18,34 +18,34 @@ type natsKV struct {
 	js jetstream.JetStream
 }
 
-func (k *natsKV) Put(bucket, key string, value []byte) (uint64, error) {
+func (k *natsKV) Put(ctx context.Context, bucket, key string, value []byte) (uint64, error) {
 	if k.js == nil {
 		return 0, errors.New("nats bus not connected")
 	}
 
-	kv, err := k.js.KeyValue(context.Background(), bucket)
+	kv, err := k.js.KeyValue(ctx, bucket)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get bucket %s: %w", bucket, err)
 	}
 
-	rev, err := kv.Put(context.Background(), key, value)
+	rev, err := kv.Put(ctx, key, value)
 	if err != nil {
 		return 0, err
 	}
 	return rev, nil
 }
 
-func (k *natsKV) Get(bucket, key string) ([]byte, uint64, error) {
+func (k *natsKV) Get(ctx context.Context, bucket, key string) ([]byte, uint64, error) {
 	if k.js == nil {
 		return nil, 0, errors.New("nats bus not connected")
 	}
 
-	kv, err := k.js.KeyValue(context.Background(), bucket)
+	kv, err := k.js.KeyValue(ctx, bucket)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to get bucket %s: %w", bucket, err)
 	}
 
-	entry, err := kv.Get(context.Background(), key)
+	entry, err := kv.Get(ctx, key)
 	if err != nil {
 		if errors.Is(err, jetstream.ErrKeyNotFound) {
 			return nil, 0, nil // Not found is not an error for us
@@ -56,25 +56,25 @@ func (k *natsKV) Get(bucket, key string) ([]byte, uint64, error) {
 	return entry.Value(), entry.Revision(), nil
 }
 
-func (k *natsKV) Delete(bucket, key string) error {
+func (k *natsKV) Delete(ctx context.Context, bucket, key string) error {
 	if k.js == nil {
 		return errors.New("nats bus not connected")
 	}
 
-	kv, err := k.js.KeyValue(context.Background(), bucket)
+	kv, err := k.js.KeyValue(ctx, bucket)
 	if err != nil {
 		return fmt.Errorf("failed to get bucket %s: %w", bucket, err)
 	}
 
-	return kv.Delete(context.Background(), key)
+	return kv.Delete(ctx, key)
 }
 
-func (k *natsKV) Watch(bucket, keys string, handler KVHandler) (Subscription, error) {
+func (k *natsKV) Watch(ctx context.Context, bucket, keys string, handler KVHandler) (Subscription, error) {
 	if k.js == nil {
 		return nil, errors.New("nats bus not connected")
 	}
 
-	kv, err := k.js.KeyValue(context.Background(), bucket)
+	kv, err := k.js.KeyValue(ctx, bucket)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get bucket %s: %w", bucket, err)
 	}
@@ -84,22 +84,22 @@ func (k *natsKV) Watch(bucket, keys string, handler KVHandler) (Subscription, er
 	var watcher jetstream.KeyWatcher
 
 	if keys == ">" {
-		watcher, err = kv.WatchAll(context.Background())
+		watcher, err = kv.WatchAll(ctx)
 	} else {
-		watcher, err = kv.Watch(context.Background(), keys)
+		watcher, err = kv.Watch(ctx, keys)
 	}
 	if err != nil {
 		return nil, err
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	watchCtx, cancel := context.WithCancel(ctx)
 
 	// Start a goroutine to consume the updates
 	go func() {
 		defer cancel()
 		for {
 			select {
-			case <-ctx.Done():
+			case <-watchCtx.Done():
 				return
 			case entry, ok := <-watcher.Updates():
 				if !ok {
@@ -126,18 +126,18 @@ func (k *natsKV) Watch(bucket, keys string, handler KVHandler) (Subscription, er
 
 }
 
-func (k *natsKV) Keys(bucket string) ([]string, error) {
+func (k *natsKV) Keys(ctx context.Context, bucket string) ([]string, error) {
 	if k.js == nil {
 		return nil, errors.New("nats bus not connected")
 	}
 
-	kv, err := k.js.KeyValue(context.Background(), bucket)
+	kv, err := k.js.KeyValue(ctx, bucket)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get bucket %s: %w", bucket, err)
 	}
 
 	// NATS Keys() returns KeyLister
-	lister, err := kv.Keys(context.Background())
+	lister, err := kv.Keys(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -147,7 +147,7 @@ func (k *natsKV) Keys(bucket string) ([]string, error) {
 	return lister, nil
 }
 
-func (k *natsKV) EnsureBucket(bucket string, storage string, replicas int, ttl time.Duration) error {
+func (k *natsKV) EnsureBucket(ctx context.Context, bucket string, storage string, replicas int, ttl time.Duration) error {
 	if k.js == nil {
 		return errors.New("nats bus not connected")
 	}
@@ -158,7 +158,7 @@ func (k *natsKV) EnsureBucket(bucket string, storage string, replicas int, ttl t
 		st = jetstream.MemoryStorage
 	}
 
-	_, err := k.js.CreateOrUpdateKeyValue(context.Background(), jetstream.KeyValueConfig{
+	_, err := k.js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{
 		Bucket:   bucket,
 		Storage:  st,
 		Replicas: replicas,

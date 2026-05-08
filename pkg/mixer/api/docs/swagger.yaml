@@ -20,6 +20,14 @@ definitions:
     type: object
   api.HealthResponse:
     properties:
+      entity_id:
+        description: EntityID is the unique fluxEntityID of this Mixer.
+        example: 019de49b-0000-7000-8000-000000000000
+        type: string
+      machine_id:
+        description: MachineID is the persistent machine ID.
+        example: 019de49b-0000-7000-8000-000000000000
+        type: string
       status:
         description: Status of the service (e.g. "ok").
         example: ok
@@ -41,8 +49,8 @@ definitions:
         type: string
       id:
         description: ID is the entity ID of the rack.
-        example: 45612378
-        type: integer
+        example: "45612378"
+        type: string
       ip:
         description: IP address of the rack agent.
         example: 192.168.1.50
@@ -53,8 +61,8 @@ definitions:
         type: string
       machine_id:
         description: MachineID is the physical machine ID.
-        example: 10
-        type: integer
+        example: 019de49b-0000-7000-8000-000000000000
+        type: string
       name:
         description: Name of the rack.
         example: rack-01
@@ -104,6 +112,10 @@ definitions:
     type: object
   api.TopologyStatusResponse:
     properties:
+      active_scenario:
+        description: ActiveScenario is the name of the currently active scenario.
+        example: Getting Started
+        type: string
       active_ver:
         description: ActiveVer is the currently active scenario version.
         example: v1.2.3
@@ -136,29 +148,16 @@ definitions:
         example: server.key
         type: string
     type: object
-  config.BusConfig:
+  config.BaseConfig:
     properties:
-      connectTimeout:
+      name:
+        example: node-01
         type: string
-      convergenceDelay:
+      stateDir:
+        example: ./data
         type: string
-      domain:
-        type: string
-      insecureSkipVerify:
-        type: boolean
-      operationTimeout:
-        type: string
-      reconnectWait:
-        type: string
-      rootCA:
-        type: string
-      streamName:
-        type: string
-      subscriptionRetryAttempts:
-        type: integer
-      subscriptionRetryWait:
-        type: string
-      url:
+      stateFile:
+        example: rack.flux
         type: string
     type: object
   config.EmbeddedConfig:
@@ -180,6 +179,12 @@ definitions:
           If false (default), new Racks start as 'pending'.
         example: false
         type: boolean
+      bootstrapSecret:
+        description: |-
+          BootstrapSecret is the shared secret used for zero-config enrollment and identity adoption.
+          Defaults to 'fluxrig' if not specified.
+        example: fluxrig
+        type: string
       pushDelay:
         description: PushDelay is the time to wait before pushing state to a newly
           enrolled Rack.
@@ -200,17 +205,28 @@ definitions:
   config.LoggingConfig:
     properties:
       compress:
+        example: true
+        type: boolean
+      debug:
+        description: Hard-override for debug level
         type: boolean
       filename:
+        example: logs/fluxrig.log
         type: string
       level:
+        example: info
         type: string
       maxBackups:
+        example: 7
         type: integer
       maxSizeMB:
+        example: 100
         type: integer
       throttling:
         $ref: '#/definitions/config.ThrottlingConfig'
+      trace:
+        description: Hard-override for trace level
+        type: boolean
     type: object
   config.MetricsConfig:
     properties:
@@ -225,6 +241,8 @@ definitions:
     properties:
       api:
         $ref: '#/definitions/config.ApiConfig'
+      base:
+        $ref: '#/definitions/config.BaseConfig'
       enrollment:
         $ref: '#/definitions/config.EnrollmentConfig'
       ingest:
@@ -244,19 +262,18 @@ definitions:
     type: object
   config.MixerSettings:
     properties:
-      machineID:
-        description: MachineID is the unique physical ID of the Mixer machine.
-        example: 1
+      maxHops:
+        description: Message Limits
         type: integer
-      mixerName:
-        description: MixerName is the human-readable name of the Mixer.
-        example: mixer-01
+      maxPayloadSize:
+        type: integer
+      scenarioWaitTimeout:
+        description: ScenarioWaitTimeout is the time to wait for a rack to register
+          when activating a scenario.
+        example: 15s
         type: string
       startupScenario:
-        description: |-
-          StartupScenario reference to the scenario to load on startup.
-          Accepts: file path ("/path/to/file.yaml"), URN ("payment-flow:v1.0.0"),
-          or empty string (resume last active scenario).
+        description: StartupScenario reference to the scenario to load on startup.
         type: string
     type: object
   config.ObservabilityConfig:
@@ -276,10 +293,14 @@ definitions:
     type: object
   config.RackConfig:
     properties:
+      base:
+        $ref: '#/definitions/config.BaseConfig'
       logging:
         $ref: '#/definitions/config.LoggingConfig'
       rack:
         $ref: '#/definitions/config.RackSettings'
+      snake:
+        $ref: '#/definitions/config.SnakeConfig'
       store:
         $ref: '#/definitions/config.StoreConfig'
       telemetry:
@@ -287,11 +308,11 @@ definitions:
     type: object
   config.RackSettings:
     properties:
-      bus:
-        $ref: '#/definitions/config.BusConfig'
       cleanupTimeout:
         type: string
       convergenceTimeout:
+        type: string
+      enrollmentInterval:
         type: string
       enrollmentTimeout:
         type: string
@@ -299,75 +320,80 @@ definitions:
         type: string
       heartbeatInterval:
         type: string
-      machineID:
-        type: integer
-      name:
+      ip:
+        example: 10.0.0.5
         type: string
+      machineID:
+        description: 'Runtime only: set via Passport or Mixer assignment'
+        type: string
+      maxHops:
+        type: integer
+      maxPayloadSize:
+        type: integer
       namePrefix:
         type: string
     type: object
   config.SnakeConfig:
     properties:
-      businessStreamMaxAge:
-        description: BusinessStreamMaxAge retention policy.
-        example: 720h
+      connectTimeout:
+        example: 10s
         type: string
-      clusterName:
-        description: ClusterName for NATS clustering.
+      convergenceDelay:
+        example: 100ms
+        type: string
+      domain:
         example: flux
         type: string
-      durable:
-        description: Durable toggles file-based storage.
-        example: false
+      inactiveThreshold:
+        example: 30s
+        type: string
+      insecureSkipVerify:
         type: boolean
       operationTimeout:
-        description: OperationTimeout for NATS requests.
         example: 5s
         type: string
       port:
-        description: Port for NATS client connections.
         example: 4222
         type: integer
+      reconnectWait:
+        example: 1s
+        type: string
       rootCAFile:
-        description: RootCAFile for client connections (loopback).
         type: string
       streamName:
-        description: StreamName for the primary business stream.
         example: flux-msg
         type: string
       streamSubjects:
-        description: StreamSubjects to bind to the stream.
-        example:
-        - flux.msg.>
         items:
           type: string
         type: array
-      telemetryStreamMaxAge:
-        description: TelemetryStreamMaxAge retention policy.
-        example: 24h
+      subscriptionRetryAttempts:
+        example: 5
+        type: integer
+      subscriptionRetryWait:
+        example: 200ms
         type: string
       tlscertFile:
-        description: TLSCertFile for server-side TLS.
         type: string
       tlskeyFile:
-        description: TLSKeyFile for server-side TLS.
         type: string
       url:
-        description: URL for internal connections.
         example: nats://localhost:4222
         type: string
     type: object
   config.StoreConfig:
     properties:
       clusterKeyFile:
+        example: cluster.key
         type: string
       databaseFile:
+        example: flux.duckdb
         type: string
       dir:
-        type: string
-      stateFile:
+        example: ./data
         type: string
       walmaxSizeMB:
+        example: 500
         type: integer
     type: object
   config.TelemetryConfig:
@@ -376,20 +402,32 @@ definitions:
         type: string
       batchInterval:
         type: string
+      disabled:
+        description: Master switch to disable all telemetry
+        type: boolean
       maxBatchSize:
         type: integer
       metrics:
         $ref: '#/definitions/config.MetricsConfig'
       serviceName:
         type: string
+      streamName:
+        type: string
+      streamSubjects:
+        items:
+          type: string
+        type: array
     type: object
   config.ThrottlingConfig:
     properties:
       burst:
+        example: 50
         type: integer
       enabled:
+        example: true
         type: boolean
       rate:
+        example: 500
         type: number
     type: object
   registry.GearSpec:
@@ -407,15 +445,14 @@ definitions:
         type: string
       id:
         description: Assigned by Registry/Mixer
-        example: 100
-        type: integer
+        example: "100"
+        type: string
       name:
         example: iso8583-in
         type: string
       ports:
         additionalProperties:
-          format: int64
-          type: integer
+          type: string
         description: Assigned by Mixer
         type: object
       type:
@@ -481,23 +518,28 @@ definitions:
         type: string
       id:
         description: Assigned by Registry/Mixer
-        type: integer
+        type: string
       to:
         example: router.in
         type: string
     type: object
+externalDocs:
+  description: fluxrig Architecture Guide
+  url: https://fluxrig.org/docs/architecture
 host: localhost:8090
 info:
   contact:
     email: fluxrig@jaab.tech
     name: JAAB Tech Support
     url: https://fluxrig.org
-  description: Control Plane API for FluxRig Orchestration.
+  description: Control Plane API for fluxrig Orchestration. The Mixer acts as the
+    brain of the fleet, managing Rack enrollment, Scenario deployment, and global
+    Telemetry aggregation.
   license:
     name: Apache 2.0
     url: http://www.apache.org/licenses/LICENSE-2.0.html
-  title: FluxRig Mixer API
-  version: v0.4.5-dev
+  title: fluxrig Mixer API
+  version: v0.5.0-dev
 paths:
   /config:
     get:
@@ -519,7 +561,7 @@ paths:
       - description: Entity ID
         in: query
         name: id
-        type: integer
+        type: string
       produces:
       - application/json
       responses:

@@ -82,6 +82,10 @@ func (h *SourceHandler) Next() slog.Handler {
 	return h.next
 }
 
+func NewSourceHandler(next slog.Handler) *SourceHandler {
+	return &SourceHandler{next: next}
+}
+
 func (h *SourceHandler) WithGroup(name string) slog.Handler {
 	return &SourceHandler{next: h.next.WithGroup(name)}
 }
@@ -159,6 +163,7 @@ func Init(ctx context.Context, cfg Config, b bus.Bus, logBuffer *BufferHandler, 
 	if currentShutdown != nil {
 		_ = currentShutdown(context.Background())
 	}
+	slog.Info("Initializing Telemetry Provider", "service", cfg.ServiceName, "entity", cfg.EntityName, "id", cfg.EntityID)
 
 	if cfg.MaxBatchSize == 0 {
 		cfg.MaxBatchSize = 512
@@ -171,10 +176,10 @@ func Init(ctx context.Context, cfg Config, b bus.Bus, logBuffer *BufferHandler, 
 			"",
 			semconv.ServiceName(cfg.ServiceName),
 			semconv.ServiceVersion(cfg.ServiceVersion),
-			semconv.ServiceInstanceID(fmt.Sprintf("%x", cfg.EntityID)),
-			//nolint:gosec // conversion safe for entity IDs
-			attribute.Int64("flux.id", int64(cfg.EntityID)),
+			semconv.ServiceInstanceID(cfg.EntityID.String()),
+			attribute.String("flux.id", cfg.EntityID.String()),
 			attribute.String("flux.name", cfg.EntityName),
+			attribute.String("flux.type", string(cfg.Component)),
 		),
 	)
 	if err != nil {
@@ -182,12 +187,12 @@ func Init(ctx context.Context, cfg Config, b bus.Bus, logBuffer *BufferHandler, 
 	}
 
 	// 2. WAL Setup (Mandatory)
-	// WAL location is inside Store Dir
+	// WAL location is inside Store Dir, isolated by component
 	storeDir := cfg.Store.Dir
 	if storeDir == "" {
 		storeDir = "./data"
 	}
-	walDir := filepath.Join(storeDir, "wal")
+	walDir := filepath.Join(storeDir, "wal", string(cfg.Component))
 
 	if errMkdir := os.MkdirAll(walDir, 0750); errMkdir != nil {
 		return nil, fmt.Errorf("failed to create wal dir %s: %w", walDir, errMkdir)
@@ -274,8 +279,9 @@ func Init(ctx context.Context, cfg Config, b bus.Bus, logBuffer *BufferHandler, 
 	slog.SetDefault(slog.New(sourceWrapped))
 
 	// 4. Start Log Shipper
-	// Cursor Path (Store Dir)
-	cursorPath := filepath.Join(storeDir, "telemetry_cursor.json")
+	// Cursor Path (Store Dir), isolated by component
+	cursorFilename := fmt.Sprintf("telemetry_cursor_%s.json", cfg.Component)
+	cursorPath := filepath.Join(storeDir, cursorFilename)
 	cursor, err := shipper.NewCursor(cursorPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load cursor: %w", err)
@@ -310,6 +316,7 @@ func Init(ctx context.Context, cfg Config, b bus.Bus, logBuffer *BufferHandler, 
 
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithResource(res),
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
 		sdktrace.WithSpanProcessor(dualIDProcessor),
 		sdktrace.WithSpanProcessor(batchSpanProcessor),
 	)
@@ -388,7 +395,11 @@ func Init(ctx context.Context, cfg Config, b bus.Bus, logBuffer *BufferHandler, 
 // VerifyConnectivity performs a mandatory handshake with the telemetry bus.
 // It publishes sync probes relentlessly and waits for loopback.
 func VerifyConnectivity(ctx context.Context, b bus.Bus, nodeName string, handshakeTimeout, handshakeInterval time.Duration) error {
-	subject := fmt.Sprintf("flux.telemetry.%s.logs", nodeName)
+	safeName := nodeName
+	if safeName == "" {
+		safeName = "unknown"
+	}
+	subject := fmt.Sprintf("flux.telemetry.%s.logs", safeName)
 
 	slog.Info("Waiting for telemetry-plane convergence", "subject", subject)
 

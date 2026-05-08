@@ -1,5 +1,5 @@
 Library    ISO8583Library
-Library    FluxRigLibrary
+Library    fluxrigLibrary
 
 *** Variables ***
 ${ISO_HOST}      localhost
@@ -13,6 +13,7 @@ Setup Test Environment
     Start Echo Server  port=${MOCK_PORT}
 
 Teardown Test Environment
-    [Documentation]    Stops any active artifacts
-    Stop Echo Server
-    Stop All Load Generators
+    [Documentation]    Stops any active artifacts and processes
+    Run Keyword And Ignore Error    Stop Echo Server
+    Run Keyword And Ignore Error    Stop All Load Generators
+    Run Keyword And Ignore Error    Stop All Processes

@@ -7,6 +7,8 @@ import (
 	"context"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 )
 
@@ -19,8 +21,10 @@ type ConnectOptions struct {
 	OperationTimeout          time.Duration
 	SubscriptionRetryWait     time.Duration
 	SubscriptionRetryAttempts int
-	RootCA                    string // Optional path to Root CA for TLS
-	InsecureSkipVerify        bool   // Optional bypass for local testing
+	RootCA                    string        // Optional path to Root CA for TLS
+	InsecureSkipVerify        bool          // Optional bypass for local testing
+	InProcessServer           any           // Optional direct NATS server instance (In-Process)
+	InactiveThreshold         time.Duration // Time after which the NATS server cleans up idle consumers
 }
 
 // Bus defines the standard behavior for our messaging layer.
@@ -34,7 +38,7 @@ type Bus interface {
 	Publish(ctx context.Context, subject string, msg *fluxmsg.FluxMsg) error
 
 	// PublishRaw sends pre-serialized data (CBOR) with a specific deduplication ID.
-	PublishRaw(ctx context.Context, subject string, data []byte, fluxID uint64) error
+	PublishRaw(ctx context.Context, subject string, data []byte, fluxID uuid.UUID) error
 
 	// Subscribe listens for messages on a subject.
 	// It returns a subscription object (to allow Unsubscribe) and an error.

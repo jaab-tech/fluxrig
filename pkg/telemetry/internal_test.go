@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
 	otellog "go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -76,8 +77,8 @@ func TestResolvePoints(t *testing.T) {
 func TestDualIDSpanProcessor_IdentityEnrichment(t *testing.T) {
 	processor := NewDualIDSpanProcessor()
 	ctx := context.Background()
-	fluxID := "user-123"
-	ctx = ContextWithFluxID(ctx, fluxID)
+	fluxID := uuid.New()
+	ctx = ContextWithFluxID(ctx, fluxID.String())
 
 	// Since we can't easily mock trace.ReadWriteSpan without a full SDK setup,
 	// we will verify that NewDualIDSpanProcessor returns a valid object.
@@ -107,8 +108,9 @@ func TestAttributeToMap(t *testing.T) {
 
 func TestNatsWriter_Write(t *testing.T) {
 	mockBus := bus.NewMockBus()
-	gen, _ := idgen.New(1)
-	writer := NewNatsWriter(mockBus, 12345, "test-entity", "flux.telemetry", gen, 1*time.Second)
+	gen, _ := idgen.New(uuid.New())
+	eid := uuid.New()
+	writer := NewNatsWriter(mockBus, eid, "test-entity", "flux.telemetry", gen, 1*time.Second)
 
 	logData := map[string]interface{}{
 		"message": "test log",
@@ -124,7 +126,7 @@ func TestNatsWriter_Write(t *testing.T) {
 		t.Errorf("Expected n=%d, got %d", len(p), n)
 	}
 
-	msgs := mockBus.GetMessages("flux.telemetry.logs.json")
+	msgs := mockBus.GetMessages("flux.telemetry.test-entity.logs.json")
 	if len(msgs) != 1 {
 		t.Fatalf("Expected 1 message, got %d", len(msgs))
 	}

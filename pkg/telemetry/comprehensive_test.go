@@ -8,15 +8,15 @@ import (
 	"log/slog"
 	"testing"
 
-	"github.com/jaab-tech/fluxrig/pkg/bus"
-	"github.com/jaab-tech/fluxrig/pkg/idgen"
-
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/jaab-tech/fluxrig/pkg/bus"
+	"github.com/jaab-tech/fluxrig/pkg/idgen"
 	"github.com/jaab-tech/fluxrig/pkg/telemetry"
 )
 
@@ -104,7 +104,7 @@ func TestTelemetry_Init_Success(t *testing.T) {
 	}
 
 	telemetry.ResetGlobalsForTest()
-	gen, _ := idgen.New(1)
+	gen, _ := idgen.New(uuid.New())
 
 	shutdown, err := telemetry.Init(context.Background(), telCfg, mockBus, nil, gen)
 	if err != nil {
@@ -147,9 +147,9 @@ func TestTelemetry_Init_Success(t *testing.T) {
 func TestExporterConstructors(t *testing.T) {
 	mockBus := bus.NewMockBus()
 
-	gen, _ := idgen.New(1)
+	gen, _ := idgen.New(uuid.New())
 	// 1. NatsWriter
-	w := telemetry.NewNatsWriter(mockBus, 1, "test-entity", "flux.telemetry", gen, 1)
+	w := telemetry.NewNatsWriter(mockBus, uuid.New(), "test-entity", "flux.telemetry", gen, 1)
 	if w == nil {
 		t.Error("NewNatsWriter returned nil")
 	}

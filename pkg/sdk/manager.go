@@ -7,6 +7,8 @@ import (
 	"context"
 	"log/slog"
 
+	"github.com/google/uuid"
+
 	"github.com/jaab-tech/fluxrig/pkg/bus"
 	"github.com/jaab-tech/fluxrig/pkg/manager"
 )
@@ -16,7 +18,7 @@ type DefaultContext struct {
 	baseCtx   context.Context // Renamed to avoid collision with interface method
 	config    map[string]any
 	gearName  string
-	machineID uint64
+	machineID uuid.UUID
 	logger    *slog.Logger
 	idGen     IDGenerator
 	bus       bus.Bus
@@ -42,7 +44,7 @@ func (c *DefaultContext) GearName() string {
 	return c.gearName
 }
 
-func (c *DefaultContext) MachineID() uint64 {
+func (c *DefaultContext) MachineID() uuid.UUID {
 	return c.machineID
 }
 

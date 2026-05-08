@@ -11,6 +11,6 @@ name = "rack-e2e-01"
 heartbeat_interval = "1s"
 
 [rack.bus]
-url = "nats://localhost:4223"
+url = "tls://localhost:4223"
 domain = "flux"
-root_ca = "../certs/ca.crt"
+root_ca_file = "../certs/ca.crt"

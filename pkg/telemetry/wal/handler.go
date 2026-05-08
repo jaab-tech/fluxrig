@@ -7,6 +7,8 @@ import (
 	"context"
 	"log/slog"
 
+	"github.com/google/uuid"
+
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/jaab-tech/fluxrig/pkg/idgen"
 )
@@ -18,13 +20,13 @@ type Handler struct {
 	opts        slog.HandlerOptions
 	preAttrs    []slog.Attr
 	groupPrefix string
-	entityID    uint64
+	entityID    uuid.UUID
 	entityName  string
 	component   string
 }
 
 // NewHandler creates a new WAL Handler.
-func NewHandler(w *WAL, gen *idgen.IDGenerator, entityID uint64, entityName string, component string, opts *slog.HandlerOptions) *Handler {
+func NewHandler(w *WAL, gen *idgen.IDGenerator, entityID uuid.UUID, entityName string, component string, opts *slog.HandlerOptions) *Handler {
 	if opts == nil {
 		opts = &slog.HandlerOptions{}
 	}
@@ -80,7 +82,7 @@ func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 	// Construct FluxMsg Payload
 	payload := map[string]any{
 		"type":        "log",
-		"timestamp":   r.Time.UnixMicro(),
+		"timestamp":   r.Time.UTC().UnixMicro(),
 		"severity":    r.Level.String(),
 		"body":        r.Message,
 		"entity_id":   h.entityID,

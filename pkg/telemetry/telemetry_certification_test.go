@@ -12,6 +12,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/google/uuid"
+
 	"github.com/jaab-tech/fluxrig/pkg/bus"
 	"github.com/jaab-tech/fluxrig/pkg/config"
 	"github.com/jaab-tech/fluxrig/pkg/idgen"
@@ -23,7 +25,7 @@ func TestTelemetry_CertificationPush(t *testing.T) {
 
 	cfg := Config{
 		ServiceName:         "certification-telemetry",
-		EntityID:            123,
+		EntityID:            uuid.New(),
 		EntityName:          "cert-node",
 		Component:           "TEST",
 		BatchIntervalString: "100ms",
@@ -42,7 +44,7 @@ func TestTelemetry_CertificationPush(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		gen, _ := idgen.New(5)
+		gen, _ := idgen.New(uuid.New())
 		mockBus := bus.NewMockBus()
 
 		shutdown, err := Init(ctx, cfg, mockBus, nil, gen) // Valid MockBus

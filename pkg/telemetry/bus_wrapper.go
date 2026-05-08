@@ -5,10 +5,9 @@ package telemetry
 
 import (
 	"context"
-	"fmt"
-	"strconv"
 	"time"
 
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -60,7 +59,7 @@ func (ib *InstrumentedBus) Publish(ctx context.Context, subject string, msg *flu
 		msg.TraceID = span.SpanContext().TraceID().String()
 		// Try to extract FluxID from context for RefFluxID correlation
 		if fid := FluxIDFromContext(ctx); fid != "" {
-			if ufid, err := strconv.ParseUint(fid, 10, 64); err == nil {
+			if ufid, err := uuid.Parse(fid); err == nil {
 				msg.RefFluxID = ufid
 			}
 		}
@@ -97,7 +96,7 @@ func (ib *InstrumentedBus) Publish(ctx context.Context, subject string, msg *flu
 	return err
 }
 
-func (ib *InstrumentedBus) PublishRaw(ctx context.Context, subject string, data []byte, fluxID uint64) error {
+func (ib *InstrumentedBus) PublishRaw(ctx context.Context, subject string, data []byte, fluxID uuid.UUID) error {
 	start := time.Now()
 
 	err := ib.next.PublishRaw(ctx, subject, data, fluxID)
@@ -143,7 +142,7 @@ func (ib *InstrumentedBus) Subscribe(subject string, handler bus.Handler) (bus.S
 				attribute.String("messaging.system", "nats"),
 				attribute.String("messaging.destination", subject),
 				attribute.String("messaging.trace_id", msg.TraceID),
-				attribute.String("flux.id", fmt.Sprintf("%d", msg.FluxID)),
+				attribute.String("flux.id", msg.FluxID.String()),
 			),
 		)
 		defer span.End()

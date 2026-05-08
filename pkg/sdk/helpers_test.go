@@ -6,14 +6,18 @@ package sdk
 import (
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 )
 
 func TestGetValue(t *testing.T) {
 	msg := fluxmsg.New()
-	msg.FluxID = 12345
+	id1 := uuid.New()
+	id2 := uuid.New()
+	msg.FluxID = id1
 	msg.TraceID = "test-trace-67890"
-	msg.SrcGearID = 42
+	msg.SrcGearID = id2
 	msg.RawPayload = []byte("hello world")
 	msg.Metadata = map[string]string{
 		"iso8583.mti": "1200",
@@ -33,9 +37,9 @@ func TestGetValue(t *testing.T) {
 		found bool
 	}{
 		{"payload", "hello world", true},
-		{"flux_id", uint64(12345), true},
+		{"flux_id", id1, true},
 		{"trace_id", "test-trace-67890", true},
-		{"src_id", uint64(42), true},
+		{"src_id", id2, true},
 		{"meta.iso8583.mti", "1200", true},
 		{"meta.rack.id", "5", true},
 		{"data.amount", 100, true},

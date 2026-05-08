@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -20,7 +21,7 @@ import (
 
 func TestIO_CertificationBlitz(t *testing.T) {
 	logger := slog.Default()
-	idGen, _ := idgen.New(1)
+	idGen, _ := idgen.New(uuid.New())
 
 	t.Run("Server_Framing_BE_2", func(t *testing.T) {
 		cfg := DefaultConfig()

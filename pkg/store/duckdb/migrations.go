@@ -23,18 +23,8 @@ type Migration struct {
 var migrations = []Migration{
 	{
 		Version: 1,
-		Name:    "init_registry_and_types",
+		Name:    "init_fluxrig_schema",
 		Up:      migrateV1,
-	},
-	{
-		Version: 2,
-		Name:    "init_telemetry_tables",
-		Up:      migrateV2,
-	},
-	{
-		Version: 3,
-		Name:    "init_archiver_buffer",
-		Up:      migrateV3,
 	},
 }
 
@@ -101,120 +91,99 @@ func (s *Store) Migrate(ctx context.Context) error {
 
 // --- Migration Steps ---
 
-// V1: Registry & Entity Types
+// V1: Initial fluxrig Schema (128-bit UUID Native)
 func migrateV1(ctx context.Context, tx *sql.Tx) error {
 	query := `
+	-- Registry & Entity Types
 	CREATE TABLE IF NOT EXISTS registry (
-		entity_id UBIGINT PRIMARY KEY,
+		entity_id UUID PRIMARY KEY,
 		type_id USMALLINT,
-		machine_id USMALLINT,
-		mixer_id UBIGINT,
+		machine_id UUID,
+		mixer_id UUID,
 		name TEXT,
 		status TEXT DEFAULT 'offline',
 		version TEXT,
-		started_at TIMESTAMP,
+		ip TEXT,
+		port INTEGER,
+		secret TEXT,
+		first_seen TIMESTAMP,
 		last_seen TIMESTAMP,
-		stats JSON,
-		config JSON,
-		attributes JSON
+		update_count INTEGER DEFAULT 0,
+		stats TEXT,
+		config TEXT,
+		attributes TEXT
 	);
-	
-	CREATE SEQUENCE IF NOT EXISTS seq_machine_id_server START 100;
 	CREATE UNIQUE INDEX IF NOT EXISTS idx_registry_name ON registry (name);
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_registry_machine ON registry (machine_id, type_id);
 	
 	CREATE TABLE IF NOT EXISTS entity_types (
 		id USMALLINT PRIMARY KEY,
 		name TEXT
 	);
+
+	-- Telemetry Tables
+	CREATE TABLE IF NOT EXISTS telemetry_logs (
+		timestamp TIMESTAMP,
+		entity_id UUID,
+		entity_type TEXT,
+		entity_name TEXT,
+		trace_id TEXT,
+		span_id TEXT,
+		severity TEXT,
+		source_file TEXT,
+		source_line INTEGER,
+		source_func TEXT,
+		body TEXT,
+		attributes TEXT
+	);
+
+	CREATE TABLE IF NOT EXISTS telemetry_spans (
+		start_time TIMESTAMP,
+		end_time TIMESTAMP,
+		entity_id UUID,
+		entity_name TEXT,
+		trace_id TEXT,
+		span_id TEXT,
+		parent_span_id TEXT,
+		name TEXT,
+		kind TEXT,
+		status_code TEXT,
+		status_message TEXT,
+		attributes TEXT
+	);
+
+	CREATE TABLE IF NOT EXISTS telemetry_metrics (
+		timestamp TIMESTAMP,
+		entity_id UUID,
+		entity_name TEXT,
+		name TEXT,
+		description TEXT,
+		type TEXT,
+		value DOUBLE,
+		unit TEXT,
+		attributes TEXT
+	);
+
+	-- Archiver Buffer
+	CREATE TABLE IF NOT EXISTS archiver_buffer (
+		ts TIMESTAMP,
+		flux_id UUID,
+		trace_id TEXT,
+		wire_id UUID,
+		subject TEXT,
+		payload BLOB,
+		meta TEXT
+	);
+
+	-- Populate Entity Types
+	INSERT INTO entity_types (id, name) VALUES 
+		(0, 'RESERVED'), (1, 'CLUSTER'), (2, 'MIXER'), (3, 'MSG'), (4, 'RACK'), 
+		(5, 'GEAR'), (6, 'PORT_IN'), (7, 'PORT_OUT'), (8, 'WIRE'), (9, 'SNAKE'),
+		(10, 'SCENARIO'), (11, 'SESSION'), (12, 'SPEC');
 	`
 	if _, err := tx.ExecContext(ctx, query); err != nil {
 		return err
 	}
 
-	// Seed entity types?
-	// We can do it here or let the app do it. Better here for consistency.
-	// But getting idgen dependency here creates cyclic dep if idgen depends on store?
-	// Store depends on idgen in store.go. So it is fine.
-	// However, to keep migrations pure SQL if possible, we might hardcode or pass data.
-	// Let's rely on the fact that existing logic handles idempotency or add simple inserts.
-	// For now, simple schema.
 	return nil
-}
-
-// V2: Telemetry Tables
-func migrateV2(ctx context.Context, tx *sql.Tx) error {
-	// Logs
-	if _, err := tx.ExecContext(ctx, `
-		CREATE TABLE IF NOT EXISTS telemetry_logs (
-			timestamp TIMESTAMP,
-			entity_id UBIGINT,
-			entity_type TEXT,
-			entity_name TEXT,
-			trace_id TEXT,
-			span_id TEXT,
-			severity TEXT,
-			source_file TEXT,
-			source_line INTEGER,
-			source_func TEXT,
-			body TEXT,
-			attributes JSON
-		);
-	`); err != nil {
-		return err
-	}
-
-	// Spans
-	if _, err := tx.ExecContext(ctx, `
-		CREATE TABLE IF NOT EXISTS telemetry_spans (
-			start_time TIMESTAMP,
-			end_time TIMESTAMP,
-			entity_id UBIGINT,
-			entity_name TEXT,
-			trace_id TEXT,
-			span_id TEXT,
-			parent_span_id TEXT,
-			name TEXT,
-			kind TEXT,
-			status_code TEXT,
-			status_message TEXT,
-			attributes JSON
-		);
-	`); err != nil {
-		return err
-	}
-
-	// Metrics
-	if _, err := tx.ExecContext(ctx, `
-		CREATE TABLE IF NOT EXISTS telemetry_metrics (
-			timestamp TIMESTAMP,
-			entity_id UBIGINT,
-			entity_name TEXT,
-			name TEXT,
-			description TEXT,
-			type TEXT,
-			value DOUBLE,
-			unit TEXT,
-			attributes JSON
-		);
-	`); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-// V3: Archiver Buffer
-func migrateV3(ctx context.Context, tx *sql.Tx) error {
-	_, err := tx.ExecContext(ctx, `
-		CREATE TABLE IF NOT EXISTS archiver_buffer (
-			ts BIGINT,
-			flux_id UBIGINT,
-			trace_id TEXT,
-			wire_id UBIGINT,
-			subject TEXT,
-			payload BLOB,
-			meta JSON
-		);
-	`)
-	return err
 }

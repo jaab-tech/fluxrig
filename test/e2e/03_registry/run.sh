@@ -97,8 +97,9 @@ for ((i=1;i<=30;i++)); do
     # Rack auto-generates name if not provided? Or stays pending?
     # Default behavior: Pending with machine-id name?
     # Let's check api output.
-    if grep -q "machine_id" "$WORK_DIR/mixer/logs/api_racks.json"; then
-        echo "✅ Rack Registered (Found structure)!"
+    # Match machine_id (UUID format)
+    if grep -qE "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}" "$WORK_DIR/mixer/logs/api_racks.json"; then
+        echo "✅ Rack Registered (Found UUID)!"
         FOUND=1
         break
     fi
@@ -146,7 +147,7 @@ MIXER_PID=""
 
 # 8. Registry Verification using DuckDB
 # 8. Registry Verification using DuckDB
-MIXER_DB="$WORK_DIR/mixer/data/fluxrig.duckdb"
+MIXER_DB="$WORK_DIR/mixer/data/flux.duckdb"
 
 echo "[INFO] Verifying Registry Content..."
 
@@ -161,6 +162,8 @@ echo "   Found $RACK_COUNT Racks"
 
 if [ "$MIXER_COUNT" -ne 1 ]; then
     echo "❌ Expected 1 Mixer, got $MIXER_COUNT"
+    # Show table for debug
+    $DB_CLI -line "$MIXER_DB" "SELECT * FROM registry"
     exit 1
 fi
 if [ "$SNAKE_COUNT" -ne 1 ]; then
@@ -218,10 +221,10 @@ if [[ "$SNAKE_ROW" != *"mixer_port"* ]]; then
      exit 1
 fi
 
-# Check Snake MachineID
+# Check Snake MachineID (Should be a valid UUID)
 SNAKE_MID=$($DB_CLI -noheader -csv "$MIXER_DB" "SELECT machine_id FROM registry WHERE type_id=9 LIMIT 1")
-if [ "$SNAKE_MID" -ne 1 ]; then
-    echo "❌ Snake MachineID mismatch. Expected 1, got $SNAKE_MID"
+if [[ ! "$SNAKE_MID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+    echo "❌ Snake MachineID is not a valid UUID: $SNAKE_MID"
     exit 1
 fi
 
@@ -257,10 +260,18 @@ for ((i=1;i<=30;i++)); do
     fi
 done
 
-echo "[INFO] Adopting Rack 100..."
-sleep 5
+echo "[INFO] Adopting Rack..."
+# Extract the first pending rack ID
+PENDING_ID=$(curl -s "$API_URL/racks?status=pending" | grep -oE "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}" | head -n1)
+if [ -z "$PENDING_ID" ]; then
+    echo "❌ No pending rack found for adoption."
+    exit 1
+fi
+
+echo "[INFO] Adopting Rack $PENDING_ID..."
+sleep 2
 # Use 'admin racks approve'
-APPROVE_OUT=$($FLUX_BIN admin racks approve 100 --name "node-100" --api-url "$BASE_URL")
+APPROVE_OUT=$($FLUX_BIN admin racks approve "$PENDING_ID" --name "node-100" --api-url "$BASE_URL")
 echo "$APPROVE_OUT"
 
 if [[ "$APPROVE_OUT" != *"approved"* ]]; then

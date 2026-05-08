@@ -12,8 +12,8 @@ var apiURL string
 // adminCmd represents the admin command
 var adminCmd = &cobra.Command{
 	Use:   "admin",
-	Short: "Administrative commands for FluxRig Mixer",
-	Long:  `Perform management operations on the FluxRig Mixer via its API.`,
+	Short: "Administrative commands for fluxrig Mixer",
+	Long:  `Perform management operations on the fluxrig Mixer via its API.`,
 }
 
 func init() {

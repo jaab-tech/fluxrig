@@ -66,7 +66,7 @@ log_info "Generating Keys & Certs..."
 
 mkdir -p "${WORK_DIR}/certs"
 openssl genrsa -out "${WORK_DIR}/certs/ca.key" 2048 2>/dev/null
-openssl req -new -x509 -days 365 -key "${WORK_DIR}/certs/ca.key" -subj "/C=UR/ST=MVD/L=MVD/O=JAAB/CN=FluxRig Root CA" -out "${WORK_DIR}/certs/ca.crt" 2>/dev/null
+openssl req -new -x509 -days 365 -key "${WORK_DIR}/certs/ca.key" -subj "/C=UR/ST=MVD/L=MVD/O=JAAB/CN=fluxrig Root CA" -out "${WORK_DIR}/certs/ca.crt" 2>/dev/null
 openssl genrsa -out "${WORK_DIR}/certs/server.key" 2048 2>/dev/null
 openssl req -new -key "${WORK_DIR}/certs/server.key" -subj "/C=UR/ST=MVD/L=MVD/O=JAAB/CN=localhost" -out "${WORK_DIR}/certs/server.csr" 2>/dev/null
 echo "subjectAltName=DNS:localhost,IP:127.0.0.1,DNS:flux" > "${WORK_DIR}/certs/extfile.cnf"
@@ -174,8 +174,8 @@ fi
 
 # 8. Verify DB Tables and Content
 log_info "Verifying DB Content (Snapshot)..."
-cp "$WORK_DIR/mixer/data/fluxrig_test.duckdb" "$WORK_DIR/mixer/data/snapshot.duckdb"
-[ -f "$WORK_DIR/mixer/data/fluxrig_test.duckdb.wal" ] && cp "$WORK_DIR/mixer/data/fluxrig_test.duckdb.wal" "$WORK_DIR/mixer/data/snapshot.duckdb.wal"
+cp "$WORK_DIR/mixer/data/flux.duckdb" "$WORK_DIR/mixer/data/snapshot.duckdb"
+[ -f "$WORK_DIR/mixer/data/flux.duckdb.wal" ] && cp "$WORK_DIR/mixer/data/flux.duckdb.wal" "$WORK_DIR/mixer/data/snapshot.duckdb.wal"
 
 log_info "Checking 'registry' table (Racks)..."
 DB_OUT=$(duckdb -readonly -csv -noheader -c "SELECT name, machine_id FROM registry WHERE name='rack-e2e-01' AND type_id=4;" "$WORK_DIR/mixer/data/snapshot.duckdb")

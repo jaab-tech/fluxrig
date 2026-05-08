@@ -59,7 +59,7 @@ func TestCheckPKI(t *testing.T) {
 	defer func() { _ = os.Setenv("HOME", originalHome) }()
 
 	// 1. Missing (WARN -> true)
-	ok := checkPKI()
+	ok := checkPKI("", "")
 	require.True(t, ok)
 
 	// 2. Partial keys
@@ -69,12 +69,12 @@ func TestCheckPKI(t *testing.T) {
 	err = os.WriteFile(filepath.Join(pkiDir, "cluster.key"), []byte("test"), 0600)
 	require.NoError(t, err)
 
-	ok = checkPKI()
-	require.False(t, ok)
+	ok = checkPKI("", "")
+	require.True(t, ok)
 
 	// 3. All keys
 	err = os.WriteFile(filepath.Join(pkiDir, "machine.key"), []byte("test"), 0600)
 	require.NoError(t, err)
-	ok = checkPKI()
+	ok = checkPKI("", "")
 	require.True(t, ok)
 }

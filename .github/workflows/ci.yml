@@ -21,37 +21,58 @@ on:
     branches: [main]
 
 jobs:
-  test:
+  lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
+      - uses: actions/checkout@v6
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: "1.25"
-          check-latest: true
-
-      - name: Install golangci-lint
-        uses: golangci/golangci-lint-action@v4
+          cache: true
+      - name: Run Linter
+        uses: golangci/golangci-lint-action@v9
         with:
-          version: latest
+          version: v2.12.2
           args: --timeout=5m
           install-mode: "goinstall"
 
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.25"
+          cache: true
       - name: Run tests
         run: |
           go test -race -coverprofile=coverage.out $(go list ./... | grep -v '/test/utils' | grep -v 'cmd/fluxrig$' | grep -v 'cmd/fluxrig-mixer$')
           go tool cover -func=coverage.out | grep total | awk '{print "Total Coverage: " $3}'
+      - name: Upload coverage
+        uses: codecov/codecov-action@v6
+        with:
+          files: coverage.out
+          fail_ci_if_error: false
 
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.25"
+          cache: true
       - name: Build binaries
         run: |
           mkdir -p bin
           go build -v -o bin/fluxrig ./cmd/fluxrig
           go build -v -o bin/fluxrig-mixer ./cmd/fluxrig-mixer
-
-      - name: Upload coverage
-        uses: codecov/codecov-action@v4
+      - name: Archive binaries
+        uses: actions/upload-artifact@v4
         with:
-          file: coverage.out
-          fail_ci_if_error: false
+          name: fluxrig-binaries
+          path: bin/
+          retention-days: 5

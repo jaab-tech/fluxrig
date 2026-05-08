@@ -11,22 +11,29 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/fxamacker/cbor/v2"
+	"github.com/google/uuid"
+
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 )
 
 // NatsBus is the concrete implementation of the Bus interface using NATS JetStream.
 type NatsBus struct {
-	conn          *nats.Conn
-	js            jetstream.JetStream
-	streamName    string
-	retryWait     time.Duration
-	retryAttempts int
+	conn              *nats.Conn
+	js                jetstream.JetStream
+	streamName        string
+	retryWait         time.Duration
+	retryAttempts     int
+	inactiveThreshold time.Duration
 }
 
 // NewNatsBus creates a new instance.
@@ -44,6 +51,23 @@ func (n *NatsBus) Connect(url string, opts ConnectOptions) error {
 		nats.Timeout(opts.ConnectTimeout),
 		nats.ReconnectWait(opts.ReconnectWait),
 		nats.MaxReconnects(-1), // Infinite reconnects
+	}
+
+	// --- In-Process Optimization ---
+	if opts.InProcessServer != nil {
+		url = "nats://localhost:4222" // Dummy URL required by NATS client even for in-process
+		// Use special InProcess provider if we can cast it
+		if srv, ok := opts.InProcessServer.(interface {
+			InProcessConn(opts ...nats.Option) (*nats.Conn, error)
+		}); ok {
+			slog.Info("Establishing In-Process NATS connection (Bypassing network stack)")
+			nc, err := srv.InProcessConn(natsOpts...)
+			if err != nil {
+				return err
+			}
+			n.conn = nc
+			return n.finalizeConnect(opts)
+		}
 	}
 
 	// --- Advanced TLS Configuration ---
@@ -81,14 +105,19 @@ func (n *NatsBus) Connect(url string, opts ConnectOptions) error {
 	}
 	n.conn = nc
 
+	return n.finalizeConnect(opts)
+}
+
+func (n *NatsBus) finalizeConnect(opts ConnectOptions) error {
 	n.retryWait = opts.SubscriptionRetryWait
 	n.retryAttempts = opts.SubscriptionRetryAttempts
 	if n.retryAttempts <= 0 {
 		n.retryAttempts = 1 // At least one attempt
 	}
+	n.inactiveThreshold = opts.InactiveThreshold
 
 	// 3. Initialize JetStream
-	js, err := jetstream.New(nc)
+	js, err := jetstream.New(n.conn)
 	if err != nil {
 		return fmt.Errorf("failed to initialize jetstream: %w", err)
 	}
@@ -114,28 +143,53 @@ func (n *NatsBus) Publish(ctx context.Context, subject string, msg *fluxmsg.Flux
 		return err
 	}
 
+	// 3. Technical Logging (Avoid recursion for telemetry)
+	if !strings.Contains(subject, "telemetry") && !strings.Contains(subject, "logs") && !strings.Contains(subject, "metrics") {
+		slog.Debug("NATS Bus: Publish",
+			"subject", subject,
+			"flux_id", msg.FluxID.String(),
+		)
+	}
+
 	// 2. Send Bytes (Persistent) with Deduplication ID
-	// Use FluxMsg.FluxID as unique Nats-Msg-Id
-	// This ensures that if the LogShipper re-sends the same log (e.g., after crash/restart),
-	// JetStream will identify it as a duplicate and discard it.
-	// Use FluxMsg.FluxID + HopCount (len(Path)) as unique Nats-Msg-Id
-	// This supports Forwarding (DAGs) AND Loops (A -> B -> A), as Path grows on every hop.
-	msgID := fmt.Sprintf("%d-%d", msg.FluxID, len(msg.Path))
+	msgID := fmt.Sprintf("%s-%d", msg.FluxID.String(), len(msg.Path))
+
+	// 3. Inject Traces (OTel)
+	if ctx != nil {
+		otel.GetTextMapPropagator().Inject(ctx, propagation.MapCarrier(msg.Metadata))
+	}
 
 	_, err = n.js.Publish(ctx, subject, data, jetstream.WithMsgID(msgID))
+	if err != nil {
+		slog.Error("NATS Bus Publish Failed", "subject", subject, "error", err)
+	}
 	return err
 }
 
+// Purge removes all messages from the stream (Best Effort)
+func (n *NatsBus) Purge(ctx context.Context) error {
+	if n.js == nil || n.streamName == "" {
+		return nil
+	}
+	s, err := n.js.Stream(ctx, n.streamName)
+	if err != nil {
+		return nil // Stream might not exist yet
+	}
+	return s.Purge(ctx)
+}
+
 // PublishRaw sends pre-serialized data (CBOR) with a specific deduplication ID.
-func (n *NatsBus) PublishRaw(ctx context.Context, subject string, data []byte, fluxID uint64) error {
+func (n *NatsBus) PublishRaw(ctx context.Context, subject string, data []byte, fluxID uuid.UUID) error {
 	if n.js == nil {
 		return errors.New("nats bus not connected")
 	}
 
 	// Send Bytes (Persistent) with Deduplication ID
-	// Send Bytes (Persistent) with Deduplication ID
-	msgID := fmt.Sprintf("%d-%s", fluxID, subject)
+	msgID := fmt.Sprintf("%s-%s", fluxID.String(), subject)
 	_, err := n.js.Publish(ctx, subject, data, jetstream.WithMsgID(msgID))
+	if err != nil {
+		slog.Error("NATS Bus PublishRaw Failed", "subject", subject, "error", err)
+	}
 	return err
 }
 
@@ -154,12 +208,16 @@ func (n *NatsBus) Subscribe(subject string, handler Handler) (Subscription, erro
 
 	var cons jetstream.Consumer
 	var err error
+	var consName string
 	for i := 0; i < n.retryAttempts; i++ {
+		consName = fmt.Sprintf("flux-sub-%s", uuid.New().String())
 		cons, err = n.js.CreateOrUpdateConsumer(ctx, n.streamName, jetstream.ConsumerConfig{
-			FilterSubject: subject,
-			DeliverPolicy: jetstream.DeliverAllPolicy,
-			AckPolicy:     jetstream.AckExplicitPolicy, // Reliable baseline
-			MaxAckPending: 10000,                       // Prevent stalls during high-TPS
+			Name:              consName,
+			FilterSubject:     subject,
+			DeliverPolicy:     jetstream.DeliverNewPolicy,
+			AckPolicy:         jetstream.AckExplicitPolicy, // Reliable baseline
+			MaxAckPending:     10000,                       // Prevent stalls during high-TPS
+			InactiveThreshold: n.inactiveThreshold,         // Autonomous server-side cleanup if client crashes
 		})
 		if err == nil {
 			break
@@ -172,17 +230,21 @@ func (n *NatsBus) Subscribe(subject string, handler Handler) (Subscription, erro
 	}
 
 	// 2. Consume Messages
-	cancelCtx, cancel := context.WithCancel(ctx)
+	_, cancel := context.WithCancel(ctx)
 
 	cc, err := cons.Consume(func(msg jetstream.Msg) {
-		slog.Debug("NATS Bus Delivery", "subject", subject, "len", len(msg.Data()))
 		_ = msg.Ack()
 		var fluxMsg fluxmsg.FluxMsg
+
 		if errUnmarshal := cbor.Unmarshal(msg.Data(), &fluxMsg); errUnmarshal != nil {
-			slog.Error("NATS Unmarshal Failed", "subject", subject, "error", errUnmarshal, "len", len(msg.Data()))
 			return
 		}
-		handler(context.Background(), &fluxMsg)
+
+		// 2. Extract Traces (OTel)
+		ctx := context.Background()
+		ctx = otel.GetTextMapPropagator().Extract(ctx, propagation.MapCarrier(fluxMsg.Metadata))
+
+		handler(ctx, &fluxMsg)
 	})
 
 	if err != nil {
@@ -191,9 +253,12 @@ func (n *NatsBus) Subscribe(subject string, handler Handler) (Subscription, erro
 	}
 
 	return &natsSubscription{
-		cc:     cc,
-		cancel: cancel,
-		ctx:    cancelCtx,
+		cc:         cc,
+		cancel:     cancel,
+		js:         n.js,
+		streamName: n.streamName,
+		consName:   consName,
+		isDurable:  false,
 	}, nil
 }
 
@@ -205,18 +270,21 @@ func (n *NatsBus) SubscribeRaw(subject string, streamName string, handler RawHan
 
 	ctx := context.Background()
 
-	// 1. Create Ephemeral Pull Consumer (Standard Worker Pattern)
+	// 1. Create Ephemeral Pull Consumer
+	consName := fmt.Sprintf("flux-raw-%s", uuid.New().String())
 	cons, err := n.js.CreateOrUpdateConsumer(ctx, streamName, jetstream.ConsumerConfig{
-		FilterSubject: subject,
-		DeliverPolicy: jetstream.DeliverAllPolicy,
-		AckPolicy:     jetstream.AckNonePolicy,
+		Name:              consName,
+		FilterSubject:     subject,
+		DeliverPolicy:     jetstream.DeliverNewPolicy,
+		AckPolicy:         jetstream.AckNonePolicy,
+		InactiveThreshold: n.inactiveThreshold, // Autonomous server-side cleanup
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create ephemeral consumer (raw): %w", err)
 	}
 
 	// 2. Consume Messages
-	cancelCtx, cancel := context.WithCancel(ctx)
+	_, cancel := context.WithCancel(ctx)
 
 	cc, err := cons.Consume(func(msg jetstream.Msg) {
 		_ = msg.Ack()
@@ -229,9 +297,12 @@ func (n *NatsBus) SubscribeRaw(subject string, streamName string, handler RawHan
 	}
 
 	return &natsSubscription{
-		cc:     cc,
-		cancel: cancel,
-		ctx:    cancelCtx,
+		cc:         cc,
+		cancel:     cancel,
+		js:         n.js,
+		streamName: streamName,
+		consName:   consName,
+		isDurable:  false,
 	}, nil
 }
 
@@ -257,7 +328,7 @@ func (n *NatsBus) SubscribeDurable(subject, durableName string, handler Handler)
 	}
 
 	// 2. Consume Messages
-	cancelCtx, cancel := context.WithCancel(ctx)
+	_, cancel := context.WithCancel(ctx)
 
 	cc, err := cons.Consume(func(msg jetstream.Msg) {
 		// Deserialize
@@ -269,7 +340,11 @@ func (n *NatsBus) SubscribeDurable(subject, durableName string, handler Handler)
 			return
 		}
 
-		handler(context.Background(), &fluxMsg)
+		// Extract Traces (OTel)
+		ctx := context.Background()
+		ctx = otel.GetTextMapPropagator().Extract(ctx, propagation.MapCarrier(fluxMsg.Metadata))
+
+		handler(ctx, &fluxMsg)
 		_ = msg.Ack()
 	})
 
@@ -279,9 +354,12 @@ func (n *NatsBus) SubscribeDurable(subject, durableName string, handler Handler)
 	}
 
 	return &natsSubscription{
-		cc:     cc,
-		cancel: cancel,
-		ctx:    cancelCtx,
+		cc:         cc,
+		cancel:     cancel,
+		js:         n.js,
+		streamName: n.streamName,
+		consName:   cons.CachedInfo().Name,
+		isDurable:  true,
 	}, nil
 }
 
@@ -299,14 +377,28 @@ func (n *NatsBus) Close() {
 
 // natsSubscription implements the Subscription interface (Wrapper)
 type natsSubscription struct {
-	cc     jetstream.ConsumeContext
-	cancel context.CancelFunc
-	ctx    context.Context
+	cc         jetstream.ConsumeContext
+	cancel     context.CancelFunc
+	js         jetstream.JetStream
+	streamName string
+	consName   string
+	isDurable  bool
 }
 
 func (s *natsSubscription) Unsubscribe() error {
 	s.cc.Stop()
 	s.cancel()
+
+	// Best effort: delete the ephemeral consumer to avoid overlap with new subscriptions
+	if !s.isDurable && s.js != nil && s.streamName != "" && s.consName != "" {
+		slog.Debug("NATS Bus Unsubscribe: Deleting ephemeral consumer", "stream", s.streamName, "consumer", s.consName)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := s.js.DeleteConsumer(ctx, s.streamName, s.consName); err != nil {
+			// Log as warning rather than error as it might be already gone (race condition with InactiveThreshold)
+			slog.Warn("NATS Bus Unsubscribe: Failed to delete ephemeral consumer", "stream", s.streamName, "consumer", s.consName, "error", err)
+		}
+	}
 	return nil
 }
 

@@ -38,8 +38,10 @@ type Server struct {
 
 	// Metrics
 	meter       metric.Meter
-	msgTotal    metric.Int64Counter
-	bytesTotal  metric.Int64Counter
+	msgsIn      metric.Int64Counter
+	msgsOut     metric.Int64Counter
+	bytesIn     metric.Int64Counter
+	bytesOut    metric.Int64Counter
 	latency     metric.Float64Histogram
 	connsActive metric.Int64UpDownCounter
 	connsTotal  metric.Int64Counter
@@ -61,11 +63,13 @@ func NewServer(cfg *Config, log *slog.Logger, emit func(*fluxmsg.FluxMsg), idGen
 	meter := otel.GetMeterProvider().Meter("fluxrig/gears/iso8583")
 
 	// Initialize Metrics
-	msgTotal, _ := meter.Int64Counter("fluxrig_rack_messages_total", metric.WithDescription("Total ISO8583 messages processed"))
-	bytesTotal, _ := meter.Int64Counter("fluxrig_rack_bytes_total", metric.WithDescription("Total bytes transmitted"))
-	latency, _ := meter.Float64Histogram("fluxrig_rack_latency_seconds", metric.WithDescription("Internal processing latency"), metric.WithUnit("s"))
-	connsActive, _ := meter.Int64UpDownCounter("fluxrig_rack_connections_active", metric.WithDescription("Current active TCP connections"))
-	connsTotal, _ := meter.Int64Counter("fluxrig_rack_connections_total", metric.WithDescription("Total TCP connections accepted"))
+	msgsIn, _ := meter.Int64Counter("flux.gear.messages_in", metric.WithDescription("Total incoming ISO8583 messages"))
+	msgsOut, _ := meter.Int64Counter("flux.gear.messages_out", metric.WithDescription("Total outgoing ISO8583 messages"))
+	bytesIn, _ := meter.Int64Counter("flux.port.bytes_in", metric.WithDescription("Total incoming bytes"))
+	bytesOut, _ := meter.Int64Counter("flux.port.bytes_out", metric.WithDescription("Total outgoing bytes"))
+	latency, _ := meter.Float64Histogram("flux.gear.processing_time_ms", metric.WithDescription("Internal processing latency"), metric.WithUnit("ms"))
+	connsActive, _ := meter.Int64UpDownCounter("flux.port.connections_active", metric.WithDescription("Current active TCP connections"))
+	connsTotal, _ := meter.Int64Counter("flux.port.connections_total", metric.WithDescription("Total TCP connections accepted"))
 
 	return &Server{
 		config:      cfg,
@@ -74,8 +78,10 @@ func NewServer(cfg *Config, log *slog.Logger, emit func(*fluxmsg.FluxMsg), idGen
 		idGen:       idGen,
 		done:        make(chan struct{}),
 		meter:       meter,
-		msgTotal:    msgTotal,
-		bytesTotal:  bytesTotal,
+		msgsIn:      msgsIn,
+		msgsOut:     msgsOut,
+		bytesIn:     bytesIn,
+		bytesOut:    bytesOut,
 		latency:     latency,
 		connsActive: connsActive,
 		connsTotal:  connsTotal,
@@ -252,21 +258,15 @@ func (s *Server) handleConn(conn net.Conn) {
 		msg.Metadata["iso8583.fields"] = formatFieldList(frameInfo.ActiveFields)
 
 		// TRACE logging
-		if s.log.Enabled(context.Background(), logger.LevelTrace) {
-			s.log.Log(context.Background(), logger.LevelTrace, "FluxMsg received",
-				"flux_id", fmt.Sprintf("0x%x", msg.FluxID),
-				"conn_id", connID,
-				"mti", frameInfo.MTI,
-				"variant", s.config.Variant,
-				"src_id", msg.Metadata["iso8583.src_id"],
-				"dst_id", msg.Metadata["iso8583.dst_id"],
-				"payload_hex", fmt.Sprintf("0x%x", payload),
-			)
-		}
+		s.log.Log(context.Background(), logger.LevelTrace, "ISO8583 Server: Frame read from socket",
+			"conn_id", connID,
+			"mti", frameInfo.MTI,
+			"len", len(payload),
+		)
 
 		s.emit(msg)
 
-		s.latency.Record(context.Background(), time.Since(time.Unix(0, msg.TsInit)).Seconds(), metric.WithAttributes(
+		s.latency.Record(context.Background(), float64(time.Since(time.Unix(0, msg.TsInit)).Milliseconds()), metric.WithAttributes(
 			attribute.String("direction", "inbound"),
 			attribute.String("mti", frameInfo.MTI),
 		))
@@ -420,20 +420,20 @@ func (s *Server) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.Fl
 	// But we can approximate if we consider Process is synchronous.
 	// START time is not captured in previous step. I will capture it now.
 
-	s.msgTotal.Add(ctx, 1, metric.WithAttributes(
+	s.msgsOut.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("direction", "outbound"),
 		attribute.String("mti", mti),
 		attribute.String("status", "ok"),
 	))
-	s.bytesTotal.Add(ctx, int64(len(fullPayload)), metric.WithAttributes(
+	s.bytesOut.Add(ctx, int64(len(fullPayload)), metric.WithAttributes(
 		attribute.String("direction", "outbound"),
 	))
-	s.latency.Record(ctx, time.Since(start).Seconds(), metric.WithAttributes(
+	s.latency.Record(ctx, float64(time.Since(start).Milliseconds()), metric.WithAttributes(
 		attribute.String("direction", "outbound"),
 		attribute.String("mti", mti),
 	))
 
-	return msg, nil
+	return nil, nil
 }
 
 func (s *Server) buildFrame(payload []byte) ([]byte, error) {
@@ -580,12 +580,12 @@ func (s *Server) inspect(payload []byte, connID string, meta map[string]string) 
 		status = "error"
 	}
 	ctx := context.Background()
-	s.msgTotal.Add(ctx, 1, metric.WithAttributes(
+	s.msgsIn.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("direction", "inbound"),
 		attribute.String("mti", info.MTI),
 		attribute.String("status", status),
 	))
-	s.bytesTotal.Add(ctx, int64(len(payload)), metric.WithAttributes(
+	s.bytesIn.Add(ctx, int64(len(payload)), metric.WithAttributes(
 		attribute.String("direction", "inbound"),
 	))
 

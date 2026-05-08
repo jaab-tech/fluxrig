@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	"github.com/google/uuid"
 )
 
 func TestClusterKey_Lifecycle(t *testing.T) {
@@ -95,10 +97,12 @@ func TestPassport_Flow(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	authority := &ClusterKey{Private: priv, Public: pub}
 
+	mixerID, _ := uuid.Parse("00000000-0000-0000-0000-000000000001")
+	machineID, _ := uuid.Parse("00000000-0000-0000-0000-000000000042")
 	// Create State
 	originalState := &RackState{
-		MixerID:     0x0200010000000001,
-		MachineID:   42,
+		MixerID:     mixerID,
+		MachineID:   machineID,
 		Name:        "rack-42",
 		Status:      "active",
 		Secret:      "super-secret",

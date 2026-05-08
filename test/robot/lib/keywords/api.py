@@ -8,14 +8,14 @@ import os
 from robot.api import logger
 from robot.api.deco import keyword
 
-# Import the renderer (relative import handled by Python path setup in FluxRigLibrary)
+# Import the renderer (relative import handled by Python path setup in fluxrigLibrary)
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from reporting.renderer import renderer
 
 class ApiKeywords:
     """
-    Keywords for interacting with FluxRig Mixer API.
+    Keywords for interacting with fluxrig Mixer API.
     """
 
     @keyword
@@ -145,7 +145,7 @@ class ApiKeywords:
             raise RuntimeError(f"Adoption failed for rack {machine_id}: {e}")
 
     @keyword
-    def verify_rack_status(self, mixer_port: int, machine_id: int, expected_status: str, timeout: int = 30):
+    def verify_rack_status(self, mixer_port: int, machine_id: str, expected_status: str, timeout: int = 30):
         """
         Verifies that a rack has the expected status.
         """
@@ -302,7 +302,7 @@ class ApiKeywords:
             # Render dashboard
             if components:
                 dashboard = renderer.render_dashboard(
-                    title="FluxRig Registry Overview",
+                    title="fluxrig Registry Overview",
                     components=components
                 )
                 logger.info(dashboard, html=True)
@@ -395,6 +395,69 @@ class ApiKeywords:
              raise RuntimeError(f"Metric '{metric_key}' value is {val} (expected > 0)")
         
         logger.info(f"Verified metric '{metric_key}' for '{entity_name}': {val}")
+
+    @keyword
+    def verify_scenario_active(self, mixer_port: int, scenario_name: str, timeout: int = 30):
+        """Verifies that a scenario is currently active in the Mixer."""
+        url = f"http://localhost:{mixer_port}/api/v1/topology/status"
+        start = time.time()
+        while time.time() - start < timeout:
+            try:
+                output = subprocess.check_output(["curl", "-s", "-f", url])
+                status = json.loads(output)
+                active_ver = status.get("active_ver", "")
+                active_name = status.get("active_scenario", "")
+                
+                # Check both name and version for matches
+                combined = f"{active_name} {active_ver}".lower()
+                if scenario_name.lower() in combined:
+                    logger.info(f"Scenario '{scenario_name}' is active (Name: {active_name}, Version: {active_ver})")
+                    return
+            except Exception:
+                pass
+            time.sleep(1)
+        raise RuntimeError(f"Timeout waiting for scenario '{scenario_name}' to become active")
+
+    @keyword
+    def check_at_least_one_rack_active(self, mixer_port: int, timeout: int = 30):
+        """Verifies that at least one rack is registered and active."""
+        url = f"http://localhost:{mixer_port}/api/v1/racks"
+        start = time.time()
+        while time.time() - start < timeout:
+            try:
+                output = subprocess.check_output(["curl", "-s", "-f", url])
+                racks = json.loads(output)
+                for rack in racks:
+                    if rack.get("status") == "active":
+                        logger.info(f"Found active rack: {rack.get('name')}")
+                        return
+            except Exception:
+                pass
+            time.sleep(1)
+        raise RuntimeError("No active racks found in registry")
+
+    @keyword
+    def verify_any_entity_metric_present(self, mixer_port: int, metric_key: str, timeout: int = 30):
+        """Verifies that a specific metric key exists and has a positive value for ANY entity."""
+        start = time.time()
+        while time.time() - start < timeout:
+            try:
+                stats_list = self.get_entity_stats(mixer_port)
+                for s in stats_list:
+                    metrics = s.get('metrics', {})
+                    if metric_key in metrics:
+                        val = metrics[metric_key].get('value', 0)
+                        if isinstance(val, (int, float)) and val > 0:
+                            logger.info(f"Verified metric '{metric_key}' for entity '{s.get('entity_name')}': {val}")
+                            return
+                    else:
+                        # Diagnostic: Log available keys if not found
+                        keys = list(metrics.keys())
+                        logger.info(f"Entity '{s.get('entity_name')}' does NOT have '{metric_key}'. Available: {keys}")
+            except Exception:
+                pass
+            time.sleep(2)
+        raise RuntimeError(f"Metric '{metric_key}' not found or zero for all entities")
 
 
 

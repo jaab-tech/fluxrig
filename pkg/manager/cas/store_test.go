@@ -21,8 +21,8 @@ func TestDiskStore(t *testing.T) {
 	store, err := NewDiskStore(tmpDir)
 	require.NoError(t, err)
 
-	content := []byte("Hello FluxRig Spec Manager")
-	expectedHash := "a45c1b9c13dc125364ca052c02865cb52d082f7e9b8142f981aaa2b21e51ed69"
+	content := []byte("Hello fluxrig Spec Manager")
+	expectedHash := "bf519508128fa8d107311b6d6e1bb0adc5378bf29ed83798447b7e0d64f92112"
 
 	// Test Put
 	hash, err := store.Put(content)
@@ -30,7 +30,7 @@ func TestDiskStore(t *testing.T) {
 	assert.Equal(t, expectedHash, hash)
 
 	// Verify physical file location (Sharding)
-	shardPath := filepath.Join(tmpDir, "blobs", "a4", expectedHash)
+	shardPath := filepath.Join(tmpDir, "blobs", "bf", expectedHash)
 	assert.FileExists(t, shardPath)
 
 	// Test Get

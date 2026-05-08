@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/jaab-tech/fluxrig/pkg/bus"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/jaab-tech/fluxrig/pkg/idgen"
@@ -27,7 +29,7 @@ type MockGearContext struct {
 func (m *MockGearContext) Context() context.Context { return context.Background() }
 func (m *MockGearContext) Config() map[string]any   { return m.config }
 func (m *MockGearContext) GearName() string         { return "test-iso-gear" }
-func (m *MockGearContext) MachineID() uint64        { return 1 }
+func (m *MockGearContext) MachineID() uuid.UUID     { return uuid.Nil }
 func (m *MockGearContext) Logger() *slog.Logger     { return m.logger }
 func (m *MockGearContext) IDGen() sdk.IDGenerator   { return m.idGen }
 func (m *MockGearContext) Bus() bus.Bus             { return nil }
@@ -36,7 +38,7 @@ func (m *MockGearContext) ControlPlane() any        { return nil }
 
 func TestGear_Lifecycle(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	gen, _ := idgen.New(1)
+	gen, _ := idgen.New(uuid.New())
 
 	ctx := &MockGearContext{
 		config: map[string]any{

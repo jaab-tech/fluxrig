@@ -9,10 +9,12 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"gopkg.in/yaml.v3"
 
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
@@ -31,32 +33,35 @@ type ScenarioManager interface {
 	Import(ctx context.Context, content []byte, dryRun bool) (string, error)
 	Activate(ctx context.Context, name string) error
 	CurrentVersion() string
+	CurrentName() string
 	GetActiveScenario() *registry.Scenario
 }
 
 // ScenarioController manages the lifecycle of the Active Scenario.
 type ScenarioController struct {
-	log       *slog.Logger
-	dataPath  string // Path to the data directory (e.g. ./data)
-	repoPath  string // Path to the scenarios git repository (dataPath/scenarios)
-	store     *duckdb.Store
-	idGen     *idgen.IDGenerator
-	bus       ScenarioPublisher // For pushing scenarios to racks
-	mu        sync.Mutex
-	active    *registry.Scenario // Currently active scenario
-	repoReady bool               // Whether the scenarios repo has been initialized
-	mixerID   uint64
+	log         *slog.Logger
+	dataPath    string // Path to the data directory (e.g. ./data)
+	repoPath    string // Path to the scenarios git repository (dataPath/scenarios)
+	store       *duckdb.Store
+	idGen       *idgen.IDGenerator
+	bus         ScenarioPublisher // For pushing scenarios to racks
+	mu          sync.Mutex
+	active      *registry.Scenario // Currently active scenario
+	repoReady   bool               // Whether the scenarios repo has been initialized
+	mixerID     uuid.UUID
+	waitTimeout time.Duration
 }
 
-func NewScenarioController(log *slog.Logger, dataPath string, store *duckdb.Store, ig *idgen.IDGenerator, mixerID uint64) *ScenarioController {
+func NewScenarioController(log *slog.Logger, dataPath string, store *duckdb.Store, ig *idgen.IDGenerator, mixerID uuid.UUID, waitTimeout time.Duration) *ScenarioController {
 	repoPath := filepath.Join(dataPath, "scenarios")
 	return &ScenarioController{
-		log:      log.With("flux.type", "SCENARIO", "flux.name", "scenario-ctrl"),
-		dataPath: dataPath,
-		repoPath: repoPath,
-		store:    store,
-		idGen:    ig,
-		mixerID:  mixerID,
+		log:         log.With("flux.type", "SCENARIO", "flux.name", "scenario-ctrl"),
+		dataPath:    dataPath,
+		repoPath:    repoPath,
+		store:       store,
+		idGen:       ig,
+		mixerID:     mixerID,
+		waitTimeout: waitTimeout,
 	}
 }
 
@@ -71,6 +76,16 @@ func (c *ScenarioController) CurrentVersion() string {
 	defer c.mu.Unlock()
 	if c.active != nil {
 		return c.active.Meta.Version
+	}
+	return "none"
+}
+
+// CurrentName returns the name of the currently active scenario.
+func (c *ScenarioController) CurrentName() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.active != nil {
+		return c.active.Meta.Name
 	}
 	return "none"
 }
@@ -184,6 +199,11 @@ func (c *ScenarioController) Activate(ctx context.Context, name string) error {
 
 	// 4. Register entities in DuckDB (if store available)
 	if c.store != nil && c.idGen != nil {
+		// Clean up existing scenario entities (gears, ports, wires, scenarios) to avoid name conflicts
+		if err := c.store.ClearScenarioEntities(ctx); err != nil {
+			c.log.Warn("failed to clear existing scenario entities", "error", err)
+		}
+
 		if err := c.registerScenarioEntities(ctx, &s); err != nil {
 			c.log.Warn("failed to register scenario entities", "error", err)
 		}
@@ -235,9 +255,23 @@ func (c *ScenarioController) GetActiveName() string {
 }
 
 // sanitizeName makes a scenario name safe for filesystem use.
+// It removes any characters that could be used for path traversal.
 func (c *ScenarioController) sanitizeName(name string) string {
-	safeName := strings.ReplaceAll(name, " ", "_")
+	// 1. Remove any path-related characters
+	safeName := strings.ReplaceAll(name, "..", "")
 	safeName = strings.ReplaceAll(safeName, "/", "_")
+	safeName = strings.ReplaceAll(safeName, "\\", "_")
+
+	// 2. Restrict to alphanumeric, hyphens, and underscores
+	reg := regexp.MustCompile(`[^a-zA-Z0-9\-_]`)
+	safeName = reg.ReplaceAllString(safeName, "_")
+
+	// 3. Trim and ensure not empty
+	safeName = strings.Trim(safeName, "_-")
+	if safeName == "" {
+		safeName = "unnamed_scenario"
+	}
+
 	return safeName
 }
 
@@ -256,7 +290,7 @@ func (c *ScenarioController) registerScenarioEntities(ctx context.Context, s *re
 	c.log.Info("registered scenario", "name", scenarioName, "eid", scenarioEID)
 
 	// Build a map of rack name -> machineID and activate racks defined in scenario
-	rackMachineIDs := make(map[string]uint16)
+	rackMachineIDs := make(map[string]uuid.UUID)
 	for _, rack := range s.Racks {
 		if rack.Name != "" {
 			// Activate the rack (promote from pending to active)
@@ -277,7 +311,7 @@ func (c *ScenarioController) registerScenarioEntities(ctx context.Context, s *re
 
 	// Register Gears with their rack's machineID
 	// Track generated port IDs for wire registration: gearName -> portSuffix -> ID
-	gearPortIDs := make(map[string]map[string]uint64)
+	gearPortIDs := make(map[string]map[string]uuid.UUID)
 
 	for i := range s.Gears {
 		g := &s.Gears[i] // Pointer to modify
@@ -305,7 +339,7 @@ func (c *ScenarioController) registerScenarioEntities(ctx context.Context, s *re
 		}
 
 		// Get the machineID from the gear's deploy target
-		var machineID uint16 = 0
+		var machineID uuid.UUID
 		if deployTarget, ok := g.Deploy.(string); ok {
 			if mid, exists := rackMachineIDs[deployTarget]; exists {
 				machineID = mid
@@ -336,7 +370,7 @@ func (c *ScenarioController) registerScenarioEntities(ctx context.Context, s *re
 		}
 
 		// Store Port IDs for Gear and Wire registration
-		ports := map[string]uint64{
+		ports := map[string]uuid.UUID{
 			"in":  inPortID,
 			"out": outPortID,
 		}
@@ -357,25 +391,25 @@ func (c *ScenarioController) registerScenarioEntities(ctx context.Context, s *re
 		w.ID = wireEID // Assign ID to spec
 
 		// Resolve From/To to Port IDs
-		resolvePortID := func(endpoint string) uint64 {
+		resolvePortID := func(endpoint string) uuid.UUID {
 			// Expected format: gearName.portSuffix (e.g., "gateway.out")
 			lastDot := strings.LastIndex(endpoint, ".")
 			if lastDot == -1 {
-				return 0
+				return uuid.Nil
 			}
 			gearName := endpoint[:lastDot]
 			portSuffix := endpoint[lastDot+1:]
 			if p, ok := gearPortIDs[gearName]; ok {
 				return p[portSuffix]
 			}
-			return 0
+			return uuid.Nil
 		}
 
 		fromID := resolvePortID(w.From)
 		toID := resolvePortID(w.To)
 
 		// Determine MachineID (Source Rack)
-		var machineID uint16 = 0
+		var machineID uuid.UUID
 		// Parse source gear name from wire.From (e.g., "gateway.out" -> "gateway")
 		sourceGear := w.From
 		lastDot := strings.LastIndex(sourceGear, ".")
@@ -448,7 +482,7 @@ func (c *ScenarioController) pushScenarioToRacks(ctx context.Context, s *registr
 
 	for _, rackName := range targets {
 		// Get rack machineID from registry with retry
-		var machineID uint16 = 0
+		var machineID uuid.UUID
 		if c.store != nil {
 			mid, err := c.waitForRack(ctx, rackName)
 			if err != nil {
@@ -501,8 +535,8 @@ func (c *ScenarioController) pushScenarioToRacks(ctx context.Context, s *registr
 }
 
 // waitForRack polls the registry for a rack registration for up to 5 seconds.
-func (c *ScenarioController) waitForRack(ctx context.Context, name string) (uint16, error) {
-	deadline := time.Now().Add(5 * time.Second)
+func (c *ScenarioController) waitForRack(ctx context.Context, name string) (uuid.UUID, error) {
+	deadline := time.Now().Add(c.waitTimeout)
 	for time.Now().Before(deadline) {
 		mid, err := c.store.GetRackByName(ctx, name)
 		if err == nil {
@@ -510,10 +544,10 @@ func (c *ScenarioController) waitForRack(ctx context.Context, name string) (uint
 		}
 		select {
 		case <-ctx.Done():
-			return 0, ctx.Err()
+			return uuid.Nil, ctx.Err()
 		case <-time.After(500 * time.Millisecond):
 			// retry
 		}
 	}
-	return 0, fmt.Errorf("timeout waiting for rack registration")
+	return uuid.Nil, fmt.Errorf("timeout waiting for rack registration")
 }

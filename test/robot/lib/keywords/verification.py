@@ -31,7 +31,7 @@ class VerificationKeywords:
         
         # Regex for structured logs (slog) or standard
         # Looking for | ERROR | or level=error or level=warn
-        # FluxRig uses slog text handler: "level=ERROR" or "level=WARN"
+        # fluxrig uses slog text handler: "level=ERROR" or "level=WARN"
         
         for line in lines:
             line_lower = line.lower()

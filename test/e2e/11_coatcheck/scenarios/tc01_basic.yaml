@@ -10,7 +10,7 @@
 #                      +--- [ctx_restore] <-- [tcp_client] <----- [Response]
 #
 # Key Insight:
-#   - conn_id: Internal FluxRig routing metadata (which TCP connection to respond to)
+#   - conn_id: Internal fluxrig routing metadata (which TCP connection to respond to)
 #   - txn_id: Correlation ID (in this case: Payload)
 #   - ctx_store saves conn_id keyed by payload BEFORE forwarding to backend
 #   - Backend response contains payload
@@ -27,7 +27,7 @@ racks:
 
 wires:
   # --- Request Path ---
-  # Gateway receives TCP request, FluxRig assigns conn_id internally
+  # Gateway receives TCP request, fluxrig assigns conn_id internally
   - from: "tcp_gateway.out"
     to: "ctx_store.in"
 

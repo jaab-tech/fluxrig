@@ -5,21 +5,18 @@ package mixer
 
 import (
 	"context"
-	"encoding/hex"
 	"fmt"
+	"io"
 	"log/slog"
-	"net"
-	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strconv"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
 
-	"crypto/ed25519"
-	"crypto/rand"
+	"github.com/google/uuid"
 
 	"github.com/jaab-tech/fluxrig/pkg/bus"
 	"github.com/jaab-tech/fluxrig/pkg/config"
@@ -27,512 +24,426 @@ import (
 	"github.com/jaab-tech/fluxrig/pkg/idgen"
 	"github.com/jaab-tech/fluxrig/pkg/ingest"
 	loggerPkg "github.com/jaab-tech/fluxrig/pkg/logger"
-	"github.com/jaab-tech/fluxrig/pkg/manager"
-	fluxapi "github.com/jaab-tech/fluxrig/pkg/mixer/api"
+	"github.com/jaab-tech/fluxrig/pkg/logger/rotator"
+	"github.com/jaab-tech/fluxrig/pkg/mixer/api"
+	"github.com/jaab-tech/fluxrig/pkg/netutil"
 	"github.com/jaab-tech/fluxrig/pkg/pki"
-	"github.com/jaab-tech/fluxrig/pkg/registry"
-	routerPkg "github.com/jaab-tech/fluxrig/pkg/router"
+	"github.com/jaab-tech/fluxrig/pkg/router"
 	"github.com/jaab-tech/fluxrig/pkg/snake"
 	"github.com/jaab-tech/fluxrig/pkg/store/duckdb"
 	"github.com/jaab-tech/fluxrig/pkg/telemetry"
 	"github.com/jaab-tech/fluxrig/pkg/version"
 )
 
-// App encapsulates the FluxRig Mixer control plane application.
+// App is the main application entry point for the Mixer.
 type App struct {
-	cfg         *config.MixerConfig
-	scenarioRef string // Scenario reference: file path, name:tag URN, or empty (resume)
+	cfg           *config.MixerConfig
+	scenarioRef   string
+	log           *slog.Logger
+	bufHandler    *telemetry.BufferHandler
+	switchHandler *telemetry.SwitchableHandler
 }
 
 // NewApp creates a new Mixer application instance.
-// scenarioRef accepts a file path ("/path/to/file.yaml"), a stored scenario
-// URN ("payment-flow:v1.0.0"), or an empty string to resume the last active.
-func NewApp(cfg *config.MixerConfig, scenarioRef string) *App {
+func NewApp(cfg *config.MixerConfig, scenarioRef string, bufHandler *telemetry.BufferHandler) *App {
 	return &App{
 		cfg:         cfg,
 		scenarioRef: scenarioRef,
+		log:         slog.Default().With("component", "MIXER"),
+		bufHandler:  bufHandler,
 	}
 }
 
-// Run starts the Mixer and blocks until a signal is received.
-func (a *App) Run() error {
-	cfg := a.cfg
+// Run initializes and starts the Mixer service.
+func (a *App) Run(ctx context.Context) error {
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
-	// 1. Setup Data Directory
-	if err := os.MkdirAll(cfg.Store.Dir, 0750); err != nil {
-		return fmt.Errorf("failed to create store directory: %w", err)
+	// 1. Unified Logger Setup
+	lLevelStr := a.cfg.Logging.Level
+	if lLevelStr == "" {
+		lLevelStr = "info"
 	}
 
-	// 2. Load Security State
-	clusterKeyPath := filepath.Join(cfg.Store.Dir, cfg.Store.ClusterKeyFile)
-	ck, err := pki.LoadClusterKey(clusterKeyPath)
-	if err != nil {
-		slog.Warn("Cluster Authority not found. Generating a new keypair for Zero-Config operation.", "path", clusterKeyPath)
-		pub, priv, errGen := ed25519.GenerateKey(rand.Reader)
-		if errGen != nil {
-			return fmt.Errorf("failed to generate cluster key: %w", errGen)
+	var logWriter io.Writer = os.Stdout
+	if a.cfg.Logging.Filename != "" {
+		// Ensure log directory exists
+		logDir := filepath.Dir(a.cfg.Logging.Filename)
+		if logDir != "." && logDir != "/" {
+			_ = os.MkdirAll(logDir, 0750)
 		}
-		ck = &pki.ClusterKey{Private: priv, Public: pub}
-		// Save it so it's persistent for this environment
-		if errSave := ck.Save(clusterKeyPath); errSave != nil {
-			slog.Warn("Failed to persist generated cluster key", "error", errSave)
+
+		rot, err := rotator.New(a.cfg.Logging.Filename, a.cfg.Logging.MaxSizeMB, a.cfg.Logging.MaxBackups, a.cfg.Logging.Compress)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to init Mixer log rotator: %v\n", err)
 		} else {
-			slog.Info("Persistent Cluster Authority generated and saved", "path", clusterKeyPath)
+			logWriter = rot
 		}
 	}
-	slog.Info("Cluster Authority Active", "public_key", hex.EncodeToString(ck.Public))
 
-	slog.Info("Starting FluxRig Mixer",
-		"version", version.String(),
-		"api_port", cfg.API.Port,
-		"snake_port", cfg.Snake.Port,
-	)
+	baseLogger := loggerPkg.New(loggerPkg.Config{
+		Level:      lLevelStr,
+		EntityType: loggerPkg.TypeMixer,
+		Name:       a.cfg.Base.Name,
+		Writer:     logWriter,
+	})
+	a.switchHandler = telemetry.NewSwitchableHandler(baseLogger.Handler())
+	a.bufHandler = telemetry.NewBufferHandler(telemetry.NewSourceHandler(a.switchHandler))
+	a.log = slog.New(a.bufHandler)
 
-	// 3. Initialize Store (DuckDB)
-	storeDir := cfg.Store.Dir
-	dbPath := filepath.Join(storeDir, cfg.Store.DatabaseFile)
-	storeLogger := loggerPkg.WithComponent(slog.Default(), loggerPkg.TypeMixer, "store")
+	// 2. Storage & Registry Initialization
+	if a.cfg.Store.Dir != "" && a.cfg.Store.Dir != ":memory:" {
+		if errDir := os.MkdirAll(a.cfg.Store.Dir, 0750); errDir != nil {
+			return fmt.Errorf("failed to create store directory: %w", errDir)
+		}
+	}
 
-	store, err := duckdb.NewStore(storeLogger, dbPath)
+	dbFile := a.cfg.Store.DatabaseFile
+	if dbFile == "" {
+		dbFile = "flux.duckdb"
+	}
+	dbPath := filepath.Join(a.cfg.Store.Dir, dbFile)
+	if a.cfg.Store.Dir == "" {
+		dbPath = ":memory:"
+	}
+
+	store, err := duckdb.NewStore(a.log, dbPath)
 	if err != nil {
-		return fmt.Errorf("failed to open store: %w", err)
+		return fmt.Errorf("failed to init store: %w", err)
 	}
 	defer func() { _ = store.Close() }()
 
-	if errMig := store.Migrate(context.Background()); errMig != nil {
-		return fmt.Errorf("failed to run migrations: %w", errMig)
+	if errMig := store.Migrate(ctx); errMig != nil {
+		return fmt.Errorf("failed to migrate store: %w", errMig)
+	}
+	store.SetAutoAdopt(a.cfg.Enrollment.AutoAdopt)
+
+	// 2. Identity Management (Sovereign Passport)
+	keyPath := filepath.Join(a.cfg.Store.Dir, a.cfg.Store.ClusterKeyFile)
+	clusterKey, err := pki.LoadClusterKey(keyPath)
+	if err != nil {
+		a.log.Info("Cluster key not found. Generating new authority keypair...", "path", keyPath)
+		var errGen error
+		clusterKey, errGen = pki.GenerateClusterKey()
+		if errGen != nil {
+			return fmt.Errorf("failed to generate cluster key: %w", errGen)
+		}
+		if errSave := clusterKey.Save(keyPath); errSave != nil {
+			return fmt.Errorf("failed to save cluster key: %w", errSave)
+		}
 	}
 
-	// 4. Initialize Registry
-	reg := registry.NewDuckDBRegistry(store)
-	reg.SetAutoAdopt(cfg.Enrollment.AutoAdopt)
-
-	// 4b. Self-Registration (Mixer Metadata)
-	if cfg.Mixer.MixerName == "" {
-		cfg.Mixer.MixerName = fmt.Sprintf("mixer-%02d-%s", cfg.Mixer.MachineID, idgen.RandomSuffix(4))
-	}
-	mixerName := cfg.Mixer.MixerName
-
-	// Calculate ID (Type 0x02)
-	idGen, _ := idgen.New(cfg.Mixer.MachineID)
-
-	// Resume EntityID sequence from DB
-	a.resumeEntitySequence(store, cfg.Mixer.MachineID, idGen)
-
-	mixerEntityID := idGen.NewEntityID(idgen.EntityMixer, 1)
-	apiAddr := fmt.Sprintf("localhost:%d", cfg.API.Port)
-
-	// Register Mixer
-	if errReg := store.RegisterMixer(context.Background(), cfg.Mixer.MachineID, mixerName, mixerEntityID, apiAddr, version.Version); errReg != nil {
-		slog.Warn("Failed to register mixer", "error", errReg)
-	} else {
-		slog.Info("Mixer Registered", "entity_id", mixerEntityID, "name", mixerName)
+	statePath := filepath.Join(a.cfg.Store.Dir, "mixer.flux")
+	mixerState, err := pki.LoadMixerState(statePath, clusterKey.Public)
+	if err != nil {
+		a.log.Info("Mixer identity not found. Generating sovereign passport...")
+		mixerState = &pki.MixerState{
+			MachineID:   uuid.New(),
+			Name:        a.cfg.Base.Name,
+			Version:     version.Version,
+			CreatedAt:   time.Now().Unix(),
+			UpdatedAt:   time.Now().Unix(),
+			UpdateCount: 0,
+		}
+		env, _ := clusterKey.SignMixer(mixerState)
+		if errEnv := env.Save(statePath); errEnv != nil {
+			return fmt.Errorf("failed to save mixer identity: %w", errEnv)
+		}
 	}
 
-	// 5. Start Embedded NATS (Snake)
-	snakeSrv, err := snake.NewServer(snake.Config{
-		Port:           cfg.Snake.Port,
-		ClusterName:    cfg.Snake.ClusterName,
-		StoreDir:       filepath.Join(storeDir, "nats"),
-		StreamName:     cfg.Snake.StreamName,
-		StreamSubjects: cfg.Snake.StreamSubjects,
-		TLSCert:        cfg.Snake.TLSCertFile,
-		TLSKey:         cfg.Snake.TLSKeyFile,
+	// ID Generator
+	idGen, _ := idgen.New(mixerState.MachineID)
+	mixerEntityID := idGen.NextEntityID(idgen.EntityMixer)
+
+	a.bufHandler = telemetry.NewBufferHandler(telemetry.NewSourceHandler(a.switchHandler))
+	a.log = slog.New(a.bufHandler)
+
+	// 3b. Snake Initialization (Embedded NATS/JetStream)
+	subjects := a.cfg.Snake.StreamSubjects
+	if len(subjects) == 0 {
+		subjects = []string{
+			"flux.msg.>",
+			"flux.agent.>",
+			"flux.rack.>",
+			"flux.ctrl.>",
+		}
+		// If domain is not 'flux', add domain-prefixed subjects too for backward compatibility/isolation
+		if a.cfg.Snake.Domain != "flux" && a.cfg.Snake.Domain != "" {
+			subjects = append(subjects,
+				fmt.Sprintf("%s.msg.>", a.cfg.Snake.Domain),
+				fmt.Sprintf("%s.agent.>", a.cfg.Snake.Domain),
+				fmt.Sprintf("%s.rack.>", a.cfg.Snake.Domain),
+				fmt.Sprintf("%s.ctrl.>", a.cfg.Snake.Domain),
+			)
+		}
+	}
+
+	snakeSrv, err := snake.NewServer(ctx, snake.Config{
+		Port:           a.cfg.Snake.Port,
+		StoreDir:       filepath.Join(a.cfg.Store.Dir, "snake"),
+		StreamName:     a.cfg.Snake.StreamName,
+		StreamSubjects: subjects,
+		TLSCert:        a.cfg.Snake.TLSCertFile,
+		TLSKey:         a.cfg.Snake.TLSKeyFile,
+		LogLevel:       a.cfg.Logging.Level,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to start embedded nats (Snake): %w", err)
+		return fmt.Errorf("failed to start snake: %w", err)
 	}
 	defer snakeSrv.Shutdown()
 
-	slog.Info("Snake (NATS) is ready", "url", snakeSrv.ClientURL())
-
-	// 5b. Provision Telemetry Stream (Explicitly, as Snake only defaults to one)
-	if errTel := snakeSrv.ProvisionStream("flux-telemetry", []string{"flux.telemetry.>"}); errTel != nil {
-		return fmt.Errorf("failed to provision telemetry stream: %w", errTel)
-	}
-	slog.Info("Telemetry stream provisioned")
-
-	// Clear old snake sessions
-	if errClr := store.ClearSnakes(context.Background()); errClr != nil {
-		slog.Debug("Failed to clear old snakes", "error", errClr)
+	// 3b. Provision Telemetry Stream
+	if a.cfg.Observability.Enabled {
+		telSubjects := []string{
+			a.cfg.Telemetry.BaseSubject + ".>",
+		}
+		if errTel := snakeSrv.ProvisionStream(ctx, a.cfg.Telemetry.StreamName, telSubjects); errTel != nil {
+			a.log.Warn("Failed to provision telemetry stream", "error", errTel)
+		}
 	}
 
-	// Start Snake Stats Loop (Background)
-	a.startSnakeStats(snakeSrv, store, idGen, mixerName, mixerEntityID, cfg)
+	// 4. Discovery
+	jsUrl := a.cfg.Snake.URL
+	if jsUrl == "" || strings.HasSuffix(jsUrl, ":0") {
+		jsUrl = snakeSrv.ClientURL()
+	}
 
-	// 6. Start Router & Controllers
-	wmLogger := loggerPkg.NewWatermillAdapter(slog.Default())
-	router, err := routerPkg.NewRouter(wmLogger)
+	// Internal Optimization: Mixer connects to its own Snake via plain protocol
+	if strings.HasPrefix(jsUrl, "tls://") && (strings.Contains(jsUrl, "localhost") || strings.Contains(jsUrl, "127.0.0.1") || strings.Contains(jsUrl, "0.0.0.0")) {
+		a.log.Info("Internal Bus connection detected, bypassing TLS for performance", "url", jsUrl)
+		jsUrl = strings.Replace(jsUrl, "tls://", "nats://", 1)
+	}
+
+	// 5. Bus Initialization (The Mesh)
+	natsBus := bus.NewNatsBus(a.cfg.Snake.StreamName)
+	connectTimeout, _ := time.ParseDuration(a.cfg.Snake.ConnectTimeout)
+	if connectTimeout == 0 {
+		connectTimeout = 10 * time.Second
+	}
+	reconnectWait, _ := time.ParseDuration(a.cfg.Snake.ReconnectWait)
+	if reconnectWait == 0 {
+		reconnectWait = 1 * time.Second
+	}
+
+	inactiveThreshold, _ := time.ParseDuration(a.cfg.Snake.InactiveThreshold)
+	if inactiveThreshold == 0 {
+		inactiveThreshold = 30 * time.Second
+	}
+
+	if errConn := natsBus.Connect(jsUrl, bus.ConnectOptions{
+		Name:               a.cfg.Base.Name,
+		Domain:             a.cfg.Snake.Domain,
+		ConnectTimeout:     connectTimeout,
+		ReconnectWait:      reconnectWait,
+		InactiveThreshold:  inactiveThreshold,
+		RootCA:             a.cfg.Snake.RootCAFile,
+		InsecureSkipVerify: a.cfg.Snake.InsecureSkipVerify,
+		InProcessServer:    snakeSrv, // Optimized internal link
+	}); errConn != nil {
+		return fmt.Errorf("failed to connect to bus: %w", errConn)
+	}
+	defer natsBus.Close()
+
+	// Instrumented Bus for metrics
+	managedBus := telemetry.NewInstrumentedBus(natsBus, nil)
+
+	// 6. Router Initialization (Control Signaling)
+	wmLogger := loggerPkg.NewWatermillAdapter(a.log)
+	r, err := router.NewRouter(wmLogger)
 	if err != nil {
-		return fmt.Errorf("failed to create router: %w", err)
+		return fmt.Errorf("failed to init router: %w", err)
 	}
 
-	jsUrl := cfg.Snake.URL
-	if jsUrl == "" {
-		jsUrl = "nats://localhost:4222"
-	}
-
-	if errJS := router.ConfigureJetStream(jsUrl, cfg.Snake.ClusterName, cfg.Snake.Durable, cfg.Snake.RootCAFile, cfg.Snake.BusinessStreamMaxAge, cfg.Snake.TelemetryStreamMaxAge, wmLogger); errJS != nil {
-		return fmt.Errorf("failed to configure router jetstream: %w", errJS)
-	}
-
-	// 7. Initialize Telemetry & Sink
-	// 11. Metrics Cache (In-Memory) - Moved up for Sink wiring
-	metricsCache := telemetry.NewMetricsCache()
-	// NOTE: In Phase 2b we will wire the Ingest Sink to populate this cache. (Now Done)
-
-	// Re-enable helper address for local connection
-	cURL := snakeSrv.ClientURL()
-	cURL = strings.Replace(cURL, "0.0.0.0", "127.0.0.1", 1)
-
-	shutdownTel, stopSink := a.initTelemetry(cURL, mixerEntityID, mixerName, idGen, store, router, storeDir, cfg, metricsCache)
-	defer func() {
-		if shutdownTel != nil {
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer cancel()
-			if errShutdown := shutdownTel(shutdownCtx); errShutdown != nil {
-				slog.Debug("Telemetry shutdown error (transient)", "error", errShutdown)
-			}
+	// Configure JS Streams
+	// Use configured subjects if available, otherwise use defaults
+	msgSubjects := a.cfg.Snake.StreamSubjects
+	if len(msgSubjects) == 0 {
+		msgSubjects = []string{
+			"flux.msg.>",
+			"flux.agent.>",
+			"flux.rack.>",
+			"flux.ctrl.>",
 		}
-		if stopSink != nil {
-			if errStop := stopSink(); errStop != nil {
-				slog.Debug("Sink stop error (transient)", "error", errStop)
-			}
+		if a.cfg.Snake.Domain != "flux" && a.cfg.Snake.Domain != "" {
+			msgSubjects = append(msgSubjects,
+				fmt.Sprintf("%s.msg.>", a.cfg.Snake.Domain),
+				fmt.Sprintf("%s.agent.>", a.cfg.Snake.Domain),
+				fmt.Sprintf("%s.rack.>", a.cfg.Snake.Domain),
+				fmt.Sprintf("%s.ctrl.>", a.cfg.Snake.Domain),
+			)
 		}
-	}()
-
-	// INSTRUMENTATION: Router Middleware
-	// Must be done AFTER initTelemetry so GetMetrics() returns the initialized provider.
-	if m := telemetry.GetMetrics(); m != nil {
-		mw := telemetry.NewWatermillMiddleware(m)
-		router.Router.AddMiddleware(mw.Middleware)
-		slog.Info("Watermill Middleware Enabled for Telemetry")
 	}
 
-	// 8. Controllers
-	pushDelay, _ := time.ParseDuration(cfg.Enrollment.PushDelay)
-	enrollLogger := loggerPkg.WithComponent(slog.Default(), loggerPkg.TypeScenario, "enrollment-ctrl")
-	enrollment := controller.NewEnrollmentController(enrollLogger, reg, router.Pub, ck, mixerEntityID, pushDelay)
-	enrollment.RegisterRoutes(router)
-
-	// Run Router in background
-	go func() {
-		if errRouter := router.Router.Run(context.Background()); errRouter != nil {
-			slog.Error("router failed", "error", errRouter)
-			os.Exit(1)
+	telemetrySubjects := a.cfg.Telemetry.StreamSubjects
+	if len(telemetrySubjects) == 0 {
+		telemetrySubjects = []string{
+			a.cfg.Telemetry.BaseSubject + ".>",
 		}
-	}()
-
-	// 9. Start API Server
-	scenarioLogger := loggerPkg.WithComponent(slog.Default(), loggerPkg.TypeScenario, "scenario-ctrl")
-	sc := controller.NewScenarioController(scenarioLogger, cfg.Store.Dir, store, idGen, mixerEntityID)
-
-	// Create base bus
-	baseBus := bus.NewNatsBus("flux-msg")
-	// Wrap with instrumentation if metrics are available
-	var scenarioBus bus.Bus = baseBus
-	if m := telemetry.GetMetrics(); m != nil {
-		scenarioBus = telemetry.NewInstrumentedBus(baseBus, m)
 	}
 
-	err = scenarioBus.Connect(cURL, bus.ConnectOptions{
-		Name:           "mixer-scenario",
-		ConnectTimeout: 5 * time.Second,
-		ReconnectWait:  1 * time.Second,
-		RootCA:         cfg.Snake.RootCAFile,
-	})
-	if err != nil {
-		slog.Warn("Failed to connect scenario bus", "error", err)
+	if errCfg := r.ConfigureJetStream(
+		jsUrl,
+		a.cfg.Snake.Domain,
+		true,
+		a.cfg.Snake.RootCAFile,
+		a.cfg.Snake.StreamName,
+		msgSubjects,
+		a.cfg.Telemetry.StreamName,
+		telemetrySubjects,
+		"24h", "24h",
+		wmLogger,
+	); errCfg != nil {
+		return fmt.Errorf("failed to configure router: %w", errCfg)
+	}
+
+	// 7. Controller Initialization
+	pushDelay, _ := time.ParseDuration(a.cfg.Enrollment.PushDelay)
+	enrollCtrl := controller.NewEnrollmentController(a.log, store, r.Pub, clusterKey, mixerState.MachineID, pushDelay)
+	enrollCtrl.RegisterRoutes(r)
+
+	// Scenario Controller
+	scenarioWait, _ := time.ParseDuration(a.cfg.Mixer.ScenarioWaitTimeout)
+	if scenarioWait == 0 {
+		scenarioWait = 15 * time.Second
+	}
+	scenarioCtrl := controller.NewScenarioController(a.log, a.cfg.Store.Dir, store, idGen, mixerState.MachineID, scenarioWait)
+	scenarioCtrl.SetBus(managedBus)
+	enrollCtrl.SetScenario(scenarioCtrl)
+
+	// Metrics Cache
+	mCache := telemetry.NewMetricsCache()
+
+	// 7b. Telemetry Ingestion (Sink)
+	// IMPORTANT: The sink must listen on the telemetry stream, not the message stream.
+	telBusIngest := bus.NewNatsBus(a.cfg.Telemetry.StreamName)
+	if errTelConn := telBusIngest.Connect(jsUrl, bus.ConnectOptions{
+		Name:               a.cfg.Base.Name + "-tel-ingest",
+		Domain:             a.cfg.Snake.Domain,
+		ConnectTimeout:     connectTimeout,
+		ReconnectWait:      reconnectWait,
+		RootCA:             a.cfg.Snake.RootCAFile,
+		InsecureSkipVerify: a.cfg.Snake.InsecureSkipVerify,
+		InProcessServer:    snakeSrv,
+	}); errTelConn != nil {
+		a.log.Error("Failed to connect telemetry ingestion bus", "error", errTelConn)
 	} else {
-		defer scenarioBus.Close()
-		sc.SetBus(scenarioBus)
-		enrollment.SetScenario(sc)
-	}
-	// 10. Bootstrap Scenario (three-way resolution)
-	scenarioRef := a.scenarioRef
+		defer telBusIngest.Close()
+		flushInterval, _ := time.ParseDuration(a.cfg.Telemetry.BatchInterval)
+		if flushInterval == 0 {
+			flushInterval = 5 * time.Second
+		}
+		sink := ingest.NewTelemetrySink(telBusIngest, store, a.cfg.Telemetry.BaseSubject+".>", a.cfg.Store.Dir, flushInterval, mCache)
+		if errSink := sink.Start(ctx); errSink != nil {
+			a.log.Error("Failed to start telemetry sink", "error", errSink)
+		}
+		defer func() { _ = sink.Stop() }()
 
-	switch {
-	case scenarioRef == "":
-		// Resume previously active scenario from store
-		if activeName := sc.GetActiveName(); activeName != "" {
-			slog.Info("Resuming stored scenario", "name", activeName)
-			if errActivate := sc.Activate(context.Background(), activeName); errActivate != nil {
-				slog.Warn("Failed to resume stored scenario", "name", activeName, "error", errActivate)
+		// Flush early logs to NATS now that the sink is active
+		if a.bufHandler != nil {
+			nw := telemetry.NewNatsWriter(telBusIngest, mixerEntityID, mixerState.Name, a.cfg.Telemetry.BaseSubject, idGen, 5*time.Second)
+			lLevel := loggerPkg.ParseLevel(a.cfg.Logging.Level)
+			h := slog.NewJSONHandler(nw, &slog.HandlerOptions{Level: lLevel, AddSource: true})
+			// Inject Component Identity for Ingestion
+			hWithID := h.WithAttrs([]slog.Attr{
+				slog.String("entity_type", string(loggerPkg.TypeMixer)),
+				slog.String("component", string(loggerPkg.TypeMixer)),
+			})
+
+			// Combined: NATS + Base (STDOUT/File)
+			combined := telemetry.NewMultiHandler(hWithID, baseLogger.Handler())
+			a.switchHandler.Switch(combined)
+			_ = a.bufHandler.FlushTo(ctx, combined)
+		}
+	}
+
+	// 8. Register Mixer & Snake in local Registry
+	a.log.Info("Registering Mixer and Snake identities...", "id", mixerState.MachineID)
+	mixerIP := netutil.LocalIPv4()
+	_, errReg := store.RegisterEntity(ctx, uint8(idgen.EntityMixer), mixerState.MachineID, mixerState.Name, a.cfg.Enrollment.BootstrapSecret, mixerIP, a.cfg.API.Port, version.Version, nil, nil, mixerState.MachineID)
+	if errReg != nil {
+		a.log.Error("Failed to register Mixer in local registry", "error", errReg)
+	}
+
+	snakeAttrs := map[string]any{
+		"topology":   "rack",
+		"mixer":      "true",
+		"rack":       "true",
+		"rack_ip":    mixerIP,
+		"rack_port":  a.cfg.Snake.Port,
+		"mixer_ip":   mixerIP,
+		"mixer_port": a.cfg.API.Port,
+	}
+	_, errSnk := store.RegisterEntity(ctx, uint8(idgen.EntitySnake), mixerState.MachineID, "embedded-snake", a.cfg.Enrollment.BootstrapSecret, mixerIP, a.cfg.Snake.Port, version.Version, nil, snakeAttrs, mixerState.MachineID)
+	if errSnk != nil {
+		a.log.Error("Failed to register Snake in local registry", "error", errSnk)
+	}
+
+	// Initial Heartbeat for Mixer to populate stats
+	initialStats := map[string]any{
+		"goroutines": runtime.NumGoroutine(),
+		"uptime":     "0s",
+	}
+	if errHb := store.HeartbeatEntity(ctx, uint8(idgen.EntityMixer), mixerState.MachineID, initialStats, nil); errHb != nil {
+		a.log.Warn("Failed to send initial heartbeat for Mixer", "error", errHb)
+	}
+
+	// Initial Heartbeat for Snake
+	snakeStats := map[string]any{
+		"in_msgs":  0,
+		"out_msgs": 0,
+	}
+	if errHbSnk := store.HeartbeatEntity(ctx, uint8(idgen.EntitySnake), mixerState.MachineID, snakeStats, nil); errHbSnk != nil {
+		a.log.Warn("Failed to send initial heartbeat for Snake", "error", errHbSnk)
+	}
+
+	// 9. API Server
+	apiSrv := api.NewServer(store, r.Pub, clusterKey, scenarioCtrl, mCache, mixerState.MachineID, mixerEntityID, a.cfg)
+	go func() {
+		addr := fmt.Sprintf(":%d", a.cfg.API.Port)
+		if errSrv := apiSrv.Start(addr); errSrv != nil {
+			a.log.Error("API server failed", "error", errSrv)
+		}
+	}()
+
+	a.log.Info("Mixer is ready", "name", mixerState.Name, "id", mixerState.MachineID, "entity_id", mixerEntityID)
+
+	// 10. Startup Scenario Execution
+	if a.scenarioRef != "" {
+		a.log.Info("Executing startup scenario", "ref", a.scenarioRef)
+		// 1. Resolve Scenario (File path or Name)
+		var content []byte
+		var errRead error
+		if _, errStat := os.Stat(a.scenarioRef); errStat == nil {
+			// It's a file path
+			content, errRead = os.ReadFile(a.scenarioRef)
+			if errRead != nil {
+				a.log.Warn("Failed to read startup scenario file", "path", a.scenarioRef, "error", errRead)
+			}
+		}
+
+		if len(content) > 0 {
+			// Import it
+			name, errImp := scenarioCtrl.Import(ctx, content, false)
+			if errImp != nil {
+				a.log.Warn("Failed to import startup scenario", "error", errImp)
 			} else {
-				slog.Info("Stored scenario resumed", "name", activeName)
+				// Activate it
+				if errAct := scenarioCtrl.Activate(ctx, name); errAct != nil {
+					a.log.Warn("Failed to activate startup scenario", "name", name, "error", errAct)
+				}
+			}
+		} else {
+			// Assume it's a name already in the repo
+			if errAct := scenarioCtrl.Activate(ctx, a.scenarioRef); errAct != nil {
+				a.log.Warn("Failed to activate named startup scenario", "name", a.scenarioRef, "error", errAct)
 			}
 		}
-
-	case strings.Contains(scenarioRef, "/"):
-		// File path — strip file:// prefix if present
-		path := strings.TrimPrefix(scenarioRef, "file://")
-		slog.Info("Bootstrapping scenario from file", "path", path)
-
-		content, errRead := os.ReadFile(filepath.Clean(path))
-		if errRead != nil {
-			slog.Error("Failed to read bootstrap scenario file", "path", path, "error", errRead)
-			return fmt.Errorf("bootstrap scenario read failed: %w", errRead)
-		}
-
-		safeName, errImport := sc.Import(context.Background(), content, false)
-		if errImport != nil {
-			slog.Error("Failed to import bootstrap scenario", "error", errImport)
-			return fmt.Errorf("bootstrap scenario import failed: %w", errImport)
-		}
-
-		if errActivate := sc.Activate(context.Background(), safeName); errActivate != nil {
-			slog.Error("Failed to activate bootstrap scenario", "name", safeName, "error", errActivate)
-			return fmt.Errorf("bootstrap scenario activation failed: %w", errActivate)
-		}
-		slog.Info("Bootstrap scenario activated", "name", safeName)
-
-	default:
-		// URN reference (name:tag) — resolve from CAS store
-		slog.Info("Loading scenario from store", "urn", scenarioRef)
-
-		storePath := filepath.Join(cfg.Store.Dir, "store")
-		mgr, errMgr := manager.NewManager(storePath)
-		if errMgr != nil {
-			slog.Error("Failed to open spec/scenario store", "path", storePath, "error", errMgr)
-			return fmt.Errorf("scenario store open failed: %w", errMgr)
-		}
-
-		content, errLoad := mgr.Load(context.Background(), scenarioRef)
-		if errLoad != nil {
-			slog.Error("Failed to load scenario from store", "urn", scenarioRef, "error", errLoad)
-			return fmt.Errorf("scenario store load failed: %w", errLoad)
-		}
-
-		safeName, errImport := sc.Import(context.Background(), content, false)
-		if errImport != nil {
-			slog.Error("Failed to import stored scenario", "urn", scenarioRef, "error", errImport)
-			return fmt.Errorf("bootstrap scenario import failed: %w", errImport)
-		}
-
-		if errActivate := sc.Activate(context.Background(), safeName); errActivate != nil {
-			slog.Error("Failed to activate stored scenario", "name", safeName, "error", errActivate)
-			return fmt.Errorf("bootstrap scenario activation failed: %w", errActivate)
-		}
-		slog.Info("Stored scenario activated", "name", safeName, "urn", scenarioRef)
 	}
 
-	// 11. Start Janitor (Retention)
-	janitorLogger := loggerPkg.WithComponent(slog.Default(), loggerPkg.TypeMixer, "janitor")
-	janitor := telemetry.NewJanitor(janitorLogger, filepath.Join(storeDir, "telemetry"), cfg.Observability.Embedded.RetentionDays)
-	janitorContext, cancelJanitor := context.WithCancel(context.Background())
-	defer cancelJanitor()
-	janitor.Start(janitorContext)
+	// 9. Start Router
+	if errRun := r.Router.Run(ctx); errRun != nil {
+		return fmt.Errorf("router failed: %w", errRun)
+	}
 
-	// 11. Metrics Cache (In-Memory) - Initialized earlier
-	// metricsCache := telemetry.NewMetricsCache()
-
-	srv := fluxapi.NewServer(reg, router.Pub, ck, sc, metricsCache, mixerEntityID, cfg)
-	go func() {
-		if err := srv.Start(fmt.Sprintf(":%d", cfg.API.Port)); err != nil {
-			slog.Error("server failed", "error", err)
-			os.Exit(1)
-		}
-	}()
-
-	slog.Info("Mixer is ready")
-
-	// Graceful Shutdown
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
-	sig := <-stop
-	slog.Info("Shutting down Mixer...", "signal", sig)
 	return nil
-}
-
-func (a *App) resumeEntitySequence(store *duckdb.Store, machineID uint16, idGen *idgen.IDGenerator) {
-	var maxSeq uint64
-	var count int
-	if err := store.DB().QueryRowContext(context.Background(), "SELECT COUNT(*) FROM registry").Scan(&count); err != nil {
-		slog.Warn("Failed to count registry", "error", err)
-	}
-
-	row := store.DB().QueryRowContext(context.Background(),
-		"SELECT COALESCE(MAX(entity_id & 1099511627775), 0) FROM registry WHERE (entity_id >> 40) & 65535 = ?",
-		machineID)
-	if err := row.Scan(&maxSeq); err != nil {
-		slog.Warn("Failed to query max sequence", "error", err)
-	}
-	slog.Info("EntityID Resumption", "found_count", count, "resumed_seq", maxSeq, "machine_id", machineID)
-	if maxSeq > 0 {
-		idGen.SetSequence(maxSeq)
-	}
-}
-
-func (a *App) initTelemetry(url string, eid uint64, name string, idGen *idgen.IDGenerator, store *duckdb.Store, router *routerPkg.RouterWrapper, storeDir string, cfg *config.MixerConfig, cache *telemetry.MetricsCache) (func(context.Context) error, func() error) {
-	telBus := bus.NewNatsBus("flux-telemetry") // Explicit Telemetry Stream
-
-	err := telBus.Connect(url, bus.ConnectOptions{
-		Name:           "mixer-telemetry",
-		ConnectTimeout: 5 * time.Second,
-		ReconnectWait:  1 * time.Second,
-		RootCA:         cfg.Snake.RootCAFile,
-	})
-	if err != nil {
-		slog.Warn("Failed to connect telemetry bus", "error", err)
-		return nil, nil
-	}
-
-	// We must close telBus manually if we don't return a cleanup, but here we return cleanup.
-	// Actually, Initialize returns shutdownTelemetry which is good.
-
-	bufHandler := telemetry.NewBufferHandler(slog.Default().Handler())
-	// NOTE: slog.Default should be the buffer logger from main, but here we are re-wrapping.
-	// ideally we pass bufHandler from main, but for now let's assume global slog is set up.
-
-	telCfg := telemetry.Config{
-		ServiceName:         cfg.Telemetry.ServiceName,
-		ServiceVersion:      version.Version,
-		EntityID:            eid,
-		EntityName:          name,
-		BatchIntervalString: cfg.Telemetry.BatchInterval,
-		MaxBatchSize:        cfg.Telemetry.MaxBatchSize,
-		BaseSubject:         cfg.Telemetry.BaseSubject,
-		Component:           string(loggerPkg.TypeMixer),
-		Logging:             cfg.Logging,
-		Store:               cfg.Store,
-		StdoutEnabled:       true,
-		StdoutLevel:         "info",
-		Metrics: telemetry.MetricsConfig{
-			HostEnabled:    cfg.Telemetry.Metrics.HostEnabled,
-			RuntimeEnabled: cfg.Telemetry.Metrics.RuntimeEnabled,
-			BentoEnabled:   cfg.Telemetry.Metrics.BentoEnabled,
-		},
-	}
-
-	shutdownTelemetry, err := telemetry.Init(context.Background(), telCfg, telBus, bufHandler, idGen)
-	if err != nil {
-		slog.Info("Failed to initialize telemetry", "error", err)
-		telBus.Close()
-		return nil, nil
-	}
-
-	// Update Global Logger with Attributes
-	l := slog.Default().With(
-		"component", string(loggerPkg.TypeMixer),
-		"name", name,
-	)
-	slog.SetDefault(l)
-	slog.Info("Telemetry Initialized")
-
-	// Start Telemetry Sink
-	flushInterval, _ := time.ParseDuration(cfg.Ingest.FlushInterval)
-	sink := ingest.NewTelemetrySink(telBus, store, filepath.Join(storeDir, "telemetry"), flushInterval, cache)
-
-	stopSink := func() error {
-		err := sink.Stop()
-		telBus.Close()
-		return err
-	}
-
-	if err := sink.Start(); err != nil {
-		slog.Error("Failed to start telemetry sink", "error", err)
-		_ = stopSink() // cleanup
-		return shutdownTelemetry, nil
-	}
-
-	slog.Info("Telemetry Sink Started", "flush_interval", flushInterval.String())
-	return shutdownTelemetry, stopSink
-}
-
-func (a *App) startSnakeStats(snakeSrv *snake.Server, store *duckdb.Store, idGen *idgen.IDGenerator, mixerName string, mixerEntityID uint64, cfg *config.MixerConfig) {
-	// We map NATS Connection ID (CID) -> Snake EntityID
-	snakeSessions := make(map[uint64]uint64)
-
-	go func() {
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
-		for range ticker.C {
-			clients, err := snakeSrv.Clients()
-			if err != nil {
-				slog.Debug("Failed to get snake clients", "error", err)
-				continue
-			}
-
-			// Map CIDs to Clients for fast lookup
-			clientMap := make(map[uint64]snake.ClientInfo)
-			for _, c := range clients {
-				clientMap[c.CID] = c
-			}
-
-			// 1. Process Active Connections
-			for _, c := range clients {
-				slog.Debug("Snake discovery tick: processing client", "cid", c.CID, "name", c.Name, "ip", c.IP)
-				currentEID, known := snakeSessions[c.CID]
-
-				if !known {
-					if c.Name == mixerName || c.Name == "" {
-						slog.Debug("Skipping internal Mixer or anonymous connection", "name", c.Name)
-						continue
-					}
-
-					rackID, err := store.GetEntityIDByName(context.Background(), c.Name)
-					if err != nil {
-						slog.Debug("Could not find registry entry for NATS client", "name", c.Name, "error", err)
-						continue
-					}
-
-					snakeName := fmt.Sprintf("snake-%s", c.Name)
-					eid, err := store.GetEntityIDByName(context.Background(), snakeName)
-					if err != nil {
-						eid = idGen.NextEntityID(idgen.EntitySnake)
-					}
-
-					mixerIP := "127.0.0.1"
-					mixerPort := cfg.Snake.Port
-					if u, err := url.Parse(snakeSrv.ClientURL()); err == nil {
-						h, pStr, err := net.SplitHostPort(u.Host)
-						if err == nil && h != "" && h != "0.0.0.0" {
-							mixerIP = h
-						}
-						if p, err := strconv.Atoi(pStr); err == nil {
-							mixerPort = p
-						}
-					}
-
-					if err := store.RegisterSnake(context.Background(), snakeName, eid, version.Version, rackID, uint64(mixerEntityID), c.IP, c.Port, mixerIP, mixerPort, cfg.Mixer.MachineID); err != nil {
-						slog.Info("Failed to register snake", "name", snakeName, "error", err)
-						continue
-					}
-					snakeSessions[c.CID] = eid
-					currentEID = eid
-				}
-
-				stats := map[string]any{
-					"in_msgs":   c.InMsgs,
-					"out_msgs":  c.OutMsgs,
-					"in_bytes":  c.InBytes,
-					"out_bytes": c.OutBytes,
-					"uptime":    c.Uptime,
-				}
-				if err := store.UpdateSnakeStats(context.Background(), currentEID, stats); err != nil {
-					slog.Debug("Failed to update snake stats", "eid", currentEID, "error", err)
-				}
-			}
-
-			// 2. Prune Dead Sessions
-			eidRefs := make(map[uint64]int)
-			for cid, eid := range snakeSessions {
-				if _, active := clientMap[cid]; active {
-					eidRefs[eid]++
-				}
-			}
-
-			for cid, eid := range snakeSessions {
-				if _, active := clientMap[cid]; !active {
-					if eidRefs[eid] == 0 {
-						slog.Info("Pruning Dead Snake Entity", "eid", eid)
-						if err := store.RemoveSnake(context.Background(), eid); err != nil {
-							slog.Info("Failed to remove dead snake", "eid", eid, "error", err)
-						}
-					}
-					delete(snakeSessions, cid)
-				}
-			}
-		}
-	}()
 }

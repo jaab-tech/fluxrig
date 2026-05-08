@@ -7,81 +7,32 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"github.com/google/uuid"
 )
 
-// Rack represents a registered node in the cluster.
+var (
+	ErrNotFound     = errors.New("entity not found")
+	ErrNameConflict = errors.New("entity name already exists")
+)
+
+// Rack represents a physical or virtual compute node.
 type Rack struct {
-	MachineID uint16    `json:"machine_id"`
-	Name      string    `json:"name"`
-	Status    string    `json:"status"` // active, pending, offline
-	Version   string    `json:"version"`
-	IP        string    `json:"ip"`
-	Port      int       `json:"port"` // Added: Support NAT/Localhost
-	FirstSeen time.Time `json:"first_seen"`
-	LastSeen  time.Time `json:"last_seen"`
-	// Statistics (Transient/Snapshot)
-	Stats map[string]any `json:"stats"`
-
-	// Configuration (Runtime)
-	Config map[string]any `json:"config"`
-
-	// Security
-	Secret string `json:"-"` // Internal only, do not expose in API
+	MachineID   uuid.UUID      `json:"machine_id"`
+	Name        string         `json:"name"`
+	Status      string         `json:"status"` // pending, active, offline
+	Version     string         `json:"version"`
+	IP          string         `json:"ip"`
+	Port        int            `json:"port"`
+	Secret      string         `json:"secret"`
+	FirstSeen   time.Time      `json:"first_seen"`
+	LastSeen    time.Time      `json:"last_seen"`
+	UpdateCount int            `json:"update_count"`
+	Stats       map[string]any `json:"stats"`
+	Config      map[string]any `json:"config"`
 }
 
-// Registry defines the contract for managing Rack identities.
-type Registry interface {
-	// Register handles the initial connection of a Rack.
-	// If name is empty or reserved prefix "node-", it is treated as ephemeral/pending.
-	// Returns the assigned MachineID and Name.
-	// Validates secret if provided. Generates new secret if new enrollment.
-	Register(ctx context.Context, name string, secret string, ip string, port int, version string, config map[string]any, mixerID uint64) (*Rack, error)
-
-	// Approve adopts a pending Rack by assigning it a permanent name.
-	Approve(ctx context.Context, machineID uint16, newName string) (*Rack, error)
-
-	// List returns all Racks matching the status filter (empty = all).
-	List(ctx context.Context, status string) ([]*Rack, error)
-
-	// Get retrieves a single rack by ID.
-	Get(ctx context.Context, machineID uint16) (*Rack, error)
-
-	// Heartbeat updates the last_seen timestamp and transient stats.
-	Heartbeat(ctx context.Context, machineID uint16, stats map[string]any, config map[string]any) error
-
-	// Remove deletes a rack from the registry.
-	Remove(ctx context.Context, machineID uint16) error
-
-	// UpdateStatus changes the status of a rack (e.g. suspend/activate).
-	UpdateStatus(ctx context.Context, machineID uint16, status string) error
-
-	// SetAutoAdopt enables or disables automatic activation of new Racks.
-	SetAutoAdopt(enabled bool)
-
-	// Telemetry Queries
-	QueryLogs(ctx context.Context, query LogQuery) ([]LogEntry, error)
-	QueryMetrics(ctx context.Context, query MetricQuery) ([]MetricEntry, error)
-}
-
-// LogQuery defines filters for querying logs.
-type LogQuery struct {
-	Limit      int       `json:"limit"`
-	MinLevel   string    `json:"min_level"`   // DEBUG, INFO, WARN, ERROR
-	EntityName string    `json:"entity_name"` // Exact match or prefix? Store implements glob/like.
-	Since      time.Time `json:"since"`       // Start time
-	Until      time.Time `json:"until"`       // End time
-}
-
-// MetricQuery defines filters for querying metrics.
-type MetricQuery struct {
-	Limit      int       `json:"limit"`
-	Name       string    `json:"name"`        // Metric name
-	EntityName string    `json:"entity_name"` // Entity name
-	Since      time.Time `json:"since"`       // Start time
-	Until      time.Time `json:"until"`       // End time
-}
-
-// LogEntry represents a log record from telemetry.
+// LogEntry represents a single telemetry log.
 type LogEntry struct {
 	Timestamp  time.Time      `json:"timestamp"`
 	EntityName string         `json:"entity_name"`
@@ -90,7 +41,7 @@ type LogEntry struct {
 	Attributes map[string]any `json:"attributes"`
 }
 
-// MetricEntry represents a metric point.
+// MetricEntry represents a single telemetry metric.
 type MetricEntry struct {
 	Timestamp  time.Time      `json:"timestamp"`
 	EntityName string         `json:"entity_name"`
@@ -100,7 +51,55 @@ type MetricEntry struct {
 	Attributes map[string]any `json:"attributes"`
 }
 
-var (
-	ErrNameConflict = errors.New("rack name already taken")
-	ErrNotFound     = errors.New("rack not found")
-)
+// LogQuery defines filters for retrieving logs.
+type LogQuery struct {
+	Limit      int
+	EntityName string
+	MinLevel   string
+	Since      time.Time
+	Until      time.Time
+}
+
+// MetricQuery defines filters for retrieving metrics.
+type MetricQuery struct {
+	Limit      int
+	EntityName string
+	Name       string
+	Since      time.Time
+	Until      time.Time
+}
+
+// RegistryScenario represents an orchestrated workflow in the registry.
+type RegistryScenario struct {
+	EntityID  uuid.UUID `json:"entity_id"`
+	Name      string    `json:"name"`
+	Version   string    `json:"version"`
+	GearCount int       `json:"gear_count"`
+	WireCount int       `json:"wire_count"`
+	Active    bool      `json:"active"`
+}
+
+// Registry defines the contract for identity and telemetry persistence.
+type Registry interface {
+	// Identity & Enrollment
+	Register(ctx context.Context, machineID uuid.UUID, name string, secret string, ip string, port int, version string, config map[string]any, mixerID uuid.UUID) (*Rack, error)
+	RegisterEntity(ctx context.Context, typeID uint8, machineID uuid.UUID, name string, secret string, ip string, port int, version string, config map[string]any, attrs map[string]any, mixerID uuid.UUID) (*Rack, error)
+	Approve(ctx context.Context, id uuid.UUID, newName string) (*Rack, error)
+	List(ctx context.Context, status string) ([]*Rack, error)
+	Get(ctx context.Context, id uuid.UUID) (*Rack, error)
+	Heartbeat(ctx context.Context, id uuid.UUID, stats map[string]any, config map[string]any) error
+	HeartbeatEntity(ctx context.Context, typeID uint8, id uuid.UUID, stats map[string]any, config map[string]any) error
+	Remove(ctx context.Context, id uuid.UUID) error
+	RemoveByName(ctx context.Context, name string) error
+	RemoveEntity(ctx context.Context, typeID uint8, id uuid.UUID) error
+	UpdateStatus(ctx context.Context, id uuid.UUID, status string) error
+	UpdateStatusEntity(ctx context.Context, typeID uint8, id uuid.UUID, status string) error
+	SetAutoAdopt(enabled bool)
+
+	// Telemetry Queries
+	QueryLogs(ctx context.Context, q LogQuery) ([]LogEntry, error)
+	QueryMetrics(ctx context.Context, q MetricQuery) ([]MetricEntry, error)
+
+	// Maintenance
+	ClearScenarioEntities(ctx context.Context) error
+}

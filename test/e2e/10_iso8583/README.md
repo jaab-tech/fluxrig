@@ -18,7 +18,7 @@ The regression suite (`run.sh`) executes a **7-phase validation matrix**, where 
 | **9** | **Trace Logging** | Verify **Observability**. Checks that trace logs are emitted with correct metadata (flux_id, MTI). |
 
 ### Integrated Gateway Topology
-In this architecture, FluxRig acts as a Gateway, receiving traffic on one port and relaying it to an upstream host (Mock Server).
+In this architecture, fluxrig acts as a Gateway, receiving traffic on one port and relaying it to an upstream host (Mock Server).
 
 #### Basic Topology (I/O Only)
 Used for stateless routing or load balancing.

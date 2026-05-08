@@ -10,30 +10,31 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jaab-tech/fluxrig/pkg/bus"
-	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
-	"github.com/jaab-tech/fluxrig/pkg/idgen"
-
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
 	otellog "go.opentelemetry.io/otel/log"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.opentelemetry.io/otel/sdk/trace"
+
+	"github.com/jaab-tech/fluxrig/pkg/bus"
+	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
+	"github.com/jaab-tech/fluxrig/pkg/idgen"
 )
 
 // NatsWriter implements the io.Writer interface for JSON logs,
 // but also provides methods for Spans and Metrics.
 type NatsWriter struct {
 	bus         bus.Bus
-	entityID    uint64
+	entityID    uuid.UUID
 	entityName  string
 	baseSubject string
 	gen         *idgen.IDGenerator
 	timeout     time.Duration
 }
 
-func NewNatsWriter(b bus.Bus, entityID uint64, entityName, baseSubject string, gen *idgen.IDGenerator, timeout time.Duration) *NatsWriter {
+func NewNatsWriter(b bus.Bus, entityID uuid.UUID, entityName, baseSubject string, gen *idgen.IDGenerator, timeout time.Duration) *NatsWriter {
 	if timeout == 0 {
 		timeout = 500 * time.Millisecond
 	}
@@ -68,18 +69,18 @@ func (w *NatsWriter) Write(p []byte) (n int, err error) {
 	record["entity_id"] = w.entityID
 	record["entity_name"] = w.entityName
 
-	data, err := json.Marshal(record)
-	if err != nil {
-		return 0, err
-	}
-
 	msg := fluxmsg.New()
 	msg.FluxID, _ = w.gen.NextFluxID()
-	msg.Data = map[string]any{"record": json.RawMessage(data)}
+	msg.Data = map[string]any{"record": record}
 	msg.Metadata["type"] = "telemetry.log.json"
 	msg.Metadata["scope"] = "telemetry"
 
-	if err := w.bus.Publish(context.Background(), w.baseSubject+".logs.json", msg); err != nil {
+	entityName := w.entityName
+	if entityName == "" {
+		entityName = "unknown"
+	}
+
+	if err := w.bus.Publish(context.Background(), w.baseSubject+"."+entityName+".logs.json", msg); err != nil {
 		return 0, err
 	}
 	return len(p), nil
@@ -113,6 +114,9 @@ func (e *SpanExporter) ExportSpans(ctx context.Context, spans []trace.ReadOnlySp
 		}
 		if span.Parent().IsValid() {
 			s["parent_span_id"] = span.Parent().SpanID().String()
+			slog.Debug("SpanExporter: Exporting linked span", "name", span.Name(), "span_id", s["span_id"], "parent_span_id", s["parent_span_id"])
+		} else {
+			slog.Debug("SpanExporter: Exporting ROOT span (no parent)", "name", span.Name(), "span_id", s["span_id"])
 		}
 		s["attributes"] = attributeToMap(span.Attributes())
 		batchedPayload = append(batchedPayload, s)
@@ -126,8 +130,15 @@ func (e *SpanExporter) ExportSpans(ctx context.Context, spans []trace.ReadOnlySp
 
 	// QoS: Strict timeout for telemetry
 	exportCtx, cancel := context.WithTimeout(ctx, e.timeout)
-	err := e.bus.Publish(exportCtx, e.baseSubject+".spans", msg)
+	entityName := e.entityName
+	if entityName == "" {
+		entityName = "unknown"
+	}
+	err := e.bus.Publish(exportCtx, e.baseSubject+"."+entityName+".spans", msg)
 	cancel()
+	if err == nil {
+		slog.Debug("Telemetry: Spans exported successfully", "count", len(spans), "subject", e.baseSubject+"."+entityName+".spans")
+	}
 	return err
 }
 
@@ -177,7 +188,11 @@ func (e *LogExporter) Export(ctx context.Context, records []sdklog.Record) error
 
 	// QoS: Strict timeout for telemetry
 	exportCtx, cancel := context.WithTimeout(ctx, e.timeout)
-	err := e.bus.Publish(exportCtx, e.baseSubject+".logs", msg)
+	entityName := e.entityName
+	if entityName == "" {
+		entityName = "unknown"
+	}
+	err := e.bus.Publish(exportCtx, e.baseSubject+"."+entityName+".logs", msg)
 	cancel()
 	return err
 }
@@ -196,6 +211,7 @@ func NewMetricExporter(w *NatsWriter) *MetricExporter {
 }
 
 func (e *MetricExporter) Export(ctx context.Context, metrics *metricdata.ResourceMetrics) error {
+	slog.Debug("MetricExporter: Export called", "scope_metrics_count", len(metrics.ScopeMetrics))
 	for _, scopeMetrics := range metrics.ScopeMetrics {
 		for _, m := range scopeMetrics.Metrics {
 			points := resolvePoints(m)
@@ -209,14 +225,31 @@ func (e *MetricExporter) Export(ctx context.Context, metrics *metricdata.Resourc
 			}
 
 			for _, p := range points {
+				// 1. Merge resource attributes as defaults (don't overwrite data point attributes)
 				for k, v := range idAttrs {
-					p.Attributes[k] = v
+					if _, exists := p.Attributes[k]; !exists {
+						p.Attributes[k] = v
+					}
+				}
+
+				// 2. Resolve Dynamic Identity (from attributes)
+				finalID := e.entityID
+				if idVal, ok := p.Attributes["flux.id"].(string); ok {
+					if uid, err := uuid.Parse(idVal); err == nil {
+						finalID = uid
+					}
+				}
+
+				finalName := e.entityName
+				if nameVal, ok := p.Attributes["flux.name"].(string); ok {
+					finalName = nameVal
 				}
 
 				payload := map[string]interface{}{
+					"timestamp":   p.LinkTime.UnixMicro(),
 					"attributes":  p.Attributes,
-					"entity_id":   e.entityID,
-					"entity_name": e.entityName,
+					"entity_id":   finalID,
+					"entity_name": finalName,
 					"name":        m.Name + p.Suffix,
 					"value":       p.Value,
 				}
@@ -228,12 +261,13 @@ func (e *MetricExporter) Export(ctx context.Context, metrics *metricdata.Resourc
 				msg.Metadata["metric.name"] = m.Name + p.Suffix
 
 				exportCtx, cancel := context.WithTimeout(ctx, e.timeout)
-				err := e.bus.Publish(exportCtx, e.baseSubject+".metrics", msg)
+				entityName := e.entityName
+				if entityName == "" {
+					entityName = "unknown"
+				}
+				_ = e.bus.Publish(exportCtx, e.baseSubject+"."+entityName+".metrics", msg)
 				cancel()
 
-				if err != nil {
-					slog.Debug("Failed to publish metric (QoS Drop)", "name", m.Name, "error", err)
-				}
 			}
 		}
 	}

@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/google/uuid"
+
 	"github.com/jaab-tech/fluxrig/pkg/bus"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/jaab-tech/fluxrig/pkg/idgen"
@@ -75,28 +77,30 @@ func JoinKeys(parts ...string) string {
 	return strings.Join(parts, "_")
 }
 
-// NewMockGearContext creates a minimal context for unit testing Gears.
 func NewMockGearContext(config map[string]any) GearContext {
-	idGen, _ := idgen.New(1)
+	mid := uuid.New()
+	idGen, _ := idgen.New(mid)
 	return &mockGearContext{
-		ctx:    context.Background(),
-		config: config,
-		logger: slog.Default(),
-		idGen:  idGen,
+		ctx:       context.Background(),
+		config:    config,
+		logger:    slog.Default(),
+		idGen:     idGen,
+		machineID: mid,
 	}
 }
 
 type mockGearContext struct {
-	ctx    context.Context
-	config map[string]any
-	logger *slog.Logger
-	idGen  *idgen.IDGenerator
+	ctx       context.Context
+	config    map[string]any
+	logger    *slog.Logger
+	idGen     *idgen.IDGenerator
+	machineID uuid.UUID
 }
 
 func (m *mockGearContext) Context() context.Context { return m.ctx }
 func (m *mockGearContext) Config() map[string]any   { return m.config }
 func (m *mockGearContext) GearName() string         { return "mock_gear" }
-func (m *mockGearContext) MachineID() uint64        { return 1 }
+func (m *mockGearContext) MachineID() uuid.UUID     { return m.machineID }
 func (m *mockGearContext) Logger() *slog.Logger     { return m.logger }
 func (m *mockGearContext) IDGen() IDGenerator       { return m.idGen }
 func (m *mockGearContext) Bus() bus.Bus             { return nil } // Mock bus not needed for basic tests

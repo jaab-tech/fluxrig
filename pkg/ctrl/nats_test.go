@@ -4,6 +4,7 @@
 package ctrl
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -15,7 +16,7 @@ import (
 
 func TestNATSControlPlane(t *testing.T) {
 	// 1. Start Snake (ephemeral NATS)
-	s, err := snake.NewServer(snake.Config{
+	s, err := snake.NewServer(context.Background(), snake.Config{
 		Port:        -1,
 		ClusterName: "ctrl-test",
 		StoreDir:    t.TempDir(),
@@ -78,7 +79,7 @@ func TestNATSControlPlane(t *testing.T) {
 
 func TestNATSControlPlane_Error(t *testing.T) {
 	// Start Snake (ephemeral NATS)
-	s, err := snake.NewServer(snake.Config{
+	s, err := snake.NewServer(context.Background(), snake.Config{
 		Port:        -1,
 		ClusterName: "ctrl-error-test",
 		StoreDir:    t.TempDir(),

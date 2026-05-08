@@ -7,6 +7,8 @@ import (
 	"context"
 	"log/slog"
 
+	"github.com/google/uuid"
+
 	"github.com/jaab-tech/fluxrig/pkg/bus"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/jaab-tech/fluxrig/pkg/idgen"
@@ -15,8 +17,8 @@ import (
 
 // IDGenerator defines the contract for generating unique IDs.
 type IDGenerator interface {
-	NextFluxID() (uint64, error)
-	NextEntityID(etype idgen.EntityType) uint64
+	NextFluxID() (uuid.UUID, error)
+	NextEntityID(etype idgen.EntityType) uuid.UUID
 }
 
 // GearContext provides the initialization context for a Gear.
@@ -32,7 +34,7 @@ type GearContext interface {
 	GearName() string
 
 	// MachineID returns the unique ID of the host Rack
-	MachineID() uint64
+	MachineID() uuid.UUID
 
 	// Logger returns a structured logger scoped to this gear
 	Logger() *slog.Logger

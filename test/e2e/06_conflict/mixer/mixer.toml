@@ -1,3 +1,6 @@
+[base]
+name = "mixer-e2e"
+
 [logging]
 level = "debug"
 filename = "logs/mixer.log"
@@ -12,7 +15,7 @@ url = "nats://localhost:4223"
 
 [store]
 dir = "./data"
-database_file = "fluxrig_test.duckdb"
+database_file = "flux.duckdb"
 cluster_key_file = "cluster.key"
 
 

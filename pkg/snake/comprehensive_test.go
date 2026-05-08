@@ -4,6 +4,7 @@
 package snake_test
 
 import (
+	"context"
 	"os"
 	"testing"
 	"time"
@@ -28,7 +29,7 @@ func TestServer_Observability(t *testing.T) {
 		StreamSubjects: []string{"obs.>"},
 	}
 
-	srv, err := snake.NewServer(cfg)
+	srv, err := snake.NewServer(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("Failed to start server: %v", err)
 	}

@@ -51,7 +51,7 @@ gears:
         # Input auto-wired via port "in"
         output:
           file:
-            path: "/tmp/flux_e2e_load_out.txt"
+            path: "/tmp/fluxrig_e2e_load_out.txt"
             codec: lines
 
 wires:

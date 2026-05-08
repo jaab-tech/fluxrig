@@ -4,96 +4,55 @@
 package idgen
 
 import (
-	"fmt"
 	"testing"
+
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestIDGenerator_FluxID(t *testing.T) {
-	machineID := uint16(10)
+	machineID := uuid.New()
 	gen, err := New(machineID)
-	if err != nil {
-		t.Fatalf("Failed to create generator: %v", err)
-	}
+	assert.NoError(t, err)
 
 	id, err := gen.NextFluxID()
-	if err != nil {
-		t.Fatalf("Failed to generate FluxID: %v", err)
-	}
+	assert.NoError(t, err)
 
-	// Verify Sonyflake structure (MachineID is lower 16 bits)
-	// Actually Sonyflake default is:
-	// 39 bits time | 8 bits seq | 16 bits machine
-	// So lowest 16 bits should be machineID
-	extractedMachineID := uint16(id & 0xFFFF) //nolint:gosec
-	if extractedMachineID != machineID {
-		t.Errorf("MachineID mismatch in FluxID. Got %d, want %d", extractedMachineID, machineID)
-	}
-
-	t.Logf("Generated FluxID: %d (Hex: %X)", id, id)
+	// Verify it's a UUID v7
+	assert.Equal(t, uuid.Version(7), id.Version())
 }
 
 func TestIDGenerator_EntityID(t *testing.T) {
-	machineID := uint16(55)
-	gen, err := New(machineID)
-	if err != nil {
-		t.Fatalf("Failed to create generator: %v", err)
-	}
+	machineID := uuid.MustParse("00000000-0000-0000-0000-112233445566")
+	gen, _ := New(machineID)
 
-	// Test case: Rack type, sequence 1
 	eType := EntityRack
-	seq := uint64(1)
+	eid := gen.NewEntityID(eType)
 
-	eid := gen.NewEntityID(eType, seq)
+	// Verify Version 7
+	assert.Equal(t, uuid.Version(7), eid.Version())
 
-	// Verify bits
-	// Type: Top 8 bits (63-56) => shift right 56
-	extractedType := EntityType(eid >> 56) //nolint:gosec
-	if extractedType != eType {
-		t.Errorf("Type mismatch. Got %d, want %d", extractedType, eType)
-	}
+	// Verify EntityType hint (byte 13)
+	assert.Equal(t, uint8(eType), eid[13])
 
-	// MachineID: Next 16 bits (55-40) => shift right 40, mask 0xFFFF
-	extractedMachine := uint16((eid >> 40) & 0xFFFF) //nolint:gosec
-	if extractedMachine != machineID {
-		t.Errorf("MachineID mismatch. Got %d, want %d", extractedMachine, machineID)
-	}
-
-	// Sequence: Bottom 40 bits => mask 0xFFFFFFFFFF
-	extractedSeq := eid & 0xFFFFFFFFFF
-	if extractedSeq != seq {
-		t.Errorf("Sequence mismatch. Got %d, want %d", extractedSeq, seq)
-	}
-
-	fmt.Printf("Entity ID (Rack, M:55, Seq:1): %X\n", eid)
+	// Verify machine_id hint (bytes 9-12)
+	assert.Equal(t, machineID[12], eid[9])
+	assert.Equal(t, machineID[13], eid[10])
+	assert.Equal(t, machineID[14], eid[11])
+	assert.Equal(t, machineID[15], eid[12])
 }
 
 func TestIDGenerator_NextEntityID(t *testing.T) {
-	gen, _ := New(1)
+	gen, _ := New(uuid.New())
 
-	// Default starts at 0, first call -> 1
 	id1 := gen.NextEntityID(EntityGear)
-	if (id1 & 0xFFFFFFFFFF) != 1 {
-		t.Errorf("Expected seq 1, got %d", id1&0xFFFFFFFFFF)
-	}
-
-	// Test SetSequence
-	gen.SetSequence(100)
-	id2 := gen.NextEntityID(EntityGear)
-	if (id2 & 0xFFFFFFFFFF) != 101 {
-		t.Errorf("Expected seq 101, got %d", id2&0xFFFFFFFFFF)
-	}
+	assert.Equal(t, uint8(EntityGear), id1[13])
 }
 
 func TestRandomSuffix(t *testing.T) {
 	s1 := RandomSuffix(4)
-	if len(s1) != 4 {
-		t.Errorf("Expected len 4, got %d", len(s1))
-	}
+	assert.Equal(t, 4, len(s1))
 	s2 := RandomSuffix(8)
-	if len(s2) != 8 {
-		t.Errorf("Expected len 8, got %d", len(s2))
-	}
-	if s1 == s2 {
-		t.Error("RandomSuffix returned duplicate (unlikely)")
-	}
+	assert.Equal(t, 8, len(s2))
+	assert.NotEqual(t, s1, s2)
 }

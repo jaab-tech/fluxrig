@@ -23,7 +23,7 @@ func TestLoadMixer_Defaults(t *testing.T) {
 	if cfg.Snake.Port != 4222 {
 		t.Errorf("Default Snake port mismatch: got %d", cfg.Snake.Port)
 	}
-	if cfg.Store.DatabaseFile != "fluxrig.duckdb" {
+	if cfg.Store.DatabaseFile != "flux.duckdb" {
 		t.Errorf("Default store database file mismatch: got %s", cfg.Store.DatabaseFile)
 	}
 }

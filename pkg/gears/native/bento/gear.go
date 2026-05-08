@@ -93,7 +93,7 @@ func (g *Gear) Init(ctx sdk.GearContext) error {
 
 	// 3. Register Unique Plugins
 	specIn := service.NewConfigSpec().
-		Summary("Reads messages from FluxRig internal bus.").
+		Summary("Reads messages from fluxrig internal bus.").
 		Field(service.NewStringField("name").Default("default"))
 
 	err := g.env.RegisterInput(g.inputType, specIn,
@@ -108,7 +108,7 @@ func (g *Gear) Init(ctx sdk.GearContext) error {
 	}
 
 	specOut := service.NewConfigSpec().
-		Summary("Writes messages to FluxRig internal bus.").
+		Summary("Writes messages to fluxrig internal bus.").
 		Field(service.NewStringField("name").Default("out"))
 
 	err = g.env.RegisterOutput(g.outputType, specOut,
@@ -196,7 +196,7 @@ func (g *Gear) Start(ctx context.Context, emit func(*fluxmsg.FluxMsg)) error {
 	return nil
 }
 
-// Process handles incoming messages from FluxRig (for Filter Mode).
+// Process handles incoming messages from fluxrig (for Filter Mode).
 func (g *Gear) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.FluxMsg, error) {
 	// Determine if we should push to Bento.
 	// If Bento is in "Processor Mode", it uses 'flux_in' which reads from inChan.
@@ -263,7 +263,7 @@ func (i *fluxInput) Read(ctx context.Context) (*service.Message, service.AckFunc
 			return nil, nil, service.ErrEndOfInput
 		}
 		bMsg := ToBentoMessage(msg)
-		i.g.logger.Debug("Bento Input Read", "id", msg.FluxID, "payload", string(msg.RawPayload))
+		i.g.logger.Info("Bento Input Read", "id", msg.FluxID, "payload", string(msg.RawPayload))
 		return bMsg, func(ctx context.Context, err error) error { return nil }, nil
 	case <-ctx.Done():
 		return nil, nil, service.ErrEndOfInput
@@ -284,7 +284,7 @@ func (o *fluxOutput) Write(ctx context.Context, msg *service.Message) error {
 
 	if o.g.emitFn != nil {
 		o.g.emitFn(fm)
-		o.g.logger.Debug("Bento Output Emitted", "id", fm.FluxID)
+		o.g.logger.Info("Bento Output Emitted", "id", fm.FluxID)
 	}
 	return nil
 }

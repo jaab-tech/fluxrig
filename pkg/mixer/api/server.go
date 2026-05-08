@@ -16,43 +16,40 @@ import (
 	"syscall"
 	"time"
 
-	"gopkg.in/yaml.v3"
-
 	"github.com/ThreeDotsLabs/watermill"
 	"github.com/ThreeDotsLabs/watermill/message"
-
-	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
-	"github.com/jaab-tech/fluxrig/pkg/registry"
-
 	"github.com/fxamacker/cbor/v2"
-
-	"github.com/jaab-tech/fluxrig/pkg/pki"
-	"github.com/jaab-tech/fluxrig/pkg/telemetry"
-	"github.com/jaab-tech/fluxrig/pkg/version"
-
+	"github.com/google/uuid"
 	httpSwagger "github.com/swaggo/http-swagger"
+	"gopkg.in/yaml.v3"
 
 	"github.com/jaab-tech/fluxrig/pkg/config"
 	"github.com/jaab-tech/fluxrig/pkg/controller"
+	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	_ "github.com/jaab-tech/fluxrig/pkg/mixer/api/docs" // Swagger docs
+	"github.com/jaab-tech/fluxrig/pkg/pki"
+	"github.com/jaab-tech/fluxrig/pkg/registry"
+	"github.com/jaab-tech/fluxrig/pkg/telemetry"
+	"github.com/jaab-tech/fluxrig/pkg/version"
 )
 
 type Server struct {
-	reg          registry.Registry
-	pub          message.Publisher
-	signer       *pki.ClusterKey
-	scenarioCtrl controller.ScenarioManager
-	metricsCache *telemetry.MetricsCache
-	mixerID      uint64
-	cfg          *config.MixerConfig
+	reg           registry.Registry
+	pub           message.Publisher
+	signer        *pki.ClusterKey
+	scenarioCtrl  controller.ScenarioManager
+	metricsCache  *telemetry.MetricsCache
+	mixerID       uuid.UUID
+	mixerEntityID uuid.UUID
+	cfg           *config.MixerConfig
 }
 
 func NewServer(reg registry.Registry, pub message.Publisher, signer *pki.ClusterKey,
 	sc controller.ScenarioManager, cache *telemetry.MetricsCache,
-	mixerID uint64, cfg *config.MixerConfig) *Server {
+	mixerID uuid.UUID, mixerEntityID uuid.UUID, cfg *config.MixerConfig) *Server {
 	return &Server{
 		reg: reg, pub: pub, signer: signer, scenarioCtrl: sc,
-		metricsCache: cache, mixerID: mixerID, cfg: cfg,
+		metricsCache: cache, mixerID: mixerID, mixerEntityID: mixerEntityID, cfg: cfg,
 	}
 }
 
@@ -136,8 +133,10 @@ func (s *Server) Start(addr string) error {
 // @Router /health [get]
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(HealthResponse{
-		Status:  "ok",
-		Version: version.String(),
+		Status:    "ok",
+		Version:   version.String(),
+		MachineID: s.mixerID,
+		EntityID:  s.mixerEntityID,
 	})
 }
 
@@ -164,6 +163,8 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 // @Param status query string false "Filter by status (active, pending, offline)"
 // @Success 200 {array} api.RackResponse
 // @Router /racks [get]
+// @externalDocs.description Node Architecture
+// @externalDocs.url https://fluxrig.org/docs/architecture/nodes
 func (s *Server) handleRacks(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		status := r.URL.Query().Get("status")
@@ -194,15 +195,19 @@ func (s *Server) handleRackAction(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
 	action := r.PathValue("action")
 
-	id, err := strconv.ParseUint(idStr, 10, 16)
-	if err != nil {
-		http.Error(w, "Invalid ID", http.StatusBadRequest)
-		return
-	}
+	id, err := uuid.Parse(idStr)
+	// If not a valid UUID, we'll try to use it as a Name in some actions (like DELETE)
+	isUUID := err == nil
 
-	// Handle DELETE /racks/{id}
+	// Handle DELETE /racks/{id} (where id could be Name)
 	if r.Method == http.MethodDelete && action == "" {
-		if err := s.reg.Remove(r.Context(), uint16(id)); err != nil {
+		if isUUID {
+			err = s.reg.Remove(r.Context(), id)
+		} else {
+			err = s.reg.RemoveByName(r.Context(), idStr)
+		}
+
+		if err != nil {
 			if err == registry.ErrNotFound {
 				http.Error(w, "Rack not found", http.StatusNotFound)
 				return
@@ -212,6 +217,11 @@ func (s *Server) handleRackAction(w http.ResponseWriter, r *http.Request) {
 		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"removed"}`))
+		return
+	}
+
+	if !isUUID {
+		http.Error(w, "Invalid UUID required for this action", http.StatusBadRequest)
 		return
 	}
 
@@ -230,7 +240,7 @@ func (s *Server) handleRackAction(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			rack, err := s.reg.Approve(r.Context(), uint16(id), req.Name)
+			rack, err := s.reg.Approve(r.Context(), id, req.Name)
 			if err != nil {
 				if err == registry.ErrNotFound {
 					http.Error(w, "Rack not found", http.StatusNotFound)
@@ -258,12 +268,12 @@ func (s *Server) handleRackAction(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// NOTIFY RACK
-			s.publishStatus(uint16(id), "active", "approved", passportBytes)
+			s.publishStatus(id, "active", "approved", passportBytes)
 			_ = json.NewEncoder(w).Encode(rack)
 			return
 
 		case "suspend":
-			if err := s.reg.UpdateStatus(r.Context(), uint16(id), "inactive"); err != nil {
+			if err := s.reg.UpdateStatus(r.Context(), id, "inactive"); err != nil {
 				if err == registry.ErrNotFound {
 					http.Error(w, "Rack not found", http.StatusNotFound)
 					return
@@ -272,7 +282,7 @@ func (s *Server) handleRackAction(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			var passportBytes []byte
-			if rack, err := s.reg.Get(r.Context(), uint16(id)); err == nil && s.signer != nil {
+			if rack, err := s.reg.Get(r.Context(), id); err == nil && s.signer != nil {
 				rackState := pki.RackState{
 					MixerID:     s.mixerID,
 					MachineID:   rack.MachineID,
@@ -289,13 +299,13 @@ func (s *Server) handleRackAction(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// NOTIFY RACK
-			s.publishStatus(uint16(id), "inactive", "suspended", passportBytes)
+			s.publishStatus(id, "inactive", "suspended", passportBytes)
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"status":"suspended"}`))
 			return
 
 		case "activate":
-			if err := s.reg.UpdateStatus(r.Context(), uint16(id), "active"); err != nil {
+			if err := s.reg.UpdateStatus(r.Context(), id, "active"); err != nil {
 				if err == registry.ErrNotFound {
 					http.Error(w, "Rack not found", http.StatusNotFound)
 					return
@@ -304,7 +314,7 @@ func (s *Server) handleRackAction(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			var passportBytes []byte
-			if rack, err := s.reg.Get(r.Context(), uint16(id)); err == nil && s.signer != nil {
+			if rack, err := s.reg.Get(r.Context(), id); err == nil && s.signer != nil {
 				rackState := pki.RackState{
 					MixerID:     s.mixerID,
 					MachineID:   rack.MachineID,
@@ -321,7 +331,7 @@ func (s *Server) handleRackAction(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// NOTIFY RACK
-			s.publishStatus(uint16(id), "active", "activated", passportBytes)
+			s.publishStatus(id, "active", "activated", passportBytes)
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"status":"activated"}`))
 			return
@@ -341,7 +351,7 @@ func (s *Server) handleRackAction(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// Get current rack to find status
-			rack, err := s.reg.Get(r.Context(), uint16(id))
+			rack, err := s.reg.Get(r.Context(), id)
 			if err != nil {
 				if err == registry.ErrNotFound {
 					http.Error(w, "Rack not found", http.StatusNotFound)
@@ -352,7 +362,7 @@ func (s *Server) handleRackAction(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// NOTIFY RACK
-			s.publishStatus(uint16(id), rack.Status, "set_log_level:"+req.Level, nil)
+			s.publishStatus(id, rack.Status, "set_log_level:"+req.Level, nil)
 
 			w.WriteHeader(http.StatusOK)
 			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "level": req.Level})
@@ -360,7 +370,7 @@ func (s *Server) handleRackAction(w http.ResponseWriter, r *http.Request) {
 
 		case "shutdown":
 			// Get current rack to find status
-			rack, err := s.reg.Get(r.Context(), uint16(id))
+			rack, err := s.reg.Get(r.Context(), id)
 			if err != nil {
 				if err == registry.ErrNotFound {
 					http.Error(w, "Rack not found", http.StatusNotFound)
@@ -371,7 +381,7 @@ func (s *Server) handleRackAction(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// NOTIFY RACK with "agent:shutdown" command
-			s.publishStatus(uint16(id), rack.Status, "agent:shutdown", nil)
+			s.publishStatus(id, rack.Status, "agent:shutdown", nil)
 
 			w.WriteHeader(http.StatusOK)
 			_ = json.NewEncoder(w).Encode(map[string]string{"status": "shutdown_command_sent"})
@@ -437,7 +447,9 @@ func (s *Server) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(logs)
+		if err := json.NewEncoder(w).Encode(logs); err != nil {
+			slog.Error("API: Encode Logs failed", "error", err)
+		}
 		return
 	}
 
@@ -467,7 +479,7 @@ func (s *Server) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 // @Description Returns cached metrics for a specific entity or all entities.
 // @Tags telemetry
 // @Produce json
-// @Param id query int false "Entity ID"
+// @Param id query string false "Entity ID"
 // @Success 200 {object} map[string]interface{}
 // @Router /entities/stats [get]
 func (s *Server) handleEntityStats(w http.ResponseWriter, r *http.Request) {
@@ -478,7 +490,7 @@ func (s *Server) handleEntityStats(w http.ResponseWriter, r *http.Request) {
 
 	idStr := r.URL.Query().Get("id")
 	if idStr != "" {
-		id, err := strconv.ParseUint(idStr, 10, 64)
+		id, err := uuid.Parse(idStr)
 		if err != nil {
 			http.Error(w, "Invalid ID", http.StatusBadRequest)
 			return
@@ -585,8 +597,6 @@ func (s *Server) handleScenarioActive(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleTopologyStatus returns the current synchronization status.
-// Queries registry for actual rack count.
 // handleTopologyStatus godoc
 // @Summary Topology Status
 // @Description Returns synchronization status of the fleet
@@ -604,16 +614,19 @@ func (s *Server) handleTopologyStatus(w http.ResponseWriter, r *http.Request) {
 		racksTotal = len(racks)
 	}
 
-	// Get active scenario version
+	// Get active scenario details
 	activeVer := "unknown"
+	activeScenario := "none"
 	if s.scenarioCtrl != nil {
 		activeVer = s.scenarioCtrl.CurrentVersion()
+		activeScenario = s.scenarioCtrl.CurrentName()
 	}
 
 	status := TopologyStatusResponse{
-		SyncStatus: "synchronized",
-		ActiveVer:  activeVer,
-		RacksTotal: racksTotal,
+		SyncStatus:     "synchronized",
+		ActiveScenario: activeScenario,
+		ActiveVer:      activeVer,
+		RacksTotal:     racksTotal,
 	}
 	_ = json.NewEncoder(w).Encode(status)
 }
@@ -660,12 +673,12 @@ func (s *Server) handleTopologyList(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(topology)
 }
 
-func (s *Server) publishStatus(id uint16, status string, cmd string, passport []byte) {
+func (s *Server) publishStatus(id uuid.UUID, status string, cmd string, passport []byte) {
 	if s.pub == nil {
 		return
 	}
 
-	topic := fmt.Sprintf("fluxrig.agent.notify.%d", id)
+	topic := fmt.Sprintf("flux.agent.notify.%s", id.String())
 
 	payload := map[string]any{
 		"status":   status,
@@ -674,8 +687,8 @@ func (s *Server) publishStatus(id uint16, status string, cmd string, passport []
 	}
 
 	fm := fluxmsg.New()
-	fm.FluxID = 0
-	fm.SrcGearID = 0
+	fm.FluxID = uuid.Nil
+	fm.SrcGearID = uuid.Nil
 	fm.Data = payload
 
 	b, err := cbor.Marshal(fm)
@@ -688,6 +701,6 @@ func (s *Server) publishStatus(id uint16, status string, cmd string, passport []
 	if err := s.pub.Publish(topic, msg); err != nil {
 		slog.Error("failed to publish notification", "topic", topic, "error", err)
 	} else {
-		slog.Info("Notification Sent", "id", id, "status", status)
+		slog.Info("Notification Sent", "id", id.String(), "status", status)
 	}
 }

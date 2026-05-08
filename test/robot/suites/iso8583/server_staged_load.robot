@@ -3,7 +3,7 @@ Documentation     ISO8583 Staged Multi-Phase Load Test
 ...               Demonstrates complex load scenarios with overlapping workers and varying traffic profiles.
 ...               Topology: [3x Load Gens] -> [Server Gear] -> (Loopback) -> [Server Gear] -> [3x Load Gens]
 Resource          ../../resources/common.resource
-Library           FluxRigLibrary
+Library           fluxrigLibrary
 Library           ISO8583Library
 Library           Collections
 Library           OperatingSystem
@@ -92,7 +92,7 @@ Teardown Server Suite
     # Allow filesystem sync / parquet flush
     Sleep    5s
     Run Keyword And Continue On Failure    Check Log For Errors    ${WORK_DIR}/rack/logs/fluxrig.log
-    Run Keyword And Continue On Failure    Check Log For Errors    ${WORK_DIR}/mixer/logs/mixer.log
+    Run Keyword And Continue On Failure    Check Log For Errors    ${WORK_DIR}/mixer/logs/process_stdout.log
     
     # Ensure results directory exists
     Create Directory    ${OUTPUT_DIR}

@@ -6,6 +6,7 @@ package config
 import (
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/knadh/koanf/parsers/toml"
 	"github.com/knadh/koanf/providers/env"
 	"github.com/knadh/koanf/providers/file"
@@ -14,79 +15,27 @@ import (
 
 // RackConfig defines the startup configuration for a Rack instance.
 type RackConfig struct {
+	Base      BaseConfig      `koanf:"base"`
 	Logging   LoggingConfig   `koanf:"logging"`
 	Store     StoreConfig     `koanf:"store"`
 	Rack      RackSettings    `koanf:"rack"`
 	Telemetry TelemetryConfig `koanf:"telemetry"`
-}
-
-// TelemetryConfig configures self-reporting metrics and logs.
-type TelemetryConfig struct {
-	ServiceName   string        `koanf:"service_name"`
-	BatchInterval string        `koanf:"batch_interval"`
-	BaseSubject   string        `koanf:"base_subject"`
-	MaxBatchSize  int           `koanf:"max_batch_size"`
-	Metrics       MetricsConfig `koanf:"metrics"`
-}
-
-type MetricsConfig struct {
-	HostEnabled    bool `koanf:"host_enabled"`
-	RuntimeEnabled bool `koanf:"runtime_enabled"`
-	BentoEnabled   bool `koanf:"bento_enabled"`
-}
-
-// LoggingConfig configures the local text logger.
-type LoggingConfig struct {
-	Level      string           `koanf:"level"`
-	Filename   string           `koanf:"filename"`
-	MaxSizeMB  int              `koanf:"max_size_mb"`
-	MaxBackups int              `koanf:"max_backups"`
-	Compress   bool             `koanf:"compress"`
-	Throttling ThrottlingConfig `koanf:"throttling"`
-}
-
-// StoreConfig configures persistent storage locations.
-type StoreConfig struct {
-	Dir            string `koanf:"dir"`
-	WALMaxSizeMB   int    `koanf:"wal_max_size_mb"`
-	StateFile      string `koanf:"state_file"`
-	DatabaseFile   string `koanf:"database_file"`
-	ClusterKeyFile string `koanf:"cluster_key_file"`
-}
-
-// ThrottlingConfig limits log volume.
-type ThrottlingConfig struct {
-	Enabled bool    `koanf:"enabled"`
-	Rate    float64 `koanf:"rate"`
-	Burst   int     `koanf:"burst"`
+	Snake     SnakeConfig     `koanf:"snake"`
 }
 
 // RackSettings defines identity and lifecycle timeouts.
 type RackSettings struct {
-	Name               string    `koanf:"name"`
 	NamePrefix         string    `koanf:"name_prefix"`
-	MachineID          uint16    `koanf:"machine_id"`
+	MachineID          uuid.UUID `koanf:"-"` // Runtime only: set via Passport or Mixer assignment
+	IP                 string    `koanf:"ip" example:"10.0.0.5"`
 	ConvergenceTimeout string    `koanf:"convergence_timeout"`
 	HandshakeInterval  string    `koanf:"handshake_interval"`
 	HeartbeatInterval  string    `koanf:"heartbeat_interval"`
 	CleanupTimeout     string    `koanf:"cleanup_timeout"`
 	EnrollmentTimeout  string    `koanf:"enrollment_timeout"`
-	Bus                BusConfig `koanf:"bus"`
-}
-
-// BusConfig configures the NATS client connection.
-type BusConfig struct {
-	URL                       string `koanf:"url"`
-	StreamName                string `koanf:"stream_name"`
-	Domain                    string `koanf:"domain"`
-	ConnectTimeout            string `koanf:"connect_timeout"`
-	ReconnectWait             string `koanf:"reconnect_wait"`
-	OperationTimeout          string `koanf:"operation_timeout"`
-	SubscriptionRetryWait     string `koanf:"subscription_retry_wait"`
-	SubscriptionRetryAttempts int    `koanf:"subscription_retry_attempts"`
-	ConvergenceDelay          string `koanf:"convergence_delay"`
-	RootCA                    string `koanf:"root_ca"`
-	InsecureSkipVerify        bool   `koanf:"insecure_skip_verify"`
+	EnrollmentInterval string    `koanf:"enrollment_interval"`
+	MaxHops            int       `koanf:"max_hops"`
+	MaxPayloadSize     int       `koanf:"max_payload_size"`
 }
 
 // LoadRack reads configuration from a TOML file and Environment Variables.
@@ -95,6 +44,9 @@ func LoadRack(path string) (*RackConfig, error) {
 	k := koanf.New(".")
 
 	// 1. Defaults
+	_ = k.Set("base.state_dir", "./data")
+	_ = k.Set("base.state_file", "rack.flux")
+
 	_ = k.Set("logging.level", "info")
 	_ = k.Set("logging.filename", "logs/fluxrig.log")
 	_ = k.Set("logging.max_size_mb", 100)
@@ -104,32 +56,35 @@ func LoadRack(path string) (*RackConfig, error) {
 	_ = k.Set("logging.throttling.rate", 500.0)
 	_ = k.Set("logging.throttling.burst", 50)
 
-	_ = k.Set("telemetry.service_name", "flux-rack")
+	_ = k.Set("telemetry.service_name", "flux.rack")
 	_ = k.Set("telemetry.batch_interval", "5s")
 	_ = k.Set("telemetry.base_subject", "flux.telemetry")
 	_ = k.Set("telemetry.max_batch_size", 512)
+	_ = k.Set("telemetry.stream_name", "flux-telemetry")
 
 	_ = k.Set("store.dir", "./data")
 	_ = k.Set("store.wal_max_size_mb", 500)
-	_ = k.Set("store.state_file", "state.flux")
 
 	_ = k.Set("rack.name_prefix", "node-")
-	_ = k.Set("rack.machine_id", 0)
 	_ = k.Set("rack.cleanup_timeout", "2s")
 	_ = k.Set("rack.convergence_timeout", "5s")
 	_ = k.Set("rack.handshake_interval", "500ms")
 	_ = k.Set("rack.heartbeat_interval", "30s")
-	_ = k.Set("rack.enrollment_timeout", "2s")
+	_ = k.Set("rack.enrollment_timeout", "15s")
+	_ = k.Set("rack.enrollment_interval", "2s")
+	_ = k.Set("rack.max_hops", 64)
+	_ = k.Set("rack.max_payload_size", 2*1024*1024) // 2MB
 
-	_ = k.Set("rack.bus.url", "nats://localhost:4222")
-	_ = k.Set("rack.bus.domain", "flux")
-	_ = k.Set("rack.bus.stream_name", "flux-msg")
-	_ = k.Set("rack.bus.connect_timeout", "10s")
-	_ = k.Set("rack.bus.reconnect_wait", "1s")
-	_ = k.Set("rack.bus.operation_timeout", "5s")
-	_ = k.Set("rack.bus.subscription_retry_wait", "200ms")
-	_ = k.Set("rack.bus.subscription_retry_attempts", 5)
-	_ = k.Set("rack.bus.convergence_delay", "100ms")
+	_ = k.Set("snake.url", "nats://localhost:4222")
+	_ = k.Set("snake.domain", "flux")
+	_ = k.Set("snake.stream_name", "flux-msg")
+	_ = k.Set("snake.connect_timeout", "10s")
+	_ = k.Set("snake.reconnect_wait", "1s")
+	_ = k.Set("snake.operation_timeout", "5s")
+	_ = k.Set("snake.subscription_retry_wait", "200ms")
+	_ = k.Set("snake.subscription_retry_attempts", 5)
+	_ = k.Set("snake.inactive_threshold", "30s")
+	_ = k.Set("snake.convergence_delay", "100ms")
 
 	// 2. Load from File
 	if path != "" {
@@ -138,19 +93,38 @@ func LoadRack(path string) (*RackConfig, error) {
 		}
 	}
 
-	// 3. Environment Variables (FLUX_ prefix)
+	// 3. Environment Variables (FLUXRIG_ prefix)
 	err := k.Load(env.Provider("FLUXRIG_", ".", func(s string) string {
 		s = strings.TrimPrefix(s, "FLUXRIG_")
 		s = strings.ToLower(s)
 
-		if strings.HasPrefix(s, "rack_bus_") {
-			return strings.Replace(s, "rack_bus_", "rack.bus.", 1)
+		if s == "trace" {
+			return "logging.trace"
+		}
+		if s == "debug" {
+			return "logging.debug"
+		}
+		if s == "disable_telemetry" {
+			return "telemetry.disabled"
+		}
+
+		if strings.HasPrefix(s, "snake_") {
+			return strings.Replace(s, "snake_", "snake.", 1)
+		}
+		if strings.HasPrefix(s, "rack_bus_") || strings.HasPrefix(s, "bus_") {
+			return "snake." + strings.TrimPrefix(strings.TrimPrefix(s, "rack_bus_"), "bus_")
 		}
 		if strings.HasPrefix(s, "rack_") {
 			return strings.Replace(s, "rack_", "rack.", 1)
 		}
 		if strings.HasPrefix(s, "logging_") {
 			return strings.Replace(s, "logging_", "logging.", 1)
+		}
+		if strings.HasPrefix(s, "base_") {
+			return strings.Replace(s, "base_", "base.", 1)
+		}
+		if strings.HasPrefix(s, "store_") {
+			return strings.Replace(s, "store_", "store.", 1)
 		}
 		return strings.Replace(s, "_", ".", -1)
 	}), nil)
@@ -159,9 +133,39 @@ func LoadRack(path string) (*RackConfig, error) {
 		return nil, err
 	}
 
+	// 4. Backward Compatibility: Map rack.bus to snake
+	if k.Exists("rack.bus.url") {
+		_ = k.Set("snake.url", k.String("rack.bus.url"))
+		if k.Exists("rack.bus.domain") {
+			_ = k.Set("snake.domain", k.String("rack.bus.domain"))
+		}
+		if k.Exists("rack.bus.stream_name") {
+			_ = k.Set("snake.stream_name", k.String("rack.bus.stream_name"))
+		}
+		if k.Exists("rack.bus.root_ca_file") {
+			_ = k.Set("snake.root_ca_file", k.String("rack.bus.root_ca_file"))
+		}
+		if k.Exists("rack.bus.insecure_skip_verify") {
+			_ = k.Set("snake.insecure_skip_verify", k.Bool("rack.bus.insecure_skip_verify"))
+		}
+	}
+
+	// Map store.state_file to base.state_file (Always override if store.state_file is present in File/Env)
+	if k.Exists("store.state_file") {
+		_ = k.Set("base.state_file", k.String("store.state_file"))
+	}
+
 	var cfg RackConfig
 	if err := k.Unmarshal("", &cfg); err != nil {
 		return nil, err
+	}
+
+	// 5. Final fallback for fields that don't map perfectly via koanf tags
+	if cfg.Base.Name == "" {
+		cfg.Base.Name = k.String("rack.name")
+	}
+	if cfg.Base.StateDir == "" {
+		cfg.Base.StateDir = k.String("store.dir")
 	}
 
 	return &cfg, nil

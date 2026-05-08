@@ -4,7 +4,7 @@
 # CLI & Admin E2E Test
 
 ## Objective
-Verify the FluxRig CLI's administrative capabilities, helper commands, and API interactions.
+Verify the fluxrig CLI's administrative capabilities, helper commands, and API interactions.
 
 ## Verifications
 

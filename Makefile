@@ -16,43 +16,60 @@ GOMODCACHE ?= $(shell pwd)/.gomod_cache
 export GOMODCACHE
 
 LDFLAGS := -w -s \
-	-extldflags "-Wl,-ld_classic" \
 	-X '$(MODULE_NAME)/pkg/version.Version=$(VERSION)' \
 	-X '$(MODULE_NAME)/pkg/version.Commit=$(COMMIT)' \
 	-X '$(MODULE_NAME)/pkg/version.BuildDate=$(DATE)' \
 	-X '$(MODULE_NAME)/pkg/version.Dirty=$(DIRTY)'
 
-.PHONY: all build test lint clean help catalog
+ifeq ($(shell uname -s),Darwin)
+	LDFLAGS += -extldflags=-Wl,-w
+endif
+
+.PHONY: all build build-bin test lint clean distclean help catalog
 
 all: lint test build
 
-build: lint catalog openapi iso8583-tool ## Build fluxrig binary
-	@echo "--------------------------------------------------"
+# Binary-specific targets to allow parallel builds (make -j)
+bin/fluxrig: catalog $(shell find cmd/fluxrig -name "*.go")
 	@echo "Building fluxrig..."
-	@echo "  Version:  $(VERSION)"
-	@echo "  Commit:   $(COMMIT)"
-	@echo "  Date:     $(DATE)"
-	@echo "  Dirty:    $(DIRTY)"
-	@echo "--------------------------------------------------"
-	mkdir -p bin
+	@mkdir -p bin
 	go build $(GO_FLAGS) -ldflags "$(LDFLAGS)" -o bin/fluxrig ./cmd/fluxrig
+
+bin/fluxrig-mixer: catalog openapi $(shell find cmd/fluxrig-mixer -name "*.go")
+	@echo "Building fluxrig-mixer..."
+	@mkdir -p bin
 	go build $(GO_FLAGS) -ldflags "$(LDFLAGS)" -o bin/fluxrig-mixer ./cmd/fluxrig-mixer
 
-build-bin: catalog openapi ## Build fluxrig binary without linting
-	@echo "--------------------------------------------------"
-	@echo "Building fluxrig (No Lint)..."
-	@echo "--------------------------------------------------"
-	mkdir -p bin
-	go build $(GO_FLAGS) -ldflags "$(LDFLAGS)" -o bin/fluxrig ./cmd/fluxrig
-	go build $(GO_FLAGS) -ldflags "$(LDFLAGS)" -o bin/fluxrig-mixer ./cmd/fluxrig-mixer
+bin/iso8583-tool: cmd/iso8583-tool/main.go
+	@echo "Building iso8583-tool..."
+	@mkdir -p bin
+	go build -o bin/iso8583-tool ./cmd/iso8583-tool
 
-# Repository Strategy
-OPS_DIR  ?= ../fluxrig-ops
-DOCS_DIR ?= ../fluxrig.org
+build: lint bin/fluxrig bin/fluxrig-mixer bin/iso8583-tool ## Build all binaries
+	@echo "--------------------------------------------------"
+	@echo "Build Complete (v$(VERSION))"
+	@echo "--------------------------------------------------"
+
+build-bin: bin/fluxrig bin/fluxrig-mixer bin/iso8583-tool ## Build all binaries without linting
+	@echo "--------------------------------------------------"
+	@echo "Build Complete (No Lint)"
+	@echo "--------------------------------------------------"
+
+# Workspace sync destinations — set in .env.local (gitignored, never committed).
+# Copy .env.local.example to .env.local and set paths for your local setup.
+# Targets that use these variables skip silently when left unset.
+-include .env.local
+LOG_CATALOG   ?=
+OPENAPI_DEST  ?=
+STATIC_SYNC_DIR ?=
 
 catalog: ## Generate log message catalog
-	@echo "Generating log catalog..."
-	-go run scripts/catalog_logs.go > $(OPS_DIR)/docs/internal/log_catalog.csv || true
+	@if [ -z "$(LOG_CATALOG)" ]; then \
+		echo "Skipping log catalog (LOG_CATALOG not set — configure .env.local)"; \
+	else \
+		echo "Generating log catalog..."; \
+		go run scripts/catalog_logs.go > $(LOG_CATALOG) || true; \
+	fi
 
 test: ## Run unit tests with race detection and coverage
 	@echo "Running tests..."
@@ -82,10 +99,11 @@ regression: build ## Run full E2E regression suite (Unified Runner)
 	@echo "Running Regression Suite (Unified)..."
 	@test/e2e/run_all.sh
 
-clean: ## Remove build artifacts and temporary files
-	@echo "Cleaning..."
+clean: ## Remove local build artifacts (Fast)
+	@echo "Cleaning local artifacts..."
 	rm -rf bin/
 	rm -rf test/test_logs/
+	rm -rf /tmp/fluxrig*
 	# Clean E2E test artifacts (recursive data/logs)
 	find test/e2e -name "data" -type d -exec rm -rf {} +
 	find test/e2e -name "logs" -type d -exec rm -rf {} +
@@ -96,8 +114,6 @@ clean: ## Remove build artifacts and temporary files
 	rm -rf pkg/ingest/comprehensive-mixer/
 	rm -rf pkg/ingest/test-mixer/
 	$(MAKE) clean-robot
-	rm -rf test/test_logs/
-	rm -rf test/test_logs/
 	rm -rf test_data/
 	rm -rf data/
 	rm -rf logs/
@@ -108,10 +124,19 @@ clean: ## Remove build artifacts and temporary files
 	rm -f fluxrig_test.toml
 	rm -f cluster.key
 	rm -f cluster.key.pub
-	-rm -f $(OPS_DIR)/docs/internal/log_catalog.csv
+	-@if [ -n "$(LOG_CATALOG)" ]; then rm -f $(LOG_CATALOG); fi
+	rm -f pkg/mixer/api/docs/.generated
+
+distclean: clean ## Full cleanup including caches (Slow)
+	@echo "Cleaning caches..."
 	@if [ -d .gomod_cache ]; then go clean -modcache; fi
 	rm -rf .gomod_cache
 	go clean -cache
+
+examples-validate: ## Validate example configuration files
+	@echo "Validating example configs..."
+	go run scripts/validate_examples/main.go examples/configs/fluxrig.toml.example
+	go run scripts/validate_examples/main.go examples/configs/fluxrig-mixer.toml.example
 
 # Python / Test Automation
 VENV := .venv
@@ -157,7 +182,7 @@ help: ## Display this help screen
 	@grep -h -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}'
 # Robot Framework (Validation)
 .PHONY: robot
-robot: build-bin ## Run Robot Framework validation suite
+robot: build-bin iso8583-tool ## Run Robot Framework validation suite
 	@echo "Running Robot Framework tests..."
 	@cd test/robot && ./run.sh
 
@@ -173,21 +198,34 @@ clean-robot: ## Clean Robot Framework artifacts
 	@find test/robot -name "work" -type l -delete
 
 .PHONY: openapi
-openapi: ## Generate OpenAPI specification and sync to ops
+openapi: pkg/mixer/api/docs/.generated ## Generate OpenAPI specification and sync to ops
+
+pkg/mixer/api/docs/.generated: cmd/fluxrig-mixer/main.go pkg/mixer/api/server.go pkg/mixer/api/types.go
 	@echo "Generating OpenAPI spec for version $(VERSION) (Clean Source Strategy)..."
 	@cp cmd/fluxrig-mixer/main.go cmd/fluxrig-mixer/main_gen.go
 	@sed -i '' 's/@version 0.0.0-dev/@version $(VERSION)/' cmd/fluxrig-mixer/main_gen.go
 	@mkdir -p pkg/mixer/api/docs
 	@if command -v swag >/dev/null; then \
-		swag init -g cmd/fluxrig-mixer/main_gen.go -o pkg/mixer/api/docs --outputTypes yaml,go; \
+		swag init -g main_gen.go -d cmd/fluxrig-mixer,pkg/mixer/api --parseDependency --parseInternal --packagePrefix $(MODULE_NAME) -o pkg/mixer/api/docs --outputTypes yaml,go; \
 	else \
-		$(shell go env GOPATH)/bin/swag init -g cmd/fluxrig-mixer/main_gen.go -o pkg/mixer/api/docs --outputTypes yaml,go; \
+		$(shell go env GOPATH)/bin/swag init -g main_gen.go -d cmd/fluxrig-mixer,pkg/mixer/api --parseDependency --parseInternal --packagePrefix $(MODULE_NAME) -o pkg/mixer/api/docs --outputTypes yaml,go; \
 	fi; \
 	EXIT_CODE=$$?; \
 	rm cmd/fluxrig-mixer/main_gen.go; \
 	if [ $$EXIT_CODE -ne 0 ]; then exit $$EXIT_CODE; fi
-	@cp pkg/mixer/api/docs/swagger.yaml $(DOCS_DIR)/docs/reference/openapi.yaml
-	@echo "Spec generated at pkg/mixer/api/docs/ and synced to $(DOCS_DIR)"
+	@touch pkg/mixer/api/docs/.generated
+	@if [ -z "$(OPENAPI_DEST)" ]; then \
+		echo "Spec generated at pkg/mixer/api/docs/ (skipping sync — OPENAPI_DEST not set in .env.local)"; \
+	else \
+		mkdir -p $$(dirname $(OPENAPI_DEST)); \
+		cp pkg/mixer/api/docs/swagger.yaml $(OPENAPI_DEST); \
+		if [ -n "$(STATIC_SYNC_DIR)" ]; then \
+			mkdir -p $(STATIC_SYNC_DIR); \
+			cp pkg/mixer/api/docs/swagger.yaml $(STATIC_SYNC_DIR)/openapi.yaml; \
+			echo "Synced static spec to $(STATIC_SYNC_DIR)/openapi.yaml"; \
+		fi; \
+		echo "Spec generated at pkg/mixer/api/docs/ and synced to $(OPENAPI_DEST)"; \
+	fi
 
 .PHONY: iso8583-tool
 iso8583-tool: ## Build iso8583-tool (Load Gen & Echo Server)
@@ -219,10 +257,6 @@ test-robot: test-robot-iso test-robot-coatcheck test-robot-topology test-robot-t
 test-robot-staged: robot-prep build-bin ## Run Robot Staged Load Suite (QoS Validation)
 	@echo "Running Staged Load Test..."
 	@cd test/robot && ./run.sh suites/iso8583/server_staged_load.robot
-
-test-robot-resilience: robot-prep build-bin ## Run Robot Resilience Suite
-	@echo "Running Resilience Test..."
-	@cd test/robot && ./run.sh suites/iso8583/resilience.robot
 
 test-robot-validation: robot-prep build-bin ## Run Robot Server Validation
 	@echo "Running Server Validation..."

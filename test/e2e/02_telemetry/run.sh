@@ -30,7 +30,7 @@ RACK_LOG="$WORK_DIR/rack/rack.stdout"
 
 DB_CLI="duckdb"
 FLUX_BIN="${ROOT_DIR}/bin/fluxrig"
-MIXER_DB="$WORK_DIR/mixer/data/fluxrig_test.duckdb"
+MIXER_DB="$WORK_DIR/mixer/data/flux.duckdb"
 TELEMETRY_DIR="$WORK_DIR/mixer/data/telemetry"
 
 MIXER_PID=""
@@ -138,7 +138,7 @@ sleep 10
 
 # 1. Logs
 log_info "Testing 'fluxrig logs'..."
-LOGS_OUT=$($FLUX_BIN logs --api-url "http://localhost:8092" --limit 20 --min-level debug)
+LOGS_OUT=$($FLUX_BIN logs --api-url "http://127.0.0.1:8092" --limit 20 --min-level debug)
 log_info "$LOGS_OUT"
 
 LOG_COUNT=$(echo "$LOGS_OUT" | tail -n +2 | grep -v "^$" | wc -l | tr -d ' ')
@@ -151,7 +151,7 @@ log_success "CLI Logs Verified ($LOG_COUNT logs found)."
 log_info "Testing 'fluxrig metrics' (Waiting for availability)..."
 METRICS_FOUND=0
 for ((i=1;i<=10;i++)); do
-    METRICS_OUT=$($FLUX_BIN metrics --api-url "http://localhost:8092" --limit 10)
+    METRICS_OUT=$($FLUX_BIN metrics --api-url "http://127.0.0.1:8092" --limit 10)
     if [[ "$METRICS_OUT" == *"heartbeats_sent"* ]]; then
         METRICS_FOUND=1
         log_info "$METRICS_OUT"
@@ -178,6 +178,13 @@ SNAPSHOT_DB="$WORK_DIR/mixer/data/snapshot.duckdb"
 MIXER_COUNT=$($DB_CLI -noheader -csv "$SNAPSHOT_DB" "SELECT count(*) FROM registry WHERE type_id=2")
 SNAKE_COUNT=$($DB_CLI -noheader -csv "$SNAPSHOT_DB" "SELECT count(*) FROM registry WHERE type_id=9")
 RACK_COUNT=$($DB_CLI -noheader -csv "$SNAPSHOT_DB" "SELECT count(*) FROM registry WHERE type_id=4")
+
+# Check Racks (by Name)
+RACK_MID=$($DB_CLI -noheader -csv "$SNAPSHOT_DB" "SELECT machine_id FROM registry WHERE type_id=4 LIMIT 1")
+if [[ ! "$RACK_MID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+    echo "❌ Rack MachineID is not a valid UUID: $RACK_MID"
+    exit 1
+fi
 
 log_info "Found $MIXER_COUNT Mixers"
 log_info "Found $SNAKE_COUNT Snakes"
@@ -244,11 +251,11 @@ if [[ "$STATS_JSON" == *"\"entity_name\":\"pending\""* ]]; then
 fi
 
 # 3. Validation: Bus Metrics (Optional - may not appear with deferred init)
-# Note: fluxrig.bus.publish_count and fluxrig.nats.messages_published may not appear
+# Note: flux.bus.publish_count and flux.nats.messages_published may not appear
 # because bus metrics are recorded via InstrumentedBus which requires telemetry to be initialized.
 # With deferred init, enrollment messages (Hello) are sent BEFORE telemetry init.
-if [[ "$STATS_JSON" != *"fluxrig.bus.publish_count"* ]]; then
-    log_info "ℹ️  'fluxrig.bus.publish_count' not found - expected with deferred telemetry init"
+if [[ "$STATS_JSON" != *"flux.bus.publish_count"* ]]; then
+    log_info "ℹ️  'flux.bus.publish_count' not found - expected with deferred telemetry init"
 fi
 
 # 4. Validation: specific entity verification
@@ -302,10 +309,10 @@ if [ -n "$(find "$TELEMETRY_DIR/metrics" -name "*.parquet" -print -quit 2>/dev/n
     fi
 
     # Validation: Wire Latency
-    WIRE_LATENCY_COUNT=$($DB_CLI -noheader -csv -c "SELECT count(*) FROM read_parquet('$METRICS_GLOB') WHERE name = 'fluxrig.wire.duration_ms'")
+    WIRE_LATENCY_COUNT=$($DB_CLI -noheader -csv -c "SELECT count(*) FROM read_parquet('$METRICS_GLOB') WHERE name = 'flux.wire.duration_ms'")
     logger_msg="Wire Latency Metrics Verified ($WIRE_LATENCY_COUNT found)."
     if [ "$WIRE_LATENCY_COUNT" -eq 0 ]; then
-        log_info "No Wire Latency metrics found (fluxrig.wire.duration_ms). This is expected if only Heartbeats are sent."
+        log_info "No Wire Latency metrics found (flux.wire.duration_ms). This is expected if only Heartbeats are sent."
     else
         log_success "$logger_msg"
     fi

@@ -5,7 +5,7 @@
 
 **Location**: `test/robot/suites/topology`
 
-This suite validates the core distributed capabilities of FluxRig, specifically verifying that Racks can associate with a Mixer, form a topology, exchange traffic, and reliably report telemetry.
+This suite validates the core distributed capabilities of fluxrig, specifically verifying that Racks can associate with a Mixer, form a topology, exchange traffic, and reliably report telemetry.
 
 ## Scenarios
 

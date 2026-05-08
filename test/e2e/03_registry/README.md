@@ -7,7 +7,7 @@
 **Target**: `test/e2e_registry/run.sh`
 
 ## Objective
-Verify the FluxRig Registry capabilities, focusing on identity assignment, topology tracking, and metadata synchronization.
+Verify the fluxrig Registry capabilities, focusing on identity assignment, topology tracking, and metadata synchronization.
 
 ## Scope
 1.  **Identity Assignment**: Verify Rack registration and ID assignment.

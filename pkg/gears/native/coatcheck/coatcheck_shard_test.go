@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/jaab-tech/fluxrig/pkg/bus"
@@ -56,7 +57,7 @@ func TestCoatCheck_Certification(t *testing.T) {
 		assert.NotNil(t, emitted)
 
 		// Verify KV contains the coat
-		val, _, _ := mockBus.KV().Get("TEST_BUCKET", "MTIz") // "123" base64
+		val, _, _ := mockBus.KV().Get(context.Background(), "TEST_BUCKET", "MTIz") // "123" base64
 		assert.NotNil(t, val)
 	})
 
@@ -114,7 +115,7 @@ type mockGearContext struct {
 func (m *mockGearContext) Context() context.Context { return context.Background() }
 func (m *mockGearContext) Config() map[string]any   { return m.config }
 func (m *mockGearContext) GearName() string         { return "test" }
-func (m *mockGearContext) MachineID() uint64        { return 1 }
+func (m *mockGearContext) MachineID() uuid.UUID     { return uuid.Nil }
 func (m *mockGearContext) Logger() *slog.Logger     { return slog.Default() }
 func (m *mockGearContext) IDGen() sdk.IDGenerator   { return nil }
 func (m *mockGearContext) Bus() bus.Bus             { return m.bus }

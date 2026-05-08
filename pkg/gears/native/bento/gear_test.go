@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/warpstreamlabs/bento/public/service"
@@ -37,7 +38,8 @@ func TestConfigToYaml(t *testing.T) {
 func TestBridge(t *testing.T) {
 	// 1. Flux -> Bento
 	fm := fluxmsg.New()
-	fm.FluxID = 123456789
+	testID := uuid.New()
+	fm.FluxID = testID
 	fm.TraceID = "abc-123"
 	fm.Data["foo"] = "bar"
 	fm.Metadata["user"] = "admin"
@@ -56,7 +58,7 @@ func TestBridge(t *testing.T) {
 	v, _ = bm.MetaGet("trace_id")
 	assert.Equal(t, "abc-123", v)
 	v, _ = bm.MetaGet("flux_id")
-	assert.Equal(t, "123456789", v)
+	assert.Equal(t, testID.String(), v)
 
 	// 2. Bento -> Flux
 	outFm, err := FromBentoMessage(bm)
@@ -74,7 +76,7 @@ type MockContext struct {
 func (m *MockContext) Context() context.Context { return context.Background() }
 func (m *MockContext) Config() map[string]any   { return m.config }
 func (m *MockContext) GearName() string         { return "test-gear" }
-func (m *MockContext) MachineID() uint64        { return 1 }
+func (m *MockContext) MachineID() uuid.UUID     { return uuid.Nil }
 func (m *MockContext) Logger() *slog.Logger     { return slog.Default() }
 func (m *MockContext) IDGen() sdk.IDGenerator   { return nil }
 func (m *MockContext) Bus() bus.Bus             { return nil }
