@@ -5,7 +5,7 @@ filename = "logs/mixer.log"
 [store]
 dir = "./data"
 wal_max_size_mb = 500
-database_file = "fluxrig.duckdb"
+database_file = "flux.duckdb"
 cluster_key_file = "cluster.key"
 
 [mixer]

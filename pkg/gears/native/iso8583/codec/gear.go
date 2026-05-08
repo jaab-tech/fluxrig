@@ -85,10 +85,10 @@ func (g *Gear) Init(ctx sdk.GearContext) error {
 
 	// 3. Telemetry
 	g.meter = otel.GetMeterProvider().Meter("fluxrig/gears/codec_iso8583")
-	g.msgTotal, _ = g.meter.Int64Counter("fluxrig_codec_messages_total", metric.WithDescription("Total messages processed by codec"))
-	g.latency, _ = g.meter.Float64Histogram("fluxrig_codec_duration_seconds", metric.WithDescription("Codec processing latency"), metric.WithUnit("s"))
-	g.fieldsCount, _ = g.meter.Int64Histogram("fluxrig_codec_fields_count", metric.WithDescription("Number of fields processed per message"))
-	g.errTotal, _ = g.meter.Int64Counter("fluxrig_codec_errors_total", metric.WithDescription("Total codec errors"))
+	g.msgTotal, _ = g.meter.Int64Counter("flux.gear.messages_in", metric.WithDescription("Total messages processed by gear"))
+	g.latency, _ = g.meter.Float64Histogram("flux.gear.processing_time_ms", metric.WithDescription("Gear processing latency"), metric.WithUnit("ms"))
+	g.fieldsCount, _ = g.meter.Int64Histogram("flux.codec.iso8583.fields_count", metric.WithDescription("Number of fields processed per message"))
+	g.errTotal, _ = g.meter.Int64Counter("flux.gear.errors", metric.WithDescription("Total gear errors"))
 
 	g.logger.Info("Initialized ISO8583 Codec",
 		"spec", specPath,
@@ -138,11 +138,16 @@ func (g *Gear) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.Flux
 
 	// 2. Telemetry
 	status := "ok"
+	gearAttrs := []attribute.KeyValue{
+		attribute.String("gear_type", "iso8583.codec"),
+		attribute.String("gear_name", g.name),
+		attribute.String("direction", dir),
+	}
+
 	if err != nil {
-		g.errTotal.Add(ctx, 1, metric.WithAttributes(
-			attribute.String("direction", dir),
+		g.errTotal.Add(ctx, 1, metric.WithAttributes(append(gearAttrs,
 			attribute.String("error_type", "processing"),
-		))
+		)...))
 
 		g.logger.Warn("Codec processing failed",
 			"direction", dir,
@@ -157,18 +162,13 @@ func (g *Gear) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.Flux
 	}
 
 	// Success Telemetry
-	g.msgTotal.Add(ctx, 1, metric.WithAttributes(
-		attribute.String("direction", dir),
+	msgAttrs := append(gearAttrs,
 		attribute.String("mti", mti),
 		attribute.String("status", status),
-	))
-	g.latency.Record(ctx, duration.Seconds(), metric.WithAttributes(
-		attribute.String("direction", dir),
-		attribute.String("mti", mti),
-	))
-	g.fieldsCount.Record(ctx, int64(len(fields)), metric.WithAttributes(
-		attribute.String("direction", dir),
-	))
+	)
+	g.msgTotal.Add(ctx, 1, metric.WithAttributes(msgAttrs...))
+	g.latency.Record(ctx, float64(duration.Milliseconds()), metric.WithAttributes(msgAttrs...))
+	g.fieldsCount.Record(ctx, int64(len(fields)), metric.WithAttributes(gearAttrs...))
 
 	// Persist metadata
 	msg.Metadata["codec.spec_hash"] = g.meta.SpecHash
@@ -189,10 +189,6 @@ func (g *Gear) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.Flux
 	// TRACE: Per-field dump
 	if g.logger.Enabled(ctx, logger.LevelTrace) {
 		g.traceFields(ctx, dir, mti, msg)
-	}
-
-	if g.emit != nil {
-		g.emit(msg)
 	}
 
 	return msg, nil

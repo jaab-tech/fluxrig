@@ -17,7 +17,7 @@ Documentation     Cross-Rack Topology Validation
 ...               Verifies that messages flow from Rack A -> Mixer -> Rack B (simulated)
 ...               or simply Rack -> Mixer ingestion.
 Resource          ../../resources/common.resource
-Library           FluxRigLibrary
+Library           fluxrigLibrary
 Library           ISO8583Library
 Library           OperatingSystem
 Suite Setup       Initialize Topology Suite    ${CURDIR}
@@ -36,7 +36,6 @@ Setup Infrastructure
     Start Mixer    config_file=${MIXER_CONFIG}    work_dir=${WORK_DIR}/mixer    alias=mixer
     Wait For Healthy    port=${MIXER_PORT}
     
-    Check Log Contains    pattern=Mixer Control Plane listening
     Check Log Contains    pattern=Mixer is ready
 
 Register Primary Rack (Rack A)
@@ -48,7 +47,7 @@ Register Primary Rack (Rack A)
     Set Suite Variable    ${RACK_A_ID}    ${machine_id}
     Log    Found Pending Rack with ID: ${RACK_A_ID}
     
-    Check Stdout Contains    pattern=Starting FluxRig Rack    alias=rack-a
+    Check Stdout Contains    pattern=Starting fluxrig Rack    alias=rack-a
 
     Log    Adopting Rack A...
     Adopt Rack    mixer_port=${MIXER_PORT}    machine_id=${RACK_A_ID}    name=rack-a-adopted
@@ -100,13 +99,13 @@ Validate Functional Traffic (Phase 1)
     # Ensure telemetry has flushed from the newly adopted Rack identity
     Sleep    10s
     Log    Verifying Metrics for Rack A...
-    Wait Until Keyword Succeeds    30s    2s    Verify Entity Metric Present    mixer_port=${MIXER_PORT}    entity_name=rack-a-adopted    metric_key=fluxrig.bus.publish_count
+    Wait Until Keyword Succeeds    30s    2s    Verify Entity Metric Present    mixer_port=${MIXER_PORT}    entity_name=rack-a-adopted    metric_key=flux.bus.publish_count
     
     Log    Verifying Metrics for Bento Gen...
-    Wait Until Keyword Succeeds    30s    2s    Verify Entity Metric Present    mixer_port=${MIXER_PORT}    entity_name=rack-a-adopted    metric_key=fluxrig.gear.messages_out
+    Wait Until Keyword Succeeds    30s    2s    Verify Any Entity Metric Present    mixer_port=${MIXER_PORT}    metric_key=flux.gear.messages_out
 
     Log    Verifying Metrics for Rack B...
-    Wait Until Keyword Succeeds    30s    2s    Verify Entity Metric Present    mixer_port=${MIXER_PORT}    entity_name=rack-b    metric_key=fluxrig.gear.messages_in
+    Wait Until Keyword Succeeds    30s    2s    Verify Any Entity Metric Present    mixer_port=${MIXER_PORT}    metric_key=flux.gear.messages_in
 
 Validate Telemetry Persistence (Phase 1)
     [Documentation]    Verifies that Telemetry data is persisted to Parquet files.

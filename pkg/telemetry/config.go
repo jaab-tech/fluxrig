@@ -3,7 +3,11 @@
 
 package telemetry
 
-import "github.com/jaab-tech/fluxrig/pkg/config"
+import (
+	"github.com/google/uuid"
+
+	"github.com/jaab-tech/fluxrig/pkg/config"
+)
 
 // Config holds the configuration for the Telemetry provider.
 type Config struct {
@@ -11,8 +15,8 @@ type Config struct {
 	ServiceName string
 	// ServiceVersion identifies the version.
 	ServiceVersion string
-	// EntityID is the unique fluxEntityID (uint64) of the component.
-	EntityID uint64
+	// EntityID is the unique fluxEntityID (uuid.UUID) of the component.
+	EntityID uuid.UUID
 	// EntityName is the human-readable name of the component (e.g. "rack-nyc-01").
 	EntityName string
 	// Component identifies the role of the process (e.g. "RACK", "MIXER").

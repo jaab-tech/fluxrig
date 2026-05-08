@@ -4,7 +4,7 @@ Documentation     Coat Check Full Loop Validation
 ...               Topology: LoadGen -> Gateway -> Store -> Client -> Echo -> Restore -> Gateway.
 ...               Without "Restore", the Gateway would fail to route the response because it lacks the "src_id".
 Resource          ../../resources/common.resource
-Library           FluxRigLibrary
+Library           fluxrigLibrary
 Library           ISO8583Library
 Library           Collections
 Library           OperatingSystem
@@ -78,7 +78,7 @@ Teardown CoatCheck Suite
     # Allow filesystem sync
     Sleep    5s
     Run Keyword And Continue On Failure    Check Log For Errors    ${WORK_DIR}/rack/logs/fluxrig.log
-    Run Keyword And Continue On Failure    Check Log For Errors    ${WORK_DIR}/mixer/logs/mixer.log
+    Run Keyword And Continue On Failure    Check Log For Errors    ${WORK_DIR}/mixer/logs/process_stdout.log
     
     # Generate Report
     Create Directory    ${OUTPUT_DIR}

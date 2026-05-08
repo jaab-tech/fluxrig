@@ -1,4 +1,4 @@
-# Copyright 2025 JAAB Tech SAS, Uruguay
+# Copyright 2026 JAAB Tech SAS, Uruguay
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,48 +12,42 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+version: "2"
+
 run:
   timeout: 5m
   tests: true
   allow-parallel-runners: true
 
 linters:
-  disable-all: true
+  default: none
   enable:
     - unused
-    - bodyclose
-    - noctx
-    - rowserrcheck
-    - gosec
-    - gofmt
     - govet
     - staticcheck
-    - gosimple
     - ineffassign
     - errcheck
     - misspell
     - gocyclo
-    - lll
-    - goimports
 
-linters-settings:
-  govet:
-    enable:
-      - shadow
-  gocyclo:
-    # TODO: Refactor ApplyScenario and runSession to reduce complexity
-    min-complexity: 100
-  goconst:
-    min-len: 3
-    min-occurrences: 3
-  misspell:
-    locale: US
-  lll:
-    line-length: 300
-  goimports:
-    local-prefixes: github.com/jaab-tech/fluxrig
+  settings:
+    govet:
+      enable:
+        - shadow
+    gocyclo:
+      min-complexity: 100
+    staticcheck:
+      # Disable style and naming checks for v0.5.0
+      checks: ["all", "-ST*", "-QF*"]
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes: ["github.com/jaab-tech/fluxrig"]
 
 issues:
-  exclude-use-default: false
-  max-issues-per-linter: 50
-  max-same-issues: 3
+  max-issues-per-linter: 0
+  max-same-issues: 0

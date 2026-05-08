@@ -7,15 +7,16 @@ import (
 	"fmt"
 
 	"github.com/fxamacker/cbor/v2"
+	"github.com/google/uuid"
 )
 
 // System Subjects
 const (
-	SubjectAgentHello     = "fluxrig.agent.hello"
-	SubjectAgentHeartbeat = "fluxrig.agent.heartbeat"
+	SubjectAgentHello     = "flux.agent.hello"
+	SubjectAgentHeartbeat = "flux.agent.heartbeat"
 	// SubjectScenarioUpdate is published by Mixer to push scenarios to specific racks
 	// Topic pattern: fluxrig.rack.{rack_name}.scenario
-	SubjectScenarioPrefix = "fluxrig.rack."
+	SubjectScenarioPrefix = "flux.rack."
 	SubjectScenarioSuffix = ".scenario"
 )
 
@@ -23,7 +24,7 @@ const (
 type HelloPayload struct {
 	Name      string         `cbor:"name"`
 	Nonce     string         `cbor:"nonce"` // Unique session nonce for response topic isolation
-	MachineID uint16         `cbor:"machine_id"`
+	MachineID uuid.UUID      `cbor:"machine_id"`
 	Secret    string         `cbor:"secret"` // Bearer Token (Optional on first connect)
 	IP        string         `cbor:"ip"`
 	Port      int            `cbor:"port"`
@@ -33,7 +34,7 @@ type HelloPayload struct {
 
 // HeartbeatPayload is sent periodically by the Rack.
 type HeartbeatPayload struct {
-	MachineID uint16         `cbor:"machine_id"`
+	MachineID uuid.UUID      `cbor:"machine_id"`
 	Stats     map[string]any `cbor:"stats"`
 	Config    map[string]any `cbor:"config"`
 }
@@ -132,12 +133,12 @@ func fromMap(m map[string]any, v any) error {
 
 // ScenarioPayload is sent by the Mixer to push scenario updates to Racks.
 type ScenarioPayload struct {
-	Version   string `cbor:"version"`    // Scenario version
-	Name      string `cbor:"name"`       // Scenario name
-	RackName  string `cbor:"rack_name"`  // Target rack name
-	MachineID uint16 `cbor:"machine_id"` // Target machine ID
-	Scenario  []byte `cbor:"scenario"`   // YAML-encoded scenario (projected for this rack)
-	Timestamp int64  `cbor:"timestamp"`  // Unix timestamp
+	Version   string    `cbor:"version"`    // Scenario version
+	Name      string    `cbor:"name"`       // Scenario name
+	RackName  string    `cbor:"rack_name"`  // Target rack name
+	MachineID uuid.UUID `cbor:"machine_id"` // Target machine ID
+	Scenario  []byte    `cbor:"scenario"`   // YAML-encoded scenario (projected for this rack)
+	Timestamp int64     `cbor:"timestamp"`  // Unix timestamp
 }
 
 func (s *ScenarioPayload) ToData() (map[string]any, error) {

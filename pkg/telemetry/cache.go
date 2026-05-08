@@ -6,6 +6,8 @@ package telemetry
 import (
 	"sync"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // MetricType defines the kind of metric stored.
@@ -18,7 +20,7 @@ const (
 
 // EntityStats holds all metrics for a single entity (Router, Gear, etc).
 type EntityStats struct {
-	EntityID   uint64                 `json:"entity_id"`
+	EntityID   uuid.UUID              `json:"entity_id"`
 	EntityName string                 `json:"entity_name"`
 	EntityType string                 `json:"entity_type"`
 	LastUpdate time.Time              `json:"last_update"`
@@ -46,7 +48,7 @@ func NewMetricsCache() *MetricsCache {
 }
 
 // UpdateCounter atomically increments a counter for an entity.
-func (c *MetricsCache) UpdateCounter(entityID uint64, name string, delta int64, entityName, entityType string) {
+func (c *MetricsCache) UpdateCounter(entityID uuid.UUID, name string, delta int64, entityName, entityType string) {
 	s := c.getOrCreateEntity(entityID, entityName, entityType)
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -65,7 +67,7 @@ func (c *MetricsCache) UpdateCounter(entityID uint64, name string, delta int64, 
 }
 
 // SetGauge atomically sets a gauge value for an entity.
-func (c *MetricsCache) SetGauge(entityID uint64, name string, value float64, entityName, entityType string) {
+func (c *MetricsCache) SetGauge(entityID uuid.UUID, name string, value float64, entityName, entityType string) {
 	s := c.getOrCreateEntity(entityID, entityName, entityType)
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -81,7 +83,7 @@ func (c *MetricsCache) SetGauge(entityID uint64, name string, value float64, ent
 }
 
 // GetStats returns a snapshot of metrics for a specific entity.
-func (c *MetricsCache) GetStats(entityID uint64) *EntityStats {
+func (c *MetricsCache) GetStats(entityID uuid.UUID) *EntityStats {
 	v, ok := c.stats.Load(entityID)
 	if !ok {
 		return nil
@@ -129,7 +131,7 @@ func (c *MetricsCache) GetAllStats() []*EntityStats {
 }
 
 // internal helper
-func (c *MetricsCache) getOrCreateEntity(id uint64, name, eType string) *EntityStats {
+func (c *MetricsCache) getOrCreateEntity(id uuid.UUID, name, eType string) *EntityStats {
 	v, ok := c.stats.Load(id)
 	if ok {
 		existing := v.(*EntityStats)

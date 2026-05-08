@@ -8,6 +8,7 @@ import (
 	"fmt"
 
 	"github.com/fxamacker/cbor/v2"
+	"github.com/google/uuid"
 
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 )
@@ -25,7 +26,7 @@ func (r *RestoreLogic) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*flux
 
 	// 2. Fetch from KV
 	bucket := r.gear.config.Bucket
-	valBytes, _, err := r.gear.ctx.Bus().KV().Get(bucket, key)
+	valBytes, _, err := r.gear.ctx.Bus().KV().Get(ctx, bucket, key)
 	if err != nil {
 		// Log error but check on_missing policy
 		return r.handleMissing(ctx, msg, key, err)
@@ -66,7 +67,7 @@ func (r *RestoreLogic) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*flux
 	// B. Identity Restoration (Optional)
 	// If we want to restore the original FluxID as RefID?
 	// msg.RefFluxID = savedMsg.FluxID (This links Response to Request!)
-	if msg.RefFluxID == 0 {
+	if msg.RefFluxID == uuid.Nil {
 		msg.RefFluxID = savedMsg.FluxID
 	}
 

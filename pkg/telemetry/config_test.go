@@ -7,6 +7,8 @@ import (
 	"context"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/jaab-tech/fluxrig/pkg/bus"
 	"github.com/jaab-tech/fluxrig/pkg/telemetry"
 )
@@ -20,7 +22,7 @@ func TestInit_ConfigParsing(t *testing.T) {
 	// Case 1: Custom BatchInterval
 	cfg := telemetry.Config{
 		ServiceName:         "test-service",
-		EntityID:            12345,
+		EntityID:            uuid.New(),
 		BaseSubject:         "test.telemetry",
 		BatchIntervalString: "100ms",
 		MaxBatchSize:        10,
@@ -43,7 +45,7 @@ func TestInit_InvalidDuration(t *testing.T) {
 	// Case 2: Invalid Duration (should fallback to default, not panic or error)
 	cfg := telemetry.Config{
 		ServiceName:         "test-service",
-		EntityID:            12345,
+		EntityID:            uuid.New(),
 		EntityName:          "test-machine-name",
 		BatchIntervalString: "invalid-duration",
 	}

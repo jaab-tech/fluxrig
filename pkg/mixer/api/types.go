@@ -6,6 +6,8 @@ package api
 import (
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/jaab-tech/fluxrig/pkg/config"
 )
 
@@ -15,12 +17,16 @@ type HealthResponse struct {
 	Status string `json:"status" example:"ok"`
 	// Version of the service.
 	Version string `json:"version" example:"0.1.0"`
+	// MachineID is the persistent machine ID.
+	MachineID uuid.UUID `json:"machine_id" example:"019de49b-0000-7000-8000-000000000000"`
+	// EntityID is the unique fluxEntityID of this Mixer.
+	EntityID uuid.UUID `json:"entity_id" example:"019de49b-0000-7000-8000-000000000000"`
 }
 
 // RackResponse represents a Rack in the registry.
 type RackResponse struct {
 	// ID is the entity ID of the rack.
-	ID uint64 `json:"id" example:"45612378"`
+	ID uuid.UUID `json:"id" example:"45612378"`
 	// Name of the rack.
 	Name string `json:"name" example:"rack-01"`
 	// Status of the rack (active, inactive, pending).
@@ -34,7 +40,7 @@ type RackResponse struct {
 	// FirstSeen timestamp.
 	FirstSeen time.Time `json:"first_seen" example:"2023-10-26T10:00:00Z"`
 	// MachineID is the physical machine ID.
-	MachineID uint16 `json:"machine_id" example:"10"`
+	MachineID uuid.UUID `json:"machine_id" example:"019de49b-0000-7000-8000-000000000000"`
 
 	// Stats (Transient/Snapshot).
 	Stats RackStats `json:"stats"`
@@ -58,6 +64,8 @@ type RackStats struct {
 type TopologyStatusResponse struct {
 	// SyncStatus indicates global sync state.
 	SyncStatus string `json:"sync_status" example:"synchronized"`
+	// ActiveScenario is the name of the currently active scenario.
+	ActiveScenario string `json:"active_scenario" example:"Getting Started"`
 	// ActiveVer is the currently active scenario version.
 	ActiveVer string `json:"active_ver" example:"v1.2.3"`
 	// RacksTotal is the total number of registered racks.

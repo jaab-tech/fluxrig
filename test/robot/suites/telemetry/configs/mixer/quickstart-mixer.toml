@@ -1,0 +1,20 @@
+[base]
+name = "quickstart-mixer"
+
+[logging]
+level = "info"
+filename = "logs/mixer.log"
+
+[store]
+dir = "data"
+
+[api]
+port = 8090
+
+[snake]
+port = 4222
+domain = "flux"
+
+[telemetry]
+base_subject = "flux.telemetry"
+batch_interval = "1s"

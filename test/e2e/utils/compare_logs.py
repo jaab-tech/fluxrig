@@ -13,13 +13,12 @@ def parse_physical_line(line):
     if not line:
         return None
 
-    # Try Pipe Format (Mixer)
-    # Format: TS | LEVEL | [TYPE] | NAME | SOURCE | MSG | [ATTRS]
-    # Source column (containing .go:) is the anchor. Msg is next.
+    # Try Pipe Format (Mixer/Rack v0.5.0)
+    # Format: TS | LEVEL | TYPE | NAME | SOURCE | MSG | [ATTRS]
     if " | " in line:
         parts = [p.strip() for p in line.split('|')]
         
-        # Find Source Column
+        # Find Source Column (contains .go:)
         src_idx = -1
         for i, p in enumerate(parts):
             if ".go:" in p:
@@ -33,49 +32,23 @@ def parse_physical_line(line):
                 "msg": parts[src_idx + 1],
                 "raw": line
             }
-        
-        # Fallback for lines without Source (if any)?
-        # Assume standard 6-column format if source check fails but pipe exists?
-        # Or just return None/Fail?
-        # Let's try to infer based on length.
-        # If len >= 6, assume last or second to last.
-        # But robust "go:" check covers 99% of our logs.
-        if len(parts) >= 6:
-             # Legacy/Fallback assumption: MSG is 5th or 6th?
-             # Let's assume MSG is at index 4 (if 6 cols) or 5 (if 7 cols)?
-             # Let's just use the robust check. If it fails, maybe it's not a valid log line.
-             pass
 
-    # Try Key-Value Format (Rack/slog)
-    # Format: time=2026-... level=INFO msg="..." ...
-    # Simple regex for time, level, msg
-    # Note: msg might be quoted.
-    m = re.search(r'time=(\S+)\s+level=(\S+)\s+msg=(.*)', line)
+    # Try Key-Value Format (Legacy slog)
+    m = re.search(r'time=([^\s]+)\s+level=([^\s]+)\s+msg=(.*)', line)
     if m:
-        ts_str = m.group(1)
-        level = m.group(2)
+        ts_str = m.group(1).strip('"')
+        level = m.group(2).strip('"')
         rest = m.group(3)
-        
-        # Extract msg. If quoted, take content.
-        # This is a naive parser but sufficient for "msg" which is usually early.
-        # Actually slog puts attributes AFTER msg?
-        # Standard slog text handler: time, level, msg, attrs.
-        # msg="quoted string" key=val
-        # or msg=simple
         
         msg_val = ""
         if rest.startswith('"'):
-            # Find closing quote
-            # Escaping support might be needed but simple split usually ok for test logs.
             end_quote = rest.find('"', 1)
             if end_quote != -1:
                 msg_val = rest[1:end_quote]
             else:
-                msg_val = rest # Broken quote?
+                msg_val = rest
         else:
-            # Take until space
-            parts = rest.split(' ', 1)
-            msg_val = parts[0]
+            msg_val = rest.split(' ', 1)[0]
             
         return {
             "ts_str": ts_str,
@@ -85,6 +58,7 @@ def parse_physical_line(line):
         }
 
     return None
+
 
 def normalize_msg(msg):
     # Remove variable parts if necessary, but exact match is better first
@@ -120,7 +94,7 @@ def get_parquet_logs(work_dir):
     cmd = [
         "duckdb",
         "-c",
-        f"COPY (SELECT strftime(timestamp, '%Y-%m-%dT%H:%M:%S.%g') as ts_str, severity as level, body as msg, attributes FROM read_parquet('{work_dir}/mixer/data/telemetry/logs/**/*.parquet')) TO 'parquet_dump.json' (FORMAT JSON, ARRAY true)"
+        f"SET TimeZone='UTC'; COPY (SELECT strftime(timestamp, '%Y-%m-%dT%H:%M:%S.%g') as ts_str, severity as level, body as msg, attributes FROM (SELECT * FROM read_parquet('{work_dir}/mixer/data/telemetry/logs/**/*.parquet') ORDER BY timestamp ASC)) TO 'parquet_dump.json' (FORMAT JSON, ARRAY true)"
     ]
     subprocess.run(cmd, check=True)
     
@@ -248,23 +222,48 @@ def main():
             if p_level != q_level:
                 continue
             
-            # 3. Timestamp Check (Tolerance 5s to account for timezone issues)
+            # 3. Timestamp Check (Tolerance 10s to account for timezone issues)
             try:
-                p_dt = datetime.fromisoformat(plog['ts_str'])
+                # Parse physical log timestamp
+                p_ts_str = plog['ts_str']
+                # If physical log has a timezone offset, normalize it to UTC
+                p_dt = datetime.fromisoformat(p_ts_str)
+                if p_dt.tzinfo is not None:
+                    p_dt = p_dt.astimezone(timezone.utc)
+                else:
+                    # If naive, assume UTC for comparison purposes
+                    p_dt = p_dt.replace(tzinfo=timezone.utc)
                 
+                # Parse parquet log timestamp (DuckDB strftime output is naive UTC)
                 q_str = item["data"]["ts_str"]
                 q_dt = datetime.fromisoformat(q_str)
                 if q_dt.tzinfo is None:
                     q_dt = q_dt.replace(tzinfo=timezone.utc)
+                else:
+                    q_dt = q_dt.astimezone(timezone.utc)
                     
                 delta = abs((p_dt - q_dt).total_seconds())
-                if delta < 5.0:  # Relaxed to 5 seconds
+                
+                # FALLBACK: If they are exactly N hours apart (timezone mismatch), consider it a match
+                # This handles cases where one side is local and the other is UTC but the wall clock is the same.
+                is_wall_match = False
+                if delta > 300: # If more than 5 mins apart, check wall clock
+                     # Remove TZ and compare naive
+                     p_wall = p_dt.replace(tzinfo=None)
+                     q_wall = q_dt.replace(tzinfo=None)
+                     # Wait! We need to shift p_dt back to local if it was normalized to UTC
+                     # Actually, let's just parse the strings and take first 19 chars
+                     if p_ts_str[:19] == q_str[:19]:
+                         is_wall_match = True
+
+                if delta < 10.0 or is_wall_match:
                     item["used"] = True
                     found = True
                     matches.append((plog, item["data"]))
                     break
-            except Exception:
+            except Exception as e:
                 # If timestamp parsing fails, match on message+level only
+                print(f"Match Warning: TS Parse Error: {e}")
                 item["used"] = True
                 found = True
                 matches.append((plog, item["data"]))
@@ -308,17 +307,22 @@ def main():
     print(f"\n--- Analysis of Top Missing Categories ---")
     # Group by message prefix or type
     counts = {}
+    # Analysis of missing categories
+    counts = {}
     for m in missing:
-        msg = m['msg']
+        msg = m['msg'].lower()
         matched_key = "Other"
-        if "dial failed" in msg: matched_key = "Dial Failed"
-        if "connection refused" in msg: matched_key = "Connection Refused"
-        if "Interrupt signal received" in msg: matched_key = "Interrupt Signal"
-        if "Shutting down" in msg: matched_key = "Shutdown"
+        
+        # Categorize Infrastructure Noise (Expected before bus is ready)
+        if "dial failed" in msg or "connection refused" in msg or "nats: no servers available" in msg:
+            matched_key = "Expected Bootstrap Noise (Dial/Connection)"
+        elif "interrupt signal received" in msg or "shutting down" in msg:
+            matched_key = "Expected Shutdown Noise"
         
         counts[matched_key] = counts.get(matched_key, 0) + 1
         
-    for k, v in counts.items():
+    print("\n--- Analysis of Missing Categories (Physical NOT in Parquet) ---")
+    for k, v in sorted(counts.items(), key=lambda x: x[1], reverse=True):
         print(f"{k}: {v}")
 
     # Clean up

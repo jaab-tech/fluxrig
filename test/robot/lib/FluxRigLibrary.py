@@ -29,9 +29,9 @@ from keywords.telemetry import TelemetryKeywords
 from reporting.renderer import ReportRenderer
 
 @library
-class FluxRigLibrary(ProcessKeywords, ApiKeywords, TelemetryKeywords):
+class fluxrigLibrary(ProcessKeywords, ApiKeywords, TelemetryKeywords):
     """
-    FluxRig Process Management Library.
+    fluxrig Process Management Library.
     Composition of Process, API, and Telemetry keywords.
     Also includes Reporting/Verification utilities directly.
     """
@@ -235,52 +235,92 @@ class FluxRigLibrary(ProcessKeywords, ApiKeywords, TelemetryKeywords):
         if server_api_url:
             try:
                 # Try multiple metric names as fallbacks
-                metric_names = ["fluxrig_rack_messages_total", "fluxrig.nats.messages_published", "fluxrig.gear.messages_in"]
-                rack_raw = []
-                for m_name in metric_names:
-                    rack_raw = self.get_server_metrics(api_url=server_api_url, metric_name=m_name)
-                    if rack_raw: break
-                
-                gear_raw_map = self.get_gear_metrics(api_url=server_api_url)
+                metric_names = [
+                    "flux.wire.messages_sent",
+                    "flux.bus.publish_count",
+                    "flux.gear.messages_in",
+                    "flux.gear.messages_out",
+                    "flux.port.messages_in",
+                    "flux.port.messages_out",
+                    "flux.nats.messages_published",
+                    "flux.wire.messages_sent", 
+                    "flux.bus.publish_count", 
+                    "flux.gear.messages_in", 
+                    "flux.gear.messages_out",
+                    "flux.port.messages_in",
+                    "flux.port.messages_out",
+                    "flux.nats.messages_published",
+                    "fluxrig_rack_messages_total"
+                ]
                 
                 # Filter by test window (+/- 60s for safety)
                 window_start = start_ts - 60
                 window_end = end_ts + 60
                 
-                # Retry Loop for Metric Window (Ingestion Lag Protection)
+                # Retry Loop for Metric Data & Window (Ingestion Lag Protection)
                 rack_data = []
-                for attempt in range(3):
-                    rack_data = [p for p in rack_raw if window_start <= p['timestamp'] <= window_end]
-                    if rack_data:
-                        break
-                    logger.info(f"Retrying metric window match for {name} (attempt {attempt+1}/3)...")
-                    time.sleep(2)
-
-                gear_map = {gid: [p for p in pts if window_start <= p['timestamp'] <= window_end] 
-                            for gid, pts in gear_raw_map.items()}
+                rack_raw = []
+                gear_raw_map = {}
+                gear_map = {}
                 
-                if not rack_data and rack_raw:
-                    # Clock skew fallback: take points based on counts if window fails
-                    rack_data = rack_raw[-10:]
-                    logger.debug(f"Using latest metric samples for {name} (Direct window match fallback).")
+                for attempt in range(10):
+                    # Fetch fresh data from API
+                    for m_name in metric_names:
+                        points = self.get_server_metrics(api_url=server_api_url, metric_name=m_name)
+                        if points:
+                            rack_raw.extend(points)
+                    
+                    if rack_raw:
+                        rack_raw.sort(key=lambda x: x['timestamp'])
+                    
+                    gear_raw_map = self.get_gear_metrics(api_url=server_api_url)
+                    
+                    # Apply window filter
+                    rack_data = [p for p in rack_raw if window_start <= p['timestamp'] <= window_end]
+                    gear_map = {gid: [p for p in pts if window_start <= p['timestamp'] <= window_end] 
+                                for gid, pts in gear_raw_map.items()}
+                    
+                    # Debug logging for window mismatch
+                    if not rack_data and rack_raw:
+                        logger.info(f"Metric Window Mismatch for {name}:")
+                        logger.info(f"  Window: {window_start} to {window_end}")
+                        logger.info(f"  First Point: {rack_raw[0]['timestamp']}, Last: {rack_raw[-1]['timestamp']}")
+                    
+                    # If we found data in ANY of them, we are good
+                    if rack_data or any(gear_map.values()):
+                        break
+                        
+                    logger.info(f"Retrying metric fetch for {name} (attempt {attempt+1}/10 - data not in window yet)...")
+                    time.sleep(5) # Wait for telemetry batching (5s interval)
+                
+                if (not rack_data or not any(gear_map.values())) and (rack_raw or gear_raw_map):
+                    # Clock skew fallback: take latest points if window match fails
+                    if not rack_data and rack_raw:
+                        rack_data = rack_raw[-20:] # Take last 20 samples
+                    if not any(gear_map.values()):
+                        gear_map = {gid: pts[-20:] for gid, pts in gear_raw_map.items()}
+                    logger.info(f"Using latest metric samples for {name} (Clock skew fallback - window match failed).")
                 
                 def get_rates(points):
                     if not points: return [], []
+                    # Group by bucket (5s bins for smoothing)
+                    BIN = 5
                     b = {}
                     for p in points:
-                        ts = int(p['timestamp'])
+                        ts = int(p['timestamp'] // BIN) * BIN
                         val = float(p['value'])
-                        # With Delta temporality, we just sum up deltas for the same bucket if they happen
                         b[ts] = b.get(ts, 0) + val
+                    
                     sts = sorted(b.keys())
                     rates, labs = [], []
-                    for i in range(1, len(sts)):
-                        dt = sts[i] - sts[i-1]
-                        if dt > 0:
-                            # dv is already a delta
-                            dv = b[sts[i]]
-                            rates.append(dv / dt)
-                            labs.append(datetime.fromtimestamp(sts[i]).strftime('%H:%M:%S'))
+                    
+                    for ts in sts:
+                        # Since we use DeltaTemporality, each point is the count in that interval
+                        # We normalize to per-second rate
+                        rate = b[ts] / BIN
+                        rates.append(round(rate, 2))
+                        labs.append(datetime.fromtimestamp(ts).strftime('%H:%M:%S'))
+                        
                     return labs, rates
 
                 rack_labels, rack_rates = get_rates(rack_data)
@@ -310,11 +350,17 @@ class FluxRigLibrary(ProcessKeywords, ApiKeywords, TelemetryKeywords):
                         last_g_labs = glabs
 
                 # 2.2 Server Latencies
-                rack_lat_sum = self.get_server_metrics(api_url=server_api_url, metric_name="fluxrig_rack_latency_seconds.sum")
-                rack_lat_count = self.get_server_metrics(api_url=server_api_url, metric_name="fluxrig_rack_latency_seconds.count")
+                rack_lat_sum = self.get_server_metrics(api_url=server_api_url, metric_name="flux.wire.duration_ms.sum")
+                if not rack_lat_sum: rack_lat_sum = self.get_server_metrics(api_url=server_api_url, metric_name="flux.wire.duration_ms.sum")
                 
-                gear_proc_sum = self.get_server_metrics(api_url=server_api_url, metric_name="fluxrig.gear.processing_time_ms.sum")
-                gear_proc_count = self.get_server_metrics(api_url=server_api_url, metric_name="fluxrig.gear.processing_time_ms.count")
+                rack_lat_count = self.get_server_metrics(api_url=server_api_url, metric_name="flux.wire.duration_ms.count")
+                if not rack_lat_count: rack_lat_count = self.get_server_metrics(api_url=server_api_url, metric_name="flux.wire.duration_ms.count")
+                
+                gear_proc_sum = self.get_server_metrics(api_url=server_api_url, metric_name="flux.gear.processing_time_ms.sum")
+                if not gear_proc_sum: gear_proc_sum = self.get_server_metrics(api_url=server_api_url, metric_name="flux.gear.processing_time_ms.sum")
+                
+                gear_proc_count = self.get_server_metrics(api_url=server_api_url, metric_name="flux.gear.processing_time_ms.count")
+                if not gear_proc_count: gear_proc_count = self.get_server_metrics(api_url=server_api_url, metric_name="flux.gear.processing_time_ms.count")
                 
                 # Consolidate by timestamp
                 def consolidate_averages(sums, counts, factor=1.0):
@@ -328,7 +374,7 @@ class FluxRigLibrary(ProcessKeywords, ApiKeywords, TelemetryKeywords):
                             results.append({"timestamp": p['timestamp'], "value": avg})
                     return results
 
-                rack_lat_pts = consolidate_averages(rack_lat_sum, rack_lat_count, factor=1000.0) # sec -> ms
+                rack_lat_pts = consolidate_averages(rack_lat_sum, rack_lat_count, factor=1.0) # ms already
                 gear_proc_pts = consolidate_averages(gear_proc_sum, gear_proc_count)
                 
                 # Filter by window again (consolidate_averages already works on what we fetched)
@@ -410,7 +456,7 @@ class FluxRigLibrary(ProcessKeywords, ApiKeywords, TelemetryKeywords):
         # Add server errors if any
         try:
              # Fetch errors for the window
-             err_sum = self.get_server_metrics(api_url=server_api_url, metric_name="fluxrig.gear.errors.sum")
+             err_sum = self.get_server_metrics(api_url=server_api_url, metric_name="flux.gear.errors.sum")
              total_err = sum(p['value'] for p in err_sum if window_start <= p['timestamp'] <= window_end)
              if total_err > 0:
                  summary_rows.append(["Server-Side Errors", int(total_err)])

@@ -55,7 +55,7 @@ const docTemplate = `{
                 "summary": "Get Entity Stats",
                 "parameters": [
                     {
-                        "type": "integer",
+                        "type": "string",
                         "description": "Entity ID",
                         "name": "id",
                         "in": "query"
@@ -363,6 +363,16 @@ const docTemplate = `{
         "api.HealthResponse": {
             "type": "object",
             "properties": {
+                "entity_id": {
+                    "description": "EntityID is the unique fluxEntityID of this Mixer.",
+                    "type": "string",
+                    "example": "019de49b-0000-7000-8000-000000000000"
+                },
+                "machine_id": {
+                    "description": "MachineID is the persistent machine ID.",
+                    "type": "string",
+                    "example": "019de49b-0000-7000-8000-000000000000"
+                },
                 "status": {
                     "description": "Status of the service (e.g. \"ok\").",
                     "type": "string",
@@ -393,8 +403,8 @@ const docTemplate = `{
                 },
                 "id": {
                     "description": "ID is the entity ID of the rack.",
-                    "type": "integer",
-                    "example": 45612378
+                    "type": "string",
+                    "example": "45612378"
                 },
                 "ip": {
                     "description": "IP address of the rack agent.",
@@ -408,8 +418,8 @@ const docTemplate = `{
                 },
                 "machine_id": {
                     "description": "MachineID is the physical machine ID.",
-                    "type": "integer",
-                    "example": 10
+                    "type": "string",
+                    "example": "019de49b-0000-7000-8000-000000000000"
                 },
                 "name": {
                     "description": "Name of the rack.",
@@ -479,6 +489,11 @@ const docTemplate = `{
         "api.TopologyStatusResponse": {
             "type": "object",
             "properties": {
+                "active_scenario": {
+                    "description": "ActiveScenario is the name of the currently active scenario.",
+                    "type": "string",
+                    "example": "Getting Started"
+                },
                 "active_ver": {
                     "description": "ActiveVer is the currently active scenario version.",
                     "type": "string",
@@ -521,41 +536,20 @@ const docTemplate = `{
                 }
             }
         },
-        "config.BusConfig": {
+        "config.BaseConfig": {
             "type": "object",
             "properties": {
-                "connectTimeout": {
-                    "type": "string"
+                "name": {
+                    "type": "string",
+                    "example": "node-01"
                 },
-                "convergenceDelay": {
-                    "type": "string"
+                "stateDir": {
+                    "type": "string",
+                    "example": "./data"
                 },
-                "domain": {
-                    "type": "string"
-                },
-                "insecureSkipVerify": {
-                    "type": "boolean"
-                },
-                "operationTimeout": {
-                    "type": "string"
-                },
-                "reconnectWait": {
-                    "type": "string"
-                },
-                "rootCA": {
-                    "type": "string"
-                },
-                "streamName": {
-                    "type": "string"
-                },
-                "subscriptionRetryAttempts": {
-                    "type": "integer"
-                },
-                "subscriptionRetryWait": {
-                    "type": "string"
-                },
-                "url": {
-                    "type": "string"
+                "stateFile": {
+                    "type": "string",
+                    "example": "rack.flux"
                 }
             }
         },
@@ -581,6 +575,11 @@ const docTemplate = `{
                     "description": "AutoAdopt, if true, will automatically mark newly enrolled Racks as 'active'.\nIf false (default), new Racks start as 'pending'.",
                     "type": "boolean",
                     "example": false
+                },
+                "bootstrapSecret": {
+                    "description": "BootstrapSecret is the shared secret used for zero-config enrollment and identity adoption.\nDefaults to 'fluxrig' if not specified.",
+                    "type": "string",
+                    "example": "fluxrig"
                 },
                 "pushDelay": {
                     "description": "PushDelay is the time to wait before pushing state to a newly enrolled Rack.",
@@ -608,22 +607,35 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "compress": {
+                    "type": "boolean",
+                    "example": true
+                },
+                "debug": {
+                    "description": "Hard-override for debug level",
                     "type": "boolean"
                 },
                 "filename": {
-                    "type": "string"
+                    "type": "string",
+                    "example": "logs/fluxrig.log"
                 },
                 "level": {
-                    "type": "string"
+                    "type": "string",
+                    "example": "info"
                 },
                 "maxBackups": {
-                    "type": "integer"
+                    "type": "integer",
+                    "example": 7
                 },
                 "maxSizeMB": {
-                    "type": "integer"
+                    "type": "integer",
+                    "example": 100
                 },
                 "throttling": {
                     "$ref": "#/definitions/config.ThrottlingConfig"
+                },
+                "trace": {
+                    "description": "Hard-override for trace level",
+                    "type": "boolean"
                 }
             }
         },
@@ -646,6 +658,9 @@ const docTemplate = `{
             "properties": {
                 "api": {
                     "$ref": "#/definitions/config.ApiConfig"
+                },
+                "base": {
+                    "$ref": "#/definitions/config.BaseConfig"
                 },
                 "enrollment": {
                     "$ref": "#/definitions/config.EnrollmentConfig"
@@ -676,18 +691,20 @@ const docTemplate = `{
         "config.MixerSettings": {
             "type": "object",
             "properties": {
-                "machineID": {
-                    "description": "MachineID is the unique physical ID of the Mixer machine.",
-                    "type": "integer",
-                    "example": 1
+                "maxHops": {
+                    "description": "Message Limits",
+                    "type": "integer"
                 },
-                "mixerName": {
-                    "description": "MixerName is the human-readable name of the Mixer.",
+                "maxPayloadSize": {
+                    "type": "integer"
+                },
+                "scenarioWaitTimeout": {
+                    "description": "ScenarioWaitTimeout is the time to wait for a rack to register when activating a scenario.",
                     "type": "string",
-                    "example": "mixer-01"
+                    "example": "15s"
                 },
                 "startupScenario": {
-                    "description": "StartupScenario reference to the scenario to load on startup.\nAccepts: file path (\"/path/to/file.yaml\"), URN (\"payment-flow:v1.0.0\"),\nor empty string (resume last active scenario).",
+                    "description": "StartupScenario reference to the scenario to load on startup.",
                     "type": "string"
                 }
             }
@@ -718,11 +735,17 @@ const docTemplate = `{
         "config.RackConfig": {
             "type": "object",
             "properties": {
+                "base": {
+                    "$ref": "#/definitions/config.BaseConfig"
+                },
                 "logging": {
                     "$ref": "#/definitions/config.LoggingConfig"
                 },
                 "rack": {
                     "$ref": "#/definitions/config.RackSettings"
+                },
+                "snake": {
+                    "$ref": "#/definitions/config.SnakeConfig"
                 },
                 "store": {
                     "$ref": "#/definitions/config.StoreConfig"
@@ -735,13 +758,13 @@ const docTemplate = `{
         "config.RackSettings": {
             "type": "object",
             "properties": {
-                "bus": {
-                    "$ref": "#/definitions/config.BusConfig"
-                },
                 "cleanupTimeout": {
                     "type": "string"
                 },
                 "convergenceTimeout": {
+                    "type": "string"
+                },
+                "enrollmentInterval": {
                     "type": "string"
                 },
                 "enrollmentTimeout": {
@@ -753,11 +776,19 @@ const docTemplate = `{
                 "heartbeatInterval": {
                     "type": "string"
                 },
+                "ip": {
+                    "type": "string",
+                    "example": "10.0.0.5"
+                },
                 "machineID": {
+                    "description": "Runtime only: set via Passport or Mixer assignment",
+                    "type": "string"
+                },
+                "maxHops": {
                     "type": "integer"
                 },
-                "name": {
-                    "type": "string"
+                "maxPayloadSize": {
+                    "type": "integer"
                 },
                 "namePrefix": {
                     "type": "string"
@@ -767,65 +798,65 @@ const docTemplate = `{
         "config.SnakeConfig": {
             "type": "object",
             "properties": {
-                "businessStreamMaxAge": {
-                    "description": "BusinessStreamMaxAge retention policy.",
+                "connectTimeout": {
                     "type": "string",
-                    "example": "720h"
+                    "example": "10s"
                 },
-                "clusterName": {
-                    "description": "ClusterName for NATS clustering.",
+                "convergenceDelay": {
+                    "type": "string",
+                    "example": "100ms"
+                },
+                "domain": {
                     "type": "string",
                     "example": "flux"
                 },
-                "durable": {
-                    "description": "Durable toggles file-based storage.",
-                    "type": "boolean",
-                    "example": false
+                "inactiveThreshold": {
+                    "type": "string",
+                    "example": "30s"
+                },
+                "insecureSkipVerify": {
+                    "type": "boolean"
                 },
                 "operationTimeout": {
-                    "description": "OperationTimeout for NATS requests.",
                     "type": "string",
                     "example": "5s"
                 },
                 "port": {
-                    "description": "Port for NATS client connections.",
                     "type": "integer",
                     "example": 4222
                 },
+                "reconnectWait": {
+                    "type": "string",
+                    "example": "1s"
+                },
                 "rootCAFile": {
-                    "description": "RootCAFile for client connections (loopback).",
                     "type": "string"
                 },
                 "streamName": {
-                    "description": "StreamName for the primary business stream.",
                     "type": "string",
                     "example": "flux-msg"
                 },
                 "streamSubjects": {
-                    "description": "StreamSubjects to bind to the stream.",
                     "type": "array",
                     "items": {
                         "type": "string"
-                    },
-                    "example": [
-                        "flux.msg.\u003e"
-                    ]
+                    }
                 },
-                "telemetryStreamMaxAge": {
-                    "description": "TelemetryStreamMaxAge retention policy.",
+                "subscriptionRetryAttempts": {
+                    "type": "integer",
+                    "example": 5
+                },
+                "subscriptionRetryWait": {
                     "type": "string",
-                    "example": "24h"
+                    "example": "200ms"
                 },
                 "tlscertFile": {
-                    "description": "TLSCertFile for server-side TLS.",
                     "type": "string"
                 },
                 "tlskeyFile": {
-                    "description": "TLSKeyFile for server-side TLS.",
                     "type": "string"
                 },
                 "url": {
-                    "description": "URL for internal connections.",
                     "type": "string",
                     "example": "nats://localhost:4222"
                 }
@@ -835,19 +866,20 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "clusterKeyFile": {
-                    "type": "string"
+                    "type": "string",
+                    "example": "cluster.key"
                 },
                 "databaseFile": {
-                    "type": "string"
+                    "type": "string",
+                    "example": "flux.duckdb"
                 },
                 "dir": {
-                    "type": "string"
-                },
-                "stateFile": {
-                    "type": "string"
+                    "type": "string",
+                    "example": "./data"
                 },
                 "walmaxSizeMB": {
-                    "type": "integer"
+                    "type": "integer",
+                    "example": 500
                 }
             }
         },
@@ -860,6 +892,10 @@ const docTemplate = `{
                 "batchInterval": {
                     "type": "string"
                 },
+                "disabled": {
+                    "description": "Master switch to disable all telemetry",
+                    "type": "boolean"
+                },
                 "maxBatchSize": {
                     "type": "integer"
                 },
@@ -868,6 +904,15 @@ const docTemplate = `{
                 },
                 "serviceName": {
                     "type": "string"
+                },
+                "streamName": {
+                    "type": "string"
+                },
+                "streamSubjects": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
                 }
             }
         },
@@ -875,13 +920,16 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "burst": {
-                    "type": "integer"
+                    "type": "integer",
+                    "example": 50
                 },
                 "enabled": {
-                    "type": "boolean"
+                    "type": "boolean",
+                    "example": true
                 },
                 "rate": {
-                    "type": "number"
+                    "type": "number",
+                    "example": 500
                 }
             }
         },
@@ -905,8 +953,8 @@ const docTemplate = `{
                 },
                 "id": {
                     "description": "Assigned by Registry/Mixer",
-                    "type": "integer",
-                    "example": 100
+                    "type": "string",
+                    "example": "100"
                 },
                 "name": {
                     "type": "string",
@@ -916,8 +964,7 @@ const docTemplate = `{
                     "description": "Assigned by Mixer",
                     "type": "object",
                     "additionalProperties": {
-                        "type": "integer",
-                        "format": "int64"
+                        "type": "string"
                     }
                 },
                 "type": {
@@ -1013,7 +1060,7 @@ const docTemplate = `{
                 },
                 "id": {
                     "description": "Assigned by Registry/Mixer",
-                    "type": "integer"
+                    "type": "string"
                 },
                 "to": {
                     "type": "string",
@@ -1021,17 +1068,21 @@ const docTemplate = `{
                 }
             }
         }
+    },
+    "externalDocs": {
+        "description": "fluxrig Architecture Guide",
+        "url": "https://fluxrig.org/docs/architecture"
     }
 }`
 
 // SwaggerInfo holds exported Swagger Info so clients can modify it
 var SwaggerInfo = &swag.Spec{
-	Version:          "v0.4.5-dev",
+	Version:          "v0.5.0-dev",
 	Host:             "localhost:8090",
 	BasePath:         "/api/v1",
 	Schemes:          []string{"http"},
-	Title:            "FluxRig Mixer API",
-	Description:      "Control Plane API for FluxRig Orchestration.",
+	Title:            "fluxrig Mixer API",
+	Description:      "Control Plane API for fluxrig Orchestration. The Mixer acts as the brain of the fleet, managing Rack enrollment, Scenario deployment, and global Telemetry aggregation.",
 	InfoInstanceName: "swagger",
 	SwaggerTemplate:  docTemplate,
 	LeftDelim:        "{{",

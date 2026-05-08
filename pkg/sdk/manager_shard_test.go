@@ -7,6 +7,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/jaab-tech/fluxrig/pkg/manager"
@@ -21,7 +22,7 @@ func TestDefaultContext_Certification(t *testing.T) {
 		assert.Nil(t, c.Context())
 		assert.Nil(t, c.Config())
 		assert.Equal(t, "", c.GearName())
-		assert.Equal(t, uint64(0), c.MachineID())
+		assert.Equal(t, uuid.Nil, c.MachineID())
 		assert.Nil(t, c.Logger())
 		assert.Nil(t, c.IDGen())
 		assert.Nil(t, c.Bus())

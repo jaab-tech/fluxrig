@@ -12,7 +12,7 @@ url = "nats://localhost:4223"
 
 [store]
 dir = "./data"
-database_file = "fluxrig.duckdb"
+database_file = "flux.duckdb"
 cluster_key_file = "cluster.key"
 
 [observability]

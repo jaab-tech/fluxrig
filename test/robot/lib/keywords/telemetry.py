@@ -221,8 +221,8 @@ class TelemetryKeywords:
             # Count physical log file lines
             physical_counts = {}
             
-            # Mixer logs
-            mixer_log = os.path.join(mixer_dir, "logs", "mixer.log")
+            # Mixer logs (written via Popen stdout redirect — not the TOML filename)
+            mixer_log = os.path.join(mixer_dir, "logs", "process_stdout.log")
             if os.path.exists(mixer_log):
                 with open(mixer_log, 'r') as f:
                     physical_counts['MIXER'] = sum(1 for _ in f)
@@ -234,8 +234,8 @@ class TelemetryKeywords:
                     if os.path.exists(rack_log):
                         with open(rack_log, 'r') as f:
                             physical_counts['RACK'] = physical_counts.get('RACK', 0) + sum(1 for _ in f)
-                    # Also check fluxrig.log (alternative name)
-                    alt_log = os.path.join(rack_dir, "logs", "fluxrig.log")
+                    # Also check flux.log (alternative name)
+                    alt_log = os.path.join(rack_dir, "logs", "flux.log")
                     if os.path.exists(alt_log):
                         with open(alt_log, 'r') as f:
                             physical_counts['RACK'] = physical_counts.get('RACK', 0) + sum(1 for _ in f)
@@ -418,9 +418,9 @@ class TelemetryKeywords:
             try:
                 kpi_query = f"""
                 SELECT 
-                    sum(CASE WHEN name = 'fluxrig.gear.messages_in' THEN value END) as total_msgs,
-                    sum(CASE WHEN name = 'fluxrig.gear.errors' THEN value END) as total_errors,
-                    max(CASE WHEN name = 'fluxrig_rack_connections_active' THEN value END) as peak_connections
+                    sum(CASE WHEN name IN ('flux.gear.messages_in', 'flux.gear.messages_in') THEN value END) as total_msgs,
+                    sum(CASE WHEN name IN ('flux.gear.errors', 'flux.gear.errors') THEN value END) as total_errors,
+                    max(CASE WHEN name IN ('flux_rack_connections_active', 'fluxrig_rack_connections_active') THEN value END) as peak_connections
                 FROM read_parquet('{telemetry_dir}/metrics/**/*.parquet', union_by_name=true)
                 """
                 kpi_res = con.execute(kpi_query).fetchone()
@@ -463,10 +463,17 @@ class TelemetryKeywords:
             try:
                 sla_query = f"""
                 SELECT 
-                    sum(CASE WHEN name = 'fluxrig_rack_latency_seconds.sum' THEN value END) * 1000 / 
-                    NULLIF(sum(CASE WHEN name = 'fluxrig_rack_latency_seconds.count' THEN value END), 0) as avg_latency_ms,
-                    sum(CASE WHEN name = 'fluxrig.gear.messages_in' THEN value END) as total_msgs,
-                    sum(CASE WHEN name = 'fluxrig.gear.errors' THEN value END) as total_errors
+                    (
+                        COALESCE(sum(CASE WHEN name IN ('flux_rack_latency_seconds.sum', 'fluxrig_rack_latency_seconds.sum') THEN value END) * 1000, 0) +
+                        COALESCE(sum(CASE WHEN name IN ('flux.gear.processing_time_ms.sum', 'flux.gear.processing_time_ms.sum') THEN value END), 0)
+                    ) / 
+                    NULLIF(
+                        COALESCE(sum(CASE WHEN name IN ('flux_rack_latency_seconds.count', 'fluxrig_rack_latency_seconds.count') THEN value END), 0) +
+                        COALESCE(sum(CASE WHEN name IN ('flux.gear.processing_time_ms.count', 'flux.gear.processing_time_ms.count') THEN value END), 0), 
+                        0
+                    ) as avg_latency_ms,
+                    sum(CASE WHEN name IN ('flux.gear.messages_in', 'flux.gear.messages_in') THEN value END) as total_msgs,
+                    sum(CASE WHEN name IN ('flux.gear.errors', 'flux.gear.errors') THEN value END) as total_errors
                 FROM read_parquet('{telemetry_dir}/metrics/**/*.parquet', union_by_name=true)
                 """
                 sla_res = con.execute(sla_query).fetchone()
@@ -710,19 +717,25 @@ class TelemetryKeywords:
                 SELECT 
                     CAST(FLOOR((epoch(timestamp) - {start_ts_global}) / {BIN_SIZE}) * {BIN_SIZE} AS INTEGER) as rel_sec,
                     -- Rack
-                    SUM(case when name = 'fluxrig_rack_latency_seconds.sum' then value else 0 end) as rack_sum,
-                    SUM(case when name = 'fluxrig_rack_latency_seconds.count' then value else 0 end) as rack_count,
+                    SUM(case when name IN ('flux_rack_latency_seconds.sum', 'fluxrig_rack_latency_seconds.sum') then value * 1000 
+                             when name IN ('flux.gear.processing_time_ms.sum', 'flux.gear.processing_time_ms.sum') then value else 0 end) as rack_sum,
+                    SUM(case when name IN ('flux_rack_latency_seconds.count', 'fluxrig_rack_latency_seconds.count') then value 
+                             when name IN ('flux.gear.processing_time_ms.count', 'flux.gear.processing_time_ms.count') then value else 0 end) as rack_count,
                     -- Gear
-                    SUM(case when name = 'fluxrig.gear.processing_time_ms.sum' then value else 0 end) as gear_sum,
-                    SUM(case when name = 'fluxrig.gear.processing_time_ms.count' then value else 0 end) as gear_count,
+                    SUM(case when name IN ('flux.gear.processing_time_ms.sum', 'flux.gear.processing_time_ms.sum') then value else 0 end) as gear_sum,
+                    SUM(case when name IN ('flux.gear.processing_time_ms.count', 'flux.gear.processing_time_ms.count') then value else 0 end) as gear_count,
                     -- NATS
-                    SUM(case when name = 'fluxrig.nats.publish_latency_ms.sum' then value else 0 end) as nats_sum,
-                    SUM(case when name = 'fluxrig.nats.publish_latency_ms.count' then value else 0 end) as nats_count
+                    SUM(case when name IN ('flux.nats.publish_latency_ms.sum', 'flux.nats.publish_latency_ms.sum') then value else 0 end) as nats_sum,
+                    SUM(case when name IN ('flux.nats.publish_latency_ms.count', 'flux.nats.publish_latency_ms.count') then value else 0 end) as nats_count
                 FROM read_parquet('{telemetry_dir}/metrics/**/*.parquet', union_by_name=true)
                 WHERE name IN (
+                    'flux.wire.duration_ms.sum', 'flux.wire.duration_ms.count',
+                    'flux.gear.processing_time_ms.sum', 'flux.gear.processing_time_ms.count',
+                    'flux.nats.publish_latency_ms.sum', 'flux.nats.publish_latency_ms.count',
+                    'flux_rack_latency_seconds.sum', 'flux_rack_latency_seconds.count',
                     'fluxrig_rack_latency_seconds.sum', 'fluxrig_rack_latency_seconds.count',
-                    'fluxrig.gear.processing_time_ms.sum', 'fluxrig.gear.processing_time_ms.count',
-                    'fluxrig.nats.publish_latency_ms.sum', 'fluxrig.nats.publish_latency_ms.count'
+                    'flux.gear.processing_time_ms.sum', 'flux.gear.processing_time_ms.count',
+                    'flux.nats.publish_latency_ms.sum', 'flux.nats.publish_latency_ms.count'
                 )
                 GROUP BY rel_sec
                 ORDER BY rel_sec
@@ -790,7 +803,7 @@ class TelemetryKeywords:
 
                 # 2. Per-Gear Metrics
                 # Query metrics Grouped by Gear ID (from attributes)
-                # Note: 'fluxrig.gear.messages_in' and 'fluxrig.gear.messages_out'
+                # Note: 'flux.gear.messages_in' and 'flux.gear.messages_out'
                 gear_stats = {}
                 try:
                     q_gears = f"""
@@ -799,7 +812,7 @@ class TelemetryKeywords:
                         name,
                         sum(value) as val
                     FROM read_parquet('{telemetry_dir}/metrics/**/*.parquet', union_by_name=true)
-                    WHERE name IN ('fluxrig.gear.messages_in', 'fluxrig.gear.messages_out')
+                    WHERE name IN ('flux.gear.messages_in', 'flux.gear.messages_out', 'flux.gear.messages_in', 'flux.gear.messages_out')
                     GROUP BY gear_id, name
                     """
                     g_res = con.execute(q_gears).fetchall()
@@ -821,7 +834,7 @@ class TelemetryKeywords:
                         (CASE WHEN attributes LIKE '%inbound%' THEN 'in' ELSE 'out' END) as dir,
                         sum(value)
                     FROM read_parquet('{telemetry_dir}/metrics/**/*.parquet', union_by_name=true)
-                    WHERE name = 'fluxrig_rack_messages_total'
+                    WHERE name IN ('flux_rack_messages_total', 'flux.gear.messages_in', 'flux.gear.messages_out', 'fluxrig_rack_messages_total', 'flux.gear.messages_in', 'flux.gear.messages_out')
                     GROUP BY dir
                     """
                     r_res = con.execute(q_rack).fetchall()
@@ -862,7 +875,7 @@ class TelemetryKeywords:
                 # Rack
                 loss_rack = (abs(client_sent - rack_in)/client_sent*100) if client_sent > 0 else 0
                 status_rack = "✅" if loss_rack < 1 else f"⚠️ {loss_rack:.1f}%"
-                rows.append(["FluxRig Rack (Gateway)", f"{int(rack_in):,}", f"{int(rack_out):,}", status_rack])
+                rows.append(["fluxrig Rack (Gateway)", f"{int(rack_in):,}", f"{int(rack_out):,}", status_rack])
                 
                 # Gears
                 for gid, stats in sorted(gear_stats.items()):
@@ -986,12 +999,10 @@ class TelemetryKeywords:
             try:
                 # 7.1 Network I/O Volume
                 query = f"""
-                SELECT 
-                    CAST(FLOOR((epoch(timestamp) - {start_ts_global}) / 15) * 15 AS INTEGER) as rel_sec,
-                    sum(value) as rate
+                SELECT CAST(FLOOR((epoch(timestamp) - {start_ts_global}) / 15) * 15 AS INTEGER) as rel_sec, name, sum(value) as val
                 FROM read_parquet('{telemetry_dir}/metrics/**/*.parquet', union_by_name=true)
-                WHERE name = 'fluxrig_rack_bytes_total'
-                GROUP BY rel_sec
+                WHERE name IN ('flux.port.bytes_in', 'flux.port.bytes_out', 'flux.wire.bytes_in', 'flux.wire.bytes_out', 'flux.port.bytes_in', 'flux.port.bytes_out', 'flux.wire.bytes_in', 'flux.wire.bytes_out')
+                GROUP BY rel_sec, name
                 ORDER BY rel_sec
                 """
                 results = con.execute(query).fetchall()
@@ -999,18 +1010,16 @@ class TelemetryKeywords:
                     labels = [get_rel_label(r[0]) for r in results]
                     components.append(renderer.render_line_chart(
                         title="Network I/O Volume (Bytes)",
-                        subtitle=f"Source: fluxrig_rack_bytes_total | Bytes transferred per 15s (Smoothed for Jitter)",
+                        subtitle=f"Source: flux/fluxrig port/wire bytes | Bytes transferred per 15s (Smoothed for Jitter)",
                         labels=labels,
                         datasets=[{"label": "Bytes Transferred", "data": [r[1] for r in results], "color": "rgba(153, 102, 255, 1)"}]
                     ))
 
                 # 7.2 Internal Bus Activity
                 query = f"""
-                SELECT 
-                    CAST(FLOOR((epoch(timestamp) - {start_ts_global}) / 15) * 15 AS INTEGER) as rel_sec,
-                    sum(value) / 15 as rate
+                SELECT CAST(FLOOR((epoch(timestamp) - {start_ts_global}) / 15) * 15 AS INTEGER) as rel_sec, sum(value) as val
                 FROM read_parquet('{telemetry_dir}/metrics/**/*.parquet', union_by_name=true)
-                WHERE name = 'fluxrig.bus.publish_count'
+                WHERE name IN ('flux.bus.publish_count', 'flux.bus.publish_count')
                 GROUP BY rel_sec
                 ORDER BY rel_sec
                 """
@@ -1019,7 +1028,7 @@ class TelemetryKeywords:
                     labels = [get_rel_label(r[0]) for r in results]
                     components.append(renderer.render_line_chart(
                         title="Internal Bus Activity (Events)",
-                        subtitle=f"Source: fluxrig.bus.publish_count | Events per second (Avg in 15s bin for Jitter stability)",
+                        subtitle=f"Source: flux/flux.bus.publish_count | Events per second (Avg in 15s bin for Jitter stability)",
                         labels=labels,
                         datasets=[{"label": "Bus Publishes/sec", "data": [r[1] for r in results], "color": "rgba(255, 159, 64, 1)"}]
                     ))
@@ -1029,11 +1038,9 @@ class TelemetryKeywords:
             # 6. Suite Connections (Prominent)
             try:
                 query = f"""
-                SELECT 
-                    CAST(FLOOR((epoch(timestamp) - {start_ts_global}) / {BIN_SIZE}) * {BIN_SIZE} AS INTEGER) as rel_sec,
-                    max(value) as val
+                SELECT CAST(FLOOR((epoch(timestamp) - {start_ts_global}) / 1) * 1 AS INTEGER) as rel_sec, max(value) as val
                 FROM read_parquet('{telemetry_dir}/metrics/**/*.parquet', union_by_name=true)
-                WHERE name = 'fluxrig_rack_connections_active'
+                WHERE name IN ('flux_port_connections_active', 'flux.port.connections_active')
                 GROUP BY rel_sec ORDER BY rel_sec
                 """
                 results = con.execute(query).fetchall()
@@ -1041,7 +1048,7 @@ class TelemetryKeywords:
                     labels = [get_rel_label(r[0]) for r in results]
                     components.append(renderer.render_line_chart(
                         title="Suite Active Inbound Connections",
-                        subtitle="Source: fluxrig_rack_connections_active | Peak concurrent TCP connections per second",
+                        subtitle="Source: flux/flux.port.connections_active | Peak concurrent TCP connections per second",
                         labels=labels,
                         datasets=[{"label": "Active Connections", "data": [r[1] for r in results], "color": "rgba(153, 102, 255, 1)"}]
                     ))
@@ -1053,12 +1060,11 @@ class TelemetryKeywords:
             # 6c. Suite Gear Processing Duration (Dedicated)
             try:
                 query = f"""
-                SELECT 
-                    CAST(FLOOR((epoch(timestamp) - {start_ts_global}) / {BIN_SIZE}) * {BIN_SIZE} AS INTEGER) as rel_sec,
-                    (SUM(CASE WHEN name = 'fluxrig.gear.processing_time_ms.sum' THEN value END) / 
-                    NULLIF(SUM(CASE WHEN name = 'fluxrig.gear.processing_time_ms.count' THEN value END), 0)) as val
+                SELECT CAST(FLOOR((epoch(timestamp) - {start_ts_global}) / {BIN_SIZE}) * {BIN_SIZE} AS INTEGER) as rel_sec,
+                    (SUM(CASE WHEN name IN ('flux.gear.processing_time_ms.sum', 'flux.gear.processing_time_ms.sum') THEN value END) / 
+                    NULLIF(SUM(CASE WHEN name IN ('flux.gear.processing_time_ms.count', 'flux.gear.processing_time_ms.count') THEN value END), 0)) as val
                 FROM read_parquet('{telemetry_dir}/metrics/**/*.parquet', union_by_name=true)
-                WHERE name IN ('fluxrig.gear.processing_time_ms.sum', 'fluxrig.gear.processing_time_ms.count')
+                WHERE name IN ('flux.gear.processing_time_ms.sum', 'flux.gear.processing_time_ms.count', 'flux.gear.processing_time_ms.sum', 'flux.gear.processing_time_ms.count')
                 GROUP BY rel_sec ORDER BY rel_sec
                 """
                 results = con.execute(query).fetchall()
@@ -1066,7 +1072,7 @@ class TelemetryKeywords:
                     labels = [get_rel_label(r[0]) for r in results]
                     components.append(renderer.render_line_chart(
                         title="Suite Gear Processing Duration (ms)",
-                        subtitle=f"Source: fluxrig.gear.processing_time_ms (sum/count×1000) | Avg gear execution time, {BIN_SIZE}s bins",
+                        subtitle=f"Source: flux.gear.processing_time_ms (sum/count×1000) | Avg gear execution time, {BIN_SIZE}s bins",
                         labels=labels,
                         datasets=[{"label": "Gear Proc (ms)", "data": [r[1] for r in results], "color": "rgba(75, 192, 192, 1)"}]
                     ))
@@ -1165,7 +1171,7 @@ class TelemetryKeywords:
         """
         telemetry_dir = os.path.join(work_dir, "data", "telemetry")
         mixer_log = os.path.join(work_dir, "logs", "mixer.log")
-        rack_log = os.path.join(work_dir, "../rack", "logs", "fluxrig.log") # Assumes standard layout
+        rack_log = os.path.join(work_dir, "../rack", "logs", "flux.log") # Assumes standard layout
 
         components = []
 
@@ -1271,7 +1277,7 @@ class TelemetryKeywords:
             logger.error(f"Failed to generate detailed report: {e}")
 
     @keyword
-    def get_server_metrics(self, api_url="http://localhost:8090", metric_name="fluxrig_rack_messages_total"):
+    def get_server_metrics(self, api_url="http://localhost:8090", metric_name="flux.gear.messages_in"):
         """
         Queries Mixer API for server-side metrics.
         Returns list of points: {timestamp, value, attributes}.
@@ -1286,9 +1292,11 @@ class TelemetryKeywords:
         }
         
         try:
-            resp = requests.get(url, params=params, timeout=5)
+            logger.info(f"Querying Mixer API: {url} (metric={metric_name})")
+            resp = requests.get(url, params=params, timeout=15)
             resp.raise_for_status()
             data = resp.json()
+            logger.info(f"Mixer API returned {len(data)} points for {metric_name}")
             
             metrics = []
             for item in data:
@@ -1328,7 +1336,7 @@ class TelemetryKeywords:
         Fetches gear metrics and returns a dict mapping gear_id -> points.
         """
         # Try multiple names as Mixer/Gears might use different conventions
-        metric_names = ["fluxrig_gear_messages_total", "fluxrig.gear.messages_in", "fluxrig.gear.messages_out"]
+        metric_names = ["flux_gear_messages_total", "flux.gear.messages_in", "flux.gear.messages_out", "fluxrig_gear_messages_total", "flux.gear.messages_in", "flux.gear.messages_out"]
         gears = {}
         
         for m_name in metric_names:
@@ -1340,7 +1348,10 @@ class TelemetryKeywords:
                 if gid not in gears:
                     gears[gid] = []
                 gears[gid].append(p)
-            if gears: break
+        
+        # Sort each gear's points by timestamp to ensure correct rate calculation
+        for gid in gears:
+            gears[gid].sort(key=lambda x: x['timestamp'])
             
         return gears
 

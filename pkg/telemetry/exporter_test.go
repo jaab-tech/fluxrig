@@ -8,9 +8,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/log"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	"go.opentelemetry.io/otel/sdk/trace"
+	oteltrace "go.opentelemetry.io/otel/trace"
 
 	"github.com/jaab-tech/fluxrig/pkg/bus"
 	"github.com/jaab-tech/fluxrig/pkg/idgen"
@@ -19,8 +22,8 @@ import (
 
 func TestSpanExporter_ExportSpans(t *testing.T) {
 	mockBus := bus.NewMockBus()
-	gen, _ := idgen.New(1)
-	writer := telemetry.NewNatsWriter(mockBus, 12345, "test-machine", "flux.telemetry", gen, 1)
+	gen, _ := idgen.New(uuid.New())
+	writer := telemetry.NewNatsWriter(mockBus, uuid.New(), "test-machine", "flux.telemetry", gen, 1)
 	exporter := telemetry.NewSpanExporter(writer)
 
 	tp := trace.NewTracerProvider(
@@ -30,16 +33,16 @@ func TestSpanExporter_ExportSpans(t *testing.T) {
 
 	ctx := context.Background()
 	tracer := tp.Tracer("test-tracer")
-	_, span := tracer.Start(ctx, "test-export-span")
+	_, span := tracer.Start(ctx, "test-export-span", oteltrace.WithAttributes(attribute.String("id", uuid.New().String())))
 	span.End()
 
 	// Wait a tiny bit for async bus handler if any (MockBus is sync for Publish list append)
 
 	// Wait a tiny bit for async bus handler if any (MockBus is sync for Publish list append)
 
-	msgs := mockBus.GetMessages("flux.telemetry.spans")
+	msgs := mockBus.GetMessages("flux.telemetry.test-machine.spans")
 	if len(msgs) == 0 {
-		t.Fatal("Expected message on 'flux.telemetry.spans', got none")
+		t.Fatal("Expected message on 'flux.telemetry.test-machine.spans', got none")
 	}
 
 	// Verify payload structure (light check)
@@ -69,8 +72,8 @@ func TestSpanExporter_ExportSpans(t *testing.T) {
 
 func TestLogExporter_Export(t *testing.T) {
 	mockBus := bus.NewMockBus()
-	gen, _ := idgen.New(1)
-	writer := telemetry.NewNatsWriter(mockBus, 12345, "test-machine", "flux.telemetry", gen, 1)
+	gen, _ := idgen.New(uuid.New())
+	writer := telemetry.NewNatsWriter(mockBus, uuid.New(), "test-machine", "flux.telemetry", gen, 1)
 	exporter := telemetry.NewLogExporter(writer)
 
 	// Create detailed Record
@@ -85,9 +88,9 @@ func TestLogExporter_Export(t *testing.T) {
 		t.Fatalf("Export failed: %v", err)
 	}
 
-	msgs := mockBus.GetMessages("flux.telemetry.logs")
+	msgs := mockBus.GetMessages("flux.telemetry.test-machine.logs")
 	if len(msgs) == 0 {
-		t.Fatal("Expected message on 'flux.telemetry.logs', got none")
+		t.Fatal("Expected message on 'flux.telemetry.test-machine.logs', got none")
 	}
 
 	data := msgs[0].Data

@@ -10,6 +10,7 @@ import (
 	"os"
 	"text/tabwriter"
 
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 )
 
@@ -30,13 +31,13 @@ var racksCmd = &cobra.Command{
 		}
 
 		var racks []struct {
-			MachineID uint16 `json:"machine_id"`
-			Name      string `json:"name"`
-			Status    string `json:"status"`
-			IP        string `json:"ip"`
-			Port      int    `json:"port"`
-			LastSeen  string `json:"last_seen"`
-			FirstSeen string `json:"first_seen"`
+			MachineID uuid.UUID `json:"machine_id"`
+			Name      string    `json:"name"`
+			Status    string    `json:"status"`
+			IP        string    `json:"ip"`
+			Port      int       `json:"port"`
+			LastSeen  string    `json:"last_seen"`
+			FirstSeen string    `json:"first_seen"`
 		}
 
 		if err := json.NewDecoder(resp.Body).Decode(&racks); err != nil {
@@ -46,7 +47,7 @@ var racksCmd = &cobra.Command{
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
 		_, _ = fmt.Fprintln(w, "ID\tNAME\tSTATUS\tIP\tPORT\tLAST SEEN")
 		for _, r := range racks {
-			_, _ = fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%d\t%s\n", r.MachineID, r.Name, r.Status, r.IP, r.Port, r.LastSeen)
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%s\n", r.MachineID, r.Name, r.Status, r.IP, r.Port, r.LastSeen)
 		}
 		_ = w.Flush()
 		return nil

@@ -4,7 +4,7 @@
 # Simple E2E Test
 
 ## Objective
-Verify baseline FluxRig system functionality: Key Generation, Rack Registration, Passport Issuance, and CLI Interoperability.
+Verify baseline fluxrig system functionality: Key Generation, Rack Registration, Passport Issuance, and CLI Interoperability.
 
 ## Verifications
 1. **Key Generation**: Creates a cluster key pair.

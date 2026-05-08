@@ -92,7 +92,7 @@ func showRacksConfig(ctx context.Context, apiURL string, out io.Writer) error {
 		Name      string         `json:"name"`
 		Status    string         `json:"status"`
 		Config    map[string]any `json:"config"`
-		MachineID uint16         `json:"machine_id"`
+		MachineID string         `json:"machine_id"`
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&racks); err != nil {
@@ -107,7 +107,7 @@ func showRacksConfig(ctx context.Context, apiURL string, out io.Writer) error {
 			c, _ := json.Marshal(r.Config)
 			configStr = string(c)
 		}
-		_, _ = fmt.Fprintf(w, "%d\t%s\t%s\t%s\n", r.MachineID, r.Name, r.Status, configStr)
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", r.MachineID, r.Name, r.Status, configStr)
 	}
 	_ = w.Flush()
 	return nil

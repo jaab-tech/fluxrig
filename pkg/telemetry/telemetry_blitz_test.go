@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -65,8 +66,9 @@ func TestMultiHandler_Forensic(t *testing.T) {
 
 func TestExporters_Forensic(t *testing.T) {
 	b := bus.NewMockBus()
-	gen, _ := idgen.New(1)
-	writer := NewNatsWriter(b, 12345, "test-node", "flux.telemetry.test", gen, 100*time.Millisecond)
+	gen, _ := idgen.New(uuid.New())
+	eid := uuid.New()
+	writer := NewNatsWriter(b, eid, "test-node", "flux.telemetry.test", gen, 100*time.Millisecond)
 
 	t.Run("NatsWriter_JSONLog", func(t *testing.T) {
 		logData := map[string]interface{}{"msg": "test"}

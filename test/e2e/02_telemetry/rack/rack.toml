@@ -8,6 +8,7 @@ heartbeat_interval = "1s"
 
 [rack.bus]
 url = "nats://localhost:4225"
+stream_name = "flux-telemetry"
 
 [logging]
 level = "debug"

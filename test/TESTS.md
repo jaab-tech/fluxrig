@@ -1,7 +1,7 @@
 <!-- Copyright (c) 2025 JAAB Tech SAS, Uruguay All Rights Reserved -->
 <!-- See https://jaab.tech -->
 
-# FluxRig Testing Strategy
+# fluxrig Testing Strategy
 
 We employ a **Hybrid Testing Strategy** to ensure both infrastructure stability and business logic correctness.
 
@@ -30,5 +30,5 @@ We employ a **Hybrid Testing Strategy** to ensure both infrastructure stability 
 
 ---
 **Note on Terminology**:
-*   **Scenario**: Refers **only** to the FluxRig Topology Definition (YAML).
+*   **Scenario**: Refers **only** to the fluxrig Topology Definition (YAML).
 *   **Test Case**: Refers to a specific validation step in Robot Framework.

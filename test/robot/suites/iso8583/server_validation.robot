@@ -1,10 +1,10 @@
 # Copyright 2025 JAAB Tech SAS, Uruguay
 *** Settings ***
 Documentation     ISO8583 Server Mode Validation (Internal Loopback)
-...               Validates FluxRig in Server Mode by forwarding traffic back to the source.
+...               Validates fluxrig in Server Mode by forwarding traffic back to the source.
 ...               Topology: [Load Gen] -> [Server Gear] -> (Loopback) -> [Server Gear] -> [Load Gen]
 Resource          ../../resources/common.resource
-Library           FluxRigLibrary
+Library           fluxrigLibrary
 Library           ISO8583Library
 Library           Collections
 Suite Setup       Initialize Server Suite    ${CURDIR}
@@ -35,7 +35,7 @@ Initialize Server Suite
     Start Rack    config_file=${RACK_CONFIG}    work_dir=${WORK_DIR}/rack    mixer_home=${WORK_DIR}/mixer    alias=rack
     
     # Verify Health via CLI (Integrated Testing)
-    FluxRig Check    config_file=${RACK_CONFIG}    work_dir=${WORK_DIR}/rack
+    fluxrig Check    config_file=${RACK_CONFIG}    work_dir=${WORK_DIR}/rack
     
     Sleep    5s    reason=Wait for Rack to initialize
     
@@ -59,7 +59,7 @@ Teardown Server Suite
     Stop All Load Generators
     # Log Verification (Fail if ERROR/FATAL found)
     Run Keyword And Continue On Failure    Check Log For Errors    ${WORK_DIR}/rack/logs/fluxrig.log
-    Run Keyword And Continue On Failure    Check Log For Errors    ${WORK_DIR}/mixer/logs/mixer.log
+    Run Keyword And Continue On Failure    Check Log For Errors    ${WORK_DIR}/mixer/logs/process_stdout.log
     
     # Generate final summary report
     Run Keyword And Continue On Failure    Generate Suite Summary Report    ${WORK_DIR}/suite_performance_summary.html    work_dir=${WORK_DIR}
@@ -72,7 +72,7 @@ Server Loopback Validation (Functional)
     ${report}=    Run Native Load Test    target=${ISO_HOST}:${ISO_PORT}    concurrency=5    rate=10    duration=5s    report_file=${WORK_DIR}/r_server_valid.json    warmup=1s
     Assert Response Rate Above   ${report}    100.0
     Assert Latency P99 Below     ${report}    50.0
-    Sleep    2s    reason=Zero-Warning Stabilization: Wait for OTel flush
+    Sleep    5s    reason=Zero-Warning Stabilization: Wait for OTel flush
     Record Performance Result  ${WORK_DIR}/r_server_valid.json    name=Functional    description=Functional validation verifiying MTI 0800 loopback with BCD encoding and 12-byte correlation headers.    work_dir=${WORK_DIR}
 
 Server Loopback Performance (Baseline 100 TPS)
@@ -81,7 +81,7 @@ Server Loopback Performance (Baseline 100 TPS)
     ${report}=    Run Native Load Test    target=${ISO_HOST}:${ISO_PORT}    concurrency=10    rate=100    duration=60s    report_file=${WORK_DIR}/r_server_100tps.json    warmup=2s
     Assert Response Rate Above   ${report}    95.0
     Assert Latency P99 Below     ${report}    100.0
-    Sleep    2s    reason=Zero-Warning Stabilization: Wait for OTel flush
+    Sleep    5s    reason=Zero-Warning Stabilization: Wait for OTel flush
     Record Performance Result  ${WORK_DIR}/r_server_100tps.json    name=Baseline    description=Baseline performance measurement at 100 Transactons Per Second with 10 parallel connections.    work_dir=${WORK_DIR}
 
 Server Loopback Performance (Stress 1000 TPS)
@@ -92,5 +92,5 @@ Server Loopback Performance (Stress 1000 TPS)
     # Latency warning threshold
     ${p99}=    Get From Dictionary    ${report}    latency_p99_ms
     Run Keyword If    ${p99} > 200    Log    Critical Latency Detected: ${p99}ms    WARN
-    Sleep    2s    reason=Zero-Warning Stabilization: Wait for OTel flush
+    Sleep    5s    reason=Zero-Warning Stabilization: Wait for OTel flush
     Record Performance Result  ${WORK_DIR}/r_server_1000tps.json    name=Stress    description=High-load stress test at 1000 TPS with 10 concurrent connections over 60 seconds to identify system saturation points.    work_dir=${WORK_DIR}

@@ -37,6 +37,7 @@ func (d *DaemonLogic) Init() error {
 	// 1. Governance: Create Bucket
 	kv := d.gear.ctx.Bus().KV()
 	err := kv.EnsureBucket(
+		context.Background(),
 		d.gear.config.Bucket,
 		d.gear.config.Storage,
 		d.gear.config.Replicas,
@@ -196,5 +197,5 @@ func (d *DaemonLogic) handleTimeout(key string, value []byte, emit func(*fluxmsg
 	// DEL -> cancelExpiry (Stop timer) -> Timer already fired. Safe.
 
 	bucket := d.gear.config.Bucket
-	_ = d.gear.ctx.Bus().KV().Delete(bucket, key)
+	_ = d.gear.ctx.Bus().KV().Delete(context.Background(), bucket, key)
 }

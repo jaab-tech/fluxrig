@@ -6,10 +6,10 @@ package registry
 import (
 	"fmt"
 	"regexp"
+
+	"github.com/google/uuid"
 )
 
-// Scenario represents the static definition of the system topology.
-// Reference: Topology Specification
 // Scenario represents the static definition of the system topology.
 // Reference: Topology Specification
 type Scenario struct {
@@ -39,22 +39,21 @@ type LabelMatch struct {
 }
 
 // GearSpec defines a logical unit of processing.
-// GearSpec defines a logical unit of processing.
 type GearSpec struct {
-	ID     uint64            `json:"id,omitempty" yaml:"id,omitempty" example:"100"` // Assigned by Registry/Mixer
-	Name   string            `json:"name" yaml:"name" example:"iso8583-in"`
-	Type   string            `json:"type" yaml:"type" example:"iso8583-server"`
-	Deploy any               `json:"deploy" yaml:"deploy" swaggertype:"string" example:"rack-group-1"` // string (Group/Rack) or map
-	Config map[string]any    `json:"config" yaml:"config" swaggertype:"object,string"`
-	Ports  map[string]uint64 `json:"ports,omitempty" yaml:"ports,omitempty"` // Assigned by Mixer
-	Doc    string            `json:"doc,omitempty" yaml:"doc,omitempty" example:"Primary Ingress"`
+	ID     uuid.UUID            `json:"id,omitempty" yaml:"id,omitempty" example:"100"` // Assigned by Registry/Mixer
+	Name   string               `json:"name" yaml:"name" example:"iso8583-in"`
+	Type   string               `json:"type" yaml:"type" example:"iso8583-server"`
+	Deploy any                  `json:"deploy" yaml:"deploy" swaggertype:"string" example:"rack-group-1"` // string (Group/Rack) or map
+	Config map[string]any       `json:"config" yaml:"config" swaggertype:"object,string"`
+	Ports  map[string]uuid.UUID `json:"ports,omitempty" yaml:"ports,omitempty"` // Assigned by Mixer
+	Doc    string               `json:"doc,omitempty" yaml:"doc,omitempty" example:"Primary Ingress"`
 }
 
 // WireSpec defines a connection between ports.
 type WireSpec struct {
-	ID   uint64 `json:"id,omitempty" yaml:"id,omitempty"` // Assigned by Registry/Mixer
-	From string `json:"from" yaml:"from" example:"iso8583-in.out"`
-	To   string `json:"to" yaml:"to" example:"router.in"`
+	ID   uuid.UUID `json:"id,omitempty" yaml:"id,omitempty"` // Assigned by Registry/Mixer
+	From string    `json:"from" yaml:"from" example:"iso8583-in.out"`
+	To   string    `json:"to" yaml:"to" example:"router.in"`
 }
 
 // Validate ensures the Scenario is structurally sound.

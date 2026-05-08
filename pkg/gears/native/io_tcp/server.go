@@ -17,6 +17,10 @@ import (
 	"github.com/jaab-tech/fluxrig/pkg/idgen"
 	"github.com/jaab-tech/fluxrig/pkg/logger"
 	"github.com/jaab-tech/fluxrig/pkg/sdk"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 )
 
 type Server struct {
@@ -29,6 +33,15 @@ type Server struct {
 	conns       sync.Map // map[string]*Connection
 	done        chan struct{}
 	activeConns atomic.Int64
+
+	// Telemetry
+	meter       metric.Meter
+	msgsIn      metric.Int64Counter
+	msgsOut     metric.Int64Counter
+	bytesIn     metric.Int64Counter
+	bytesOut    metric.Int64Counter
+	connsActive metric.Int64UpDownCounter
+	connsTotal  metric.Int64Counter
 }
 
 type Connection struct {
@@ -37,12 +50,28 @@ type Connection struct {
 }
 
 func NewServer(cfg *Config, log *slog.Logger, emit func(*fluxmsg.FluxMsg), idGen sdk.IDGenerator) *Server {
+	meter := otel.GetMeterProvider().Meter("fluxrig/gears/io_tcp")
+
+	msgsIn, _ := meter.Int64Counter("flux.gear.messages_in", metric.WithDescription("Total incoming TCP messages"))
+	msgsOut, _ := meter.Int64Counter("flux.gear.messages_out", metric.WithDescription("Total outgoing TCP messages"))
+	bytesIn, _ := meter.Int64Counter("flux.port.bytes_in", metric.WithDescription("Total incoming bytes"))
+	bytesOut, _ := meter.Int64Counter("flux.port.bytes_out", metric.WithDescription("Total outgoing bytes"))
+	connsActive, _ := meter.Int64UpDownCounter("flux.port.connections_active", metric.WithDescription("Current active TCP connections"))
+	connsTotal, _ := meter.Int64Counter("flux.port.connections_total", metric.WithDescription("Total TCP connections accepted"))
+
 	return &Server{
-		config: cfg,
-		log:    log.With("impl", "io_tcp_server"),
-		emit:   emit,
-		idGen:  idGen,
-		done:   make(chan struct{}),
+		config:      cfg,
+		log:         log.With("impl", "io_tcp_server"),
+		emit:        emit,
+		idGen:       idGen,
+		done:        make(chan struct{}),
+		meter:       meter,
+		msgsIn:      msgsIn,
+		msgsOut:     msgsOut,
+		bytesIn:     bytesIn,
+		bytesOut:    bytesOut,
+		connsActive: connsActive,
+		connsTotal:  connsTotal,
 	}
 }
 
@@ -103,12 +132,24 @@ func (s *Server) acceptLoop() {
 		}
 
 		s.activeConns.Add(1)
+		s.connsActive.Add(context.Background(), 1, metric.WithAttributes(
+			attribute.String("gear_type", "io_tcp"),
+			attribute.String("mode", "server"),
+		))
+		s.connsTotal.Add(context.Background(), 1, metric.WithAttributes(
+			attribute.String("gear_type", "io_tcp"),
+			attribute.String("mode", "server"),
+		))
 		go s.handleConn(conn)
 	}
 }
 
 func (s *Server) handleConn(conn net.Conn) {
 	defer s.activeConns.Add(-1)
+	defer s.connsActive.Add(context.Background(), -1, metric.WithAttributes(
+		attribute.String("gear_type", "io_tcp"),
+		attribute.String("mode", "server"),
+	))
 
 	// Generate persistent Connection Wrapper
 	id := s.idGen.NextEntityID(idgen.EntitySession)
@@ -143,23 +184,23 @@ func (s *Server) handleConn(conn net.Conn) {
 		msg.Metadata["peer.port"] = port
 
 		// TRACE Logging
-		// Use loggerpkg.LevelTrace if available, or Debug
-		if s.log.Enabled(context.Background(), logger.LevelTrace) { // Changed loggerPkg.LevelTrace to logger.LevelTrace
-			s.log.Log(context.Background(), logger.LevelTrace, "received message",
-				"flux_id", fmt.Sprintf("0x%x", msg.FluxID),
-				"conn_id", connID,
-				"size", len(payload),
-				"payload", string(payload),
-				"hex", fmt.Sprintf("%x", payload),
-			)
-		} else if s.log.Enabled(context.Background(), slog.LevelDebug) {
-			s.log.Debug("received message",
-				"conn_id", connID,
-				"size", len(payload),
-				"payload", string(payload),
-				"hex", fmt.Sprintf("%x", payload),
-			)
-		}
+		s.log.Info("received message",
+			"flux.type", "GEAR",
+			"impl", "io_tcp_server",
+			"flux_id", msg.FluxID.String(),
+			"conn_id", connID,
+			"size", len(payload),
+			"payload", string(payload),
+		)
+
+		s.msgsIn.Add(context.Background(), 1, metric.WithAttributes(
+			attribute.String("gear_type", "io_tcp"),
+			attribute.String("mode", "server"),
+		))
+		s.bytesIn.Add(context.Background(), int64(len(payload)), metric.WithAttributes(
+			attribute.String("gear_type", "io_tcp"),
+			attribute.String("mode", "server"),
+		))
 
 		s.emit(msg)
 	}
@@ -200,7 +241,7 @@ func (s *Server) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.Fl
 			pathStr += "]"
 
 			s.log.Log(ctx, logger.LevelTrace, "sending message",
-				"flux_id", fmt.Sprintf("0x%x", msg.FluxID),
+				"flux_id", msg.FluxID.String(),
 				"conn_id", connID,
 				"payload_len", len(msg.RawPayload),
 				"payload_str", string(msg.RawPayload),
@@ -218,12 +259,21 @@ func (s *Server) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.Fl
 			return nil, fmt.Errorf("write error: %w", err)
 		}
 
+		s.msgsOut.Add(ctx, 1, metric.WithAttributes(
+			attribute.String("gear_type", "io_tcp"),
+			attribute.String("mode", "server"),
+		))
+		s.bytesOut.Add(ctx, int64(len(msg.RawPayload)), metric.WithAttributes(
+			attribute.String("gear_type", "io_tcp"),
+			attribute.String("mode", "server"),
+		))
+
 		if s.config.DelimiterAppend {
 			_, _ = conn.conn.Write([]byte(s.config.Delimiter))
 		}
 	}
 
-	return msg, nil
+	return nil, nil
 }
 
 func (s *Server) Stop() error {

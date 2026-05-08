@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 
 	"github.com/jaab-tech/fluxrig/pkg/pki"
@@ -75,8 +76,9 @@ func TestKeysInspect(t *testing.T) {
 	ck, _ := pki.LoadClusterKey(tmpKey)
 
 	// 2. Create Signed Passport
+	machineID := uuid.New()
 	state := &pki.RackState{
-		MachineID:   101,
+		MachineID:   machineID,
 		Name:        "test-rack",
 		Status:      "active",
 		Secret:      "ABCDEF",
@@ -102,7 +104,7 @@ func TestKeysInspect(t *testing.T) {
 	if !strings.Contains(out, "Signature Verification Passed") {
 		t.Error("Verification failed output")
 	}
-	if !strings.Contains(out, "MachineID: 101") {
+	if !strings.Contains(out, "MachineID: "+machineID.String()) {
 		t.Error("Identity not displayed")
 	}
 	if !strings.Contains(out, "Name:      test-rack") {

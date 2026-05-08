@@ -10,7 +10,7 @@ from robot.api.deco import keyword, library
 @library
 class NATSLibrary:
     """
-    NATS Helper for FluxRig Robot Tests.
+    NATS Helper for fluxrig Robot Tests.
     Allows publishing messages to 'flux-msg' and verifying receipts using CBOR.
     """
     
@@ -37,7 +37,7 @@ class NATSLibrary:
     async def _publish(self, subject, payload):
         if not self.nc:
             raise RuntimeError("Not connected to NATS")
-        # Encode as CBOR for FluxRig compatibility
+        # Encode as CBOR for fluxrig compatibility
         data = cbor2.dumps(payload)
         await self.nc.publish(subject, data)
         await self.nc.flush()

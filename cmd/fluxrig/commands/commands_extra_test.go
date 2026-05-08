@@ -59,11 +59,10 @@ func TestSetupLogger(t *testing.T) {
 		t.Error("Logger should be debug")
 	}
 
-	// Env Override
-	_ = os.Setenv("FLUXRIG_TRACE", "true")
-	defer func() { _ = os.Unsetenv("FLUXRIG_TRACE") }()
+	// Config Override
+	cfg.Logging.Trace = true
 	l2 := setupLogger(cfg)
-	// Trace level check (not standardized in slog until recently/custom, assuming loggerPkg supports it)
+	// Trace level check
 	if !l2.Enabled(context.TODO(), loggerPkg.LevelTrace) {
 		t.Error("Logger should be trace")
 	}

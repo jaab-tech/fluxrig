@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/fxamacker/cbor/v2"
 	"github.com/stretchr/testify/assert"
 
@@ -94,21 +96,22 @@ func TestVerifyConnectivity(t *testing.T) {
 func TestMetricsCache_Forensic(t *testing.T) {
 	cache := NewMetricsCache()
 
+	id100 := uuid.MustParse("00000000-0000-0000-0000-000000000100")
 	t.Run("UpdateCounter", func(t *testing.T) {
-		cache.UpdateCounter(100, "pub_count", 5, "rack-1", "RACK")
-		stats := cache.GetStats(100)
+		cache.UpdateCounter(id100, "pub_count", 5, "rack-1", "RACK")
+		stats := cache.GetStats(id100)
 		assert.NotNil(t, stats)
 		assert.Equal(t, 5.0, stats.Metrics["pub_count"].Value)
 
 		// Update again
-		cache.UpdateCounter(100, "pub_count", 10, "rack-1", "RACK")
-		stats = cache.GetStats(100)
+		cache.UpdateCounter(id100, "pub_count", 10, "rack-1", "RACK")
+		stats = cache.GetStats(id100)
 		assert.Equal(t, 15.0, stats.Metrics["pub_count"].Value)
 	})
 
 	t.Run("SetGauge", func(t *testing.T) {
-		cache.SetGauge(100, "cpu_usage", 45.5, "rack-1", "RACK")
-		stats := cache.GetStats(100)
+		cache.SetGauge(id100, "cpu_usage", 45.5, "rack-1", "RACK")
+		stats := cache.GetStats(id100)
 		assert.Equal(t, 45.5, stats.Metrics["cpu_usage"].Value)
 	})
 
@@ -118,7 +121,7 @@ func TestMetricsCache_Forensic(t *testing.T) {
 	})
 
 	t.Run("GetStats_NonExistent", func(t *testing.T) {
-		assert.Nil(t, cache.GetStats(999))
+		assert.Nil(t, cache.GetStats(uuid.New()))
 	})
 }
 
@@ -149,7 +152,7 @@ func TestInstrumentedBus_Forensic(t *testing.T) {
 	t.Run("PublishRaw_NoMetrics", func(t *testing.T) {
 		// Use a valid CBOR payload to satisfy the MockBus unmarshal
 		data, _ := cbor.Marshal(fluxmsg.New())
-		err := ibus.PublishRaw(ctx, "test.raw", data, 123)
+		err := ibus.PublishRaw(ctx, "test.raw", data, uuid.New())
 		assert.NoError(t, err)
 	})
 

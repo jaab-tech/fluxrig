@@ -16,7 +16,7 @@ root_ca_file = "../certs/ca.crt"
 
 [store]
 dir = "./data"
-database_file = "fluxrig_test.duckdb"
+database_file = "flux.duckdb"
 cluster_key_file = "cluster.key"
 
 

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/fxamacker/cbor/v2"
+	"github.com/google/uuid"
 
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/jaab-tech/fluxrig/pkg/idgen"
@@ -21,8 +22,8 @@ func TestHandler_Handle(t *testing.T) {
 	w, _ := Open(tmpDir, nil)
 	defer func() { _ = w.Close() }()
 
-	gen, _ := idgen.New(101)
-	h := NewHandler(w, gen, 12345, "test-service", "worker", nil)
+	gen, _ := idgen.New(uuid.New())
+	h := NewHandler(w, gen, uuid.New(), "test-service", "worker", nil)
 	logger := slog.New(h)
 
 	now := time.Now()
@@ -39,7 +40,7 @@ func TestHandler_Handle(t *testing.T) {
 		t.Fatalf("Failed to unmarshal FluxMsg: %v", err2)
 	}
 
-	if msg.FluxID == 0 {
+	if msg.FluxID == uuid.Nil {
 		t.Error("Expected non-zero FluxID")
 	}
 
@@ -73,7 +74,7 @@ func TestHandler_Levels(t *testing.T) {
 	defer func() { _ = w.Close() }()
 
 	opts := &slog.HandlerOptions{Level: slog.LevelWarn}
-	h := NewHandler(w, nil, 1, "test", "test", opts)
+	h := NewHandler(w, nil, uuid.New(), "test", "test", opts)
 
 	if h.Enabled(context.Background(), slog.LevelInfo) {
 		t.Error("Expected INFO to be disabled")
@@ -88,7 +89,7 @@ func TestHandler_WithAttrs(t *testing.T) {
 	w, _ := Open(tmpDir, nil)
 	defer func() { _ = w.Close() }()
 
-	h := NewHandler(w, nil, 1, "test", "test", nil)
+	h := NewHandler(w, nil, uuid.New(), "test", "test", nil)
 	h2 := h.WithAttrs([]slog.Attr{slog.String("request_id", "123")})
 
 	logger := slog.New(h2)
@@ -117,7 +118,7 @@ func TestHandler_WithGroup(t *testing.T) {
 	w, _ := Open(tmpDir, nil)
 	defer func() { _ = w.Close() }()
 
-	h := NewHandler(w, nil, 1, "test", "test", nil)
+	h := NewHandler(w, nil, uuid.New(), "test", "test", nil)
 	h2 := h.WithGroup("meta")
 
 	if h2.(*Handler).groupPrefix != "meta." {

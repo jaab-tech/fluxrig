@@ -307,7 +307,12 @@ func (h *FluxHandler) appendAttr(b []byte, a slog.Attr) []byte {
 	val := a.Value.Resolve()
 	switch val.Kind() {
 	case slog.KindString:
-		b = strconv.AppendQuote(b, val.String())
+		s := val.String()
+		if isSimple(s) {
+			b = append(b, s...)
+		} else {
+			b = strconv.AppendQuote(b, s)
+		}
 	case slog.KindInt64:
 		b = strconv.AppendInt(b, val.Int64(), 10)
 	case slog.KindUint64:
@@ -316,4 +321,16 @@ func (h *FluxHandler) appendAttr(b []byte, a slog.Attr) []byte {
 		b = append(b, val.String()...)
 	}
 	return b
+}
+
+func isSimple(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.') {
+			return false
+		}
+	}
+	return true
 }

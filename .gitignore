@@ -47,9 +47,17 @@ pkg/ingest/comprehensive-mixer/
 pkg/ingest/test-mixer/
 .cache/
 
+# Local workspace configuration (never commit — contains sibling repo paths)
+.env.local
+
 # Temporary
 tmp/
 .gomod_cache/
 test_output*.txt
+test_*_out*.txt
+*_out.txt
 coverage.out
 coverage.html
+.generated
+*.duckdb
+dist/

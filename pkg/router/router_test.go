@@ -18,7 +18,7 @@ import (
 func TestRouter_Lifecycle(t *testing.T) {
 	// 1. Start Ephemeral NATS (Snake)
 	tmpDir := t.TempDir()
-	snk, err := snake.NewServer(snake.Config{
+	snk, err := snake.NewServer(context.Background(), snake.Config{
 		Port:        -1, // Random port
 		ClusterName: "test-cluster",
 		StoreDir:    tmpDir,
@@ -37,7 +37,12 @@ func TestRouter_Lifecycle(t *testing.T) {
 	}
 
 	// 3. Configure JetStream
-	err = r.ConfigureJetStream(snk.ClientURL(), "test-cluster", false, "", "", "", logger)
+	businessSubjects := []string{"flux.msg.>", "flux.agent.>", "flux.rack.>", "flux.ctrl.>"}
+	telemetrySubjects := []string{"flux.telemetry.>"}
+	err = r.ConfigureJetStream(snk.ClientURL(), "test-cluster", false, "",
+		"flux-msg", businessSubjects,
+		"flux-telemetry", telemetrySubjects,
+		"", "", logger)
 	if err != nil {
 		t.Fatalf("Failed to configure JS: %v", err)
 	}
@@ -47,7 +52,7 @@ func TestRouter_Lifecycle(t *testing.T) {
 	}
 
 	// 4. Test Pub/Sub
-	topic := "fluxrig.test.topic"
+	topic := "flux.msg.test.topic"
 	done := make(chan struct{})
 
 	// Subscribe

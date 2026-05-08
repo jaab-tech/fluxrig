@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/fxamacker/cbor/v2"
+	"github.com/google/uuid"
 
 	"github.com/jaab-tech/fluxrig/pkg/bus"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
@@ -25,7 +26,7 @@ func (m *mockBus) Publish(ctx context.Context, subject string, msg *fluxmsg.Flux
 	m.published = append(m.published, msg)
 	return nil
 }
-func (m *mockBus) PublishRaw(ctx context.Context, subject string, data []byte, fluxID uint64) error {
+func (m *mockBus) PublishRaw(ctx context.Context, subject string, data []byte, fluxID uuid.UUID) error {
 	var msg fluxmsg.FluxMsg
 	if err := cbor.Unmarshal(data, &msg); err != nil {
 		return err

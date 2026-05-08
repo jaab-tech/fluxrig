@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
+	"github.com/fxamacker/cbor/v2"
 	"github.com/spf13/cobra"
 
 	"github.com/jaab-tech/fluxrig/pkg/pki"
@@ -109,29 +111,88 @@ var keysInspectCmd = &cobra.Command{
 
 		fmt.Printf("Envelope Loaded: %s\n", path)
 
-		// Verify the Passport Signature
+		// 1. Try Rack Verification (Embedded Key)
 		state, err := env.Verify()
-		if err != nil {
-			fmt.Printf("❌ Signature Verification Failed: %v\n", err)
-		} else {
-			fmt.Printf("✅ Signature Verification Passed\n")
+		if err == nil {
+			fmt.Printf("✅ Signature Verification Passed (Rack Passport)\n")
+			displayRackIdentity(state)
+			return nil
 		}
 
-		// If verification passed, display the Identity contents
-
-		if state != nil {
-			fmt.Printf("--------------------------------------------------\n")
-			fmt.Printf("IDENTITY:\n")
-			fmt.Printf("  MachineID: %d\n", state.MachineID)
-			fmt.Printf("  Name:      %s\n", state.Name)
-			fmt.Printf("  Status:    %s\n", state.Status)
-			fmt.Printf("  Secret:    %s\n", maskSecret(state.Secret))
-			fmt.Printf("  MixerKey:%x\n", state.MixerPublic[:8]) // Show prefix
-			fmt.Printf("--------------------------------------------------\n")
+		// 2. Try Mixer Verification (Requires Authority Key)
+		// Try to find cluster.key in the same dir as the passport
+		dir := filepath.Dir(path)
+		clusterKeyPath := filepath.Join(dir, "cluster.key")
+		if _, errStat := os.Stat(clusterKeyPath); errStat != nil {
+			// Try current dir
+			clusterKeyPath = "cluster.key"
 		}
 
-		return nil
+		ck, errLoad := pki.LoadClusterKey(clusterKeyPath)
+		if errLoad == nil {
+			mState, errVer := env.VerifyMixer(ck.Public)
+			if errVer == nil {
+				fmt.Printf("✅ Signature Verification Passed (Mixer Authority)\n")
+				displayMixerIdentity(mState)
+				return nil
+			}
+		}
+
+		// 3. If everything failed, try a blind decode (No Verification)
+		fmt.Printf("❌ Signature Verification Failed\n")
+		fmt.Printf("Attempting unverified decode...\n")
+
+		// We use a local RackState struct to avoid verify logic
+		var rState pki.RackState
+		if errR := cbor.Unmarshal(env.Payload, &rState); errR == nil && rState.Name != "" {
+			displayRackIdentity(&rState)
+			return nil
+		}
+
+		var mState pki.MixerState
+		if errM := cbor.Unmarshal(env.Payload, &mState); errM == nil && mState.Name != "" {
+			displayMixerIdentity(&mState)
+			return nil
+		}
+
+		return fmt.Errorf("failed to decode identity: %v", err)
 	},
+}
+
+func displayRackIdentity(state *pki.RackState) {
+	fmt.Printf("--------------------------------------------------\n")
+	fmt.Printf("IDENTITY (RACK):\n")
+	fmt.Printf("  MachineID: %s\n", state.MachineID)
+	fmt.Printf("  Name:      %s\n", state.Name)
+	fmt.Printf("  Status:    %s\n", state.Status)
+	fmt.Printf("  Version:   %s\n", state.Version)
+	fmt.Printf("  Secret:    %s\n", maskSecret(state.Secret))
+	if len(state.MixerPublic) > 0 {
+		fmt.Printf("  MixerKey:  %x\n", state.MixerPublic[:8])
+	}
+	if state.CreatedAt > 0 {
+		fmt.Printf("  Created:   %s\n", time.Unix(state.CreatedAt, 0).Format(time.RFC3339))
+	}
+	if state.UpdatedAt > 0 {
+		fmt.Printf("  Updated:   %s\n", time.Unix(state.UpdatedAt, 0).Format(time.RFC3339))
+	}
+	fmt.Printf("  Revision:  %d\n", state.UpdateCount)
+	if state.ScenarioVer != "" {
+		fmt.Printf("  Scenario:  %s\n", state.ScenarioVer)
+	}
+	fmt.Printf("--------------------------------------------------\n")
+}
+
+func displayMixerIdentity(state *pki.MixerState) {
+	fmt.Printf("--------------------------------------------------\n")
+	fmt.Printf("IDENTITY (MIXER):\n")
+	fmt.Printf("  MachineID: %s\n", state.MachineID)
+	fmt.Printf("  Name:      %s\n", state.Name)
+	fmt.Printf("  Version:   %s\n", state.Version)
+	fmt.Printf("  Created:   %s\n", time.Unix(state.CreatedAt, 0).Format(time.RFC3339))
+	fmt.Printf("  Updated:   %s\n", time.Unix(state.UpdatedAt, 0).Format(time.RFC3339))
+	fmt.Printf("  Revision:  %d\n", state.UpdateCount)
+	fmt.Printf("--------------------------------------------------\n")
 }
 
 func maskSecret(s string) string {

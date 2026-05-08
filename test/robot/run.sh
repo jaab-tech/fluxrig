@@ -5,6 +5,8 @@
 set -e
 # Support common binary paths (Mac/Homebrew, Linux/usr/local)
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+unset MallocStackLogging
+export MallocNanoZone=0
 
 BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
 VENV_DIR="${BASE_DIR}/.venv"
@@ -81,7 +83,7 @@ fi
     --pythonpath "${BASE_DIR}/lib" \
     --pythonpath "${BASE_DIR}/lib/keywords" \
     $EXTRA_ARGS \
-    ${@:-$TARGETS}
+    "${@:-$TARGETS}"
 
 # Print summary
 echo "------------------------------------------------------------------------------"

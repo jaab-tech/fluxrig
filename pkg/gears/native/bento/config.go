@@ -9,7 +9,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Config represents the raw configuration structure passed from FluxRig.
+// Config represents the raw configuration structure passed from fluxrig.
 // It matches the 'config' block in the rack.toml/scenario.yaml.
 type Config struct {
 	// LogLevel optionally overrides the global log level for this gear.

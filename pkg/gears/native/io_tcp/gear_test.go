@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -22,8 +23,8 @@ import (
 
 type MockIDGen struct{}
 
-func (m *MockIDGen) NextFluxID() (uint64, error)                { return 12345, nil }
-func (m *MockIDGen) NextEntityID(etype idgen.EntityType) uint64 { return 9999 }
+func (m *MockIDGen) NextFluxID() (uuid.UUID, error)                { return uuid.New(), nil }
+func (m *MockIDGen) NextEntityID(etype idgen.EntityType) uuid.UUID { return uuid.New() }
 
 type MockCtx struct {
 	cfg map[string]any
@@ -32,7 +33,7 @@ type MockCtx struct {
 func (m *MockCtx) Config() map[string]any   { return m.cfg }
 func (m *MockCtx) Context() context.Context { return context.Background() }
 func (m *MockCtx) GearName() string         { return "test-gear" }
-func (m *MockCtx) MachineID() uint64        { return 1 }
+func (m *MockCtx) MachineID() uuid.UUID     { return uuid.Nil }
 func (m *MockCtx) Logger() *slog.Logger     { return slog.Default() }
 func (m *MockCtx) IDGen() sdk.IDGenerator   { return &MockIDGen{} }
 func (m *MockCtx) Bus() bus.Bus             { return nil }

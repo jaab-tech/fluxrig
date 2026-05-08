@@ -4,6 +4,7 @@
 package snake_test
 
 import (
+	"context"
 	"os"
 	"testing"
 
@@ -29,7 +30,7 @@ func TestNewServer_Provisioning(t *testing.T) {
 	}
 
 	// 1. Start Server (Should provision stream)
-	srv, err := snake.NewServer(cfg)
+	srv, err := snake.NewServer(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("Failed to start server: %v", err)
 	}
@@ -75,14 +76,14 @@ func TestNewServer_Idempotency(t *testing.T) {
 	}
 
 	// 1. Start Server First Time
-	srv1, err := snake.NewServer(cfg)
+	srv1, err := snake.NewServer(context.Background(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	srv1.Shutdown()
 
 	// 2. Restart Server (Should not fail on existing stream)
-	srv2, err := snake.NewServer(cfg)
+	srv2, err := snake.NewServer(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("Failed to restart server (idempotency check): %v", err)
 	}

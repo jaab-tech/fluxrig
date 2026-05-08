@@ -7,6 +7,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/jaab-tech/fluxrig/pkg/bus"
@@ -16,8 +17,8 @@ import (
 
 func TestMetricExporter_Export(t *testing.T) {
 	mockBus := bus.NewMockBus()
-	gen, _ := idgen.New(1)
-	writer := telemetry.NewNatsWriter(mockBus, 12345, "test-machine", "flux.telemetry", gen, 1) // 1s flush
+	gen, _ := idgen.New(uuid.New())
+	writer := telemetry.NewNatsWriter(mockBus, uuid.New(), "test-machine", "flux.telemetry", gen, 1) // 1s flush
 	exporter := telemetry.NewMetricExporter(writer)
 
 	// Helper to create dummy metrics
@@ -43,9 +44,9 @@ func TestMetricExporter_Export(t *testing.T) {
 		t.Fatalf("Export failed: %v", err)
 	}
 
-	msgs := mockBus.GetMessages("flux.telemetry.metrics")
+	msgs := mockBus.GetMessages("flux.telemetry.test-machine.metrics")
 	if len(msgs) == 0 {
-		t.Fatal("Expected message on 'flux.telemetry.metrics', got none")
+		t.Fatal("Expected message on 'flux.telemetry.test-machine.metrics', got none")
 	}
 
 	data := msgs[0].Data

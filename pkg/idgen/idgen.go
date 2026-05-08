@@ -5,29 +5,20 @@ package idgen
 
 import (
 	"crypto/rand"
-	"errors"
 	"fmt"
-	"time"
 
-	"sync/atomic"
-
-	"github.com/sony/sonyflake"
+	"github.com/google/uuid"
 )
 
-// IDGenerator provides unique IDs for messages (fluxID) and components (fluxEntityID).
-// Reference: ops/docs/public/5_reference/protocols.md
+// IDGenerator provides unique IDs for messages (`flux_id`) and components (`entity_id`).
+// v0.4.6 Migration: Now uses UUID v7 (RFC 9562) for 128-bit time-ordered sovereignty.
 type IDGenerator struct {
-	sf        *sonyflake.Sonyflake
-	machineID uint16
-	seq       atomic.Uint64 // Monotonic counter for EntityIDs
+	machineID uuid.UUID
 }
 
-// EntityType defines the type prefix for fluxEntityID
+// EntityType defines the type prefix for `entity_id`
 type EntityType uint8
 
-// Entity Types from protocols.md
-// NOTE: Entity type IDs are fixed and must not change after v1.0 release.
-// Cluster and Mixer are top-level hierarchy for multi-tenant support.
 const (
 	EntityReserved    EntityType = 0x00 // System Broadcast / Null
 	EntityCluster     EntityType = 0x01 // Physical infrastructure (HA cluster)
@@ -44,80 +35,42 @@ const (
 	EntitySpecVersion EntityType = 0x0C // Immutable spec blob ID
 )
 
-// EntityTypes maps ID to human readable name
-var EntityTypes = map[EntityType]string{
-	EntityReserved:    "Reserved",
-	EntityCluster:     "Cluster",
-	EntityMixer:       "Mixer",
-	EntityFluxMsg:     "FluxMsg",
-	EntityRack:        "Rack",
-	EntityGear:        "Gear",
-	EntityPortInput:   "PortInput",
-	EntityPortOutput:  "PortOutput",
-	EntityWire:        "Wire",
-	EntitySnake:       "Snake",
-	EntityScenario:    "Scenario",
-	EntitySession:     "Session",
-	EntitySpecVersion: "SpecVersion",
-}
-
-// New creates a new IDGenerator fixed to a specific MachineID.
-// In a Rack, this MachineID must be unique per instance.
-func New(machineID uint16) (*IDGenerator, error) {
-	settings := sonyflake.Settings{
-		StartTime: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC), // Project Epoch
-		MachineID: func() (uint16, error) {
-			return machineID, nil
-		},
-	}
-
-	sf := sonyflake.NewSonyflake(settings)
-	if sf == nil {
-		return nil, errors.New("failed to initialize sonyflake")
-	}
-
+// New creates a new IDGenerator fixed to a specific machine_id.
+func New(machineID uuid.UUID) (*IDGenerator, error) {
 	return &IDGenerator{
-		sf:        sf,
 		machineID: machineID,
 	}, nil
 }
 
-// NextFluxID generates a standard k-sortable unique ID (Sonyflake).
-// Structure: [ Timestamp (39) ] [ Sequence (8) ] [ MachineID (16) ]
-func (g *IDGenerator) NextFluxID() (uint64, error) {
-	return g.sf.NextID()
+// NextFluxID generates a standard UUID v7 (Time-ordered).
+func (g *IDGenerator) NextFluxID() (uuid.UUID, error) {
+	// For messages, we use a standard V7 with full randomness for maximum entropy.
+	return uuid.NewV7()
 }
 
-// NextEntityID generates a persistent/runtime Component ID using an internal counter.
-// Supports runtime entities (like Sessions) by incrementing the sequence.
-func (g *IDGenerator) NextEntityID(etype EntityType) uint64 {
-	// Increment sequence
-	seq := g.seq.Add(1)
-	return g.NewEntityID(etype, seq)
+// NextEntityID generates a persistent/runtime Component ID.
+func (g *IDGenerator) NextEntityID(etype EntityType) uuid.UUID {
+	return g.NewEntityID(etype)
 }
 
-// NewEntityID constructs a persistent Component ID from a given sequence.
-// Structure: [ Type (8) ] [ MachineID (16) ] [ Local Sequence (40) ]
-func (g *IDGenerator) NewEntityID(etype EntityType, localSequence uint64) uint64 {
-	// Shift and combine
-	// Type: Top 8 bits (63-56)
-	// MachineID: Next 16 bits (55-40)
-	// Sequence: Bottom 40 bits (39-0)
+// NewEntityID constructs a persistent Component ID using UUID v7 layout
+// but embeds EntityType and machine_id hint in the random/sequence bits.
+// Layout: [ Timestamp (48) ] [ Version (4) ] [ Variant (2) ] [ Type (8) ] [ machine_id Hint (32) ] [ Rand (34) ]
+func (g *IDGenerator) NewEntityID(etype EntityType) uuid.UUID {
+	id, _ := uuid.NewV7()
+	bytes := id
 
-	// Mask sequence to 40 bits to be safe
-	seqMasked := localSequence & 0xFFFFFFFFFF
+	// We preserve the first 48 bits (Timestamp) and the 4 bits of Version.
+	// We then inject our metadata into the remaining bits.
 
-	id := (uint64(etype) << 56) |
-		(uint64(g.machineID) << 40) |
-		seqMasked
+	// To keep it simple and safe, we'll use bytes 9-12 for a MachineID hint (32 bits)
+	// and byte 13 for EntityType (8 bits).
+	// We take the last 4 bytes of the machineID as the hint.
+	mHint := g.machineID[12:16]
+	copy(bytes[9:13], mHint)
+	bytes[13] = uint8(etype)
 
-	return id
-}
-
-// SetSequence manually sets the internal sequence counter.
-// Used for resuming after a restart by loading the max sequence from DB.
-func (g *IDGenerator) SetSequence(seq uint64) {
-	g.seq.Store(seq)
+	return uuid.UUID(bytes)
 }
 
 // RandomSuffix generates a random hex suffix of the specified length.

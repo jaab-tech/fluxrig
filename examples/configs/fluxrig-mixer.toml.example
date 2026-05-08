@@ -1,24 +1,71 @@
+# fluxrig-mixer.toml — Mixer (Control Plane) Configuration Example
+# All values shown are their defaults. Override only what you need.
+# Full reference: https://fluxrig.org/docs/reference/configuration
+
+# ── Identity & State ─────────────────────────────────────────────────────────
+[base]
+name      = "fluxrig-mixer"    # Human-readable name for this Mixer instance
+state_dir = "./data"
+
+# ── Logging ───────────────────────────────────────────────────────────────────
 [logging]
-level = "info"
-filename = "logs/mixer.log"
+level       = "info"           # Levels: debug | info | warn | error
+filename    = "logs/mixer.log"
+max_size_mb = 100
+max_backups = 7
+compress    = true
 
+# ── Mixer Behaviour ───────────────────────────────────────────────────────────
 [mixer]
-mixer_name = "mixer-default"
-machine_id = 1
-# Reference to a scenario to load on startup (file path or URN)
-# startup_scenario = "scenarios/getting_started.yaml"
+# startup_scenario     = ""    # Optional: path or URN of a scenario to load at startup
+scenario_wait_timeout = "15s"  # How long to wait for a Rack to register before timing out
+max_hops              = 64
+max_payload_size      = 2097152  # 2MB in bytes
 
+# ── Control Plane REST API ────────────────────────────────────────────────────
 [api]
-port = 8090
+port                = 8090
+read_header_timeout = "3s"
+# Optional TLS for the API server
+# tls_cert_file = "server.crt"
+# tls_key_file  = "server.key"
 
+# ── NATS/JetStream (The Snake — embedded server) ──────────────────────────────
+[snake]
+port              = 4222
+url               = "nats://localhost:4222"
+domain            = "flux"
+stream_name       = "flux-msg"
+operation_timeout = "5s"
+inactive_threshold = "30s"
+
+# ── Persistent Storage ────────────────────────────────────────────────────────
 [store]
-dir = "./data"
-database_file = "fluxrig.duckdb"
+dir              = "./data"
+wal_max_size_mb  = 500
+database_file    = "flux.duckdb"
 cluster_key_file = "cluster.key"
 
-[snake]
-port = 4222
-url = "nats://localhost:4222"
-cluster_name = "flux"
-store_dir = "data/js"
-durable = false
+# ── Enrollment ────────────────────────────────────────────────────────────────
+[enrollment]
+auto_adopt       = false        # If true, Racks are auto-approved on join
+push_delay       = "1s"         # Delay before pushing state to a newly enrolled Rack
+bootstrap_secret = "fluxrig"    # Shared secret for zero-config enrollment
+
+# ── Telemetry (Self-Monitoring) ───────────────────────────────────────────────
+[telemetry]
+service_name   = "flux-mixer"
+batch_interval = "5s"
+base_subject   = "flux.telemetry"
+max_batch_size = 512
+stream_name    = "flux-telemetry"
+
+[telemetry.metrics]
+host_enabled    = false
+runtime_enabled = false
+bento_enabled   = false
+
+# ── Ingestion ─────────────────────────────────────────────────────────────────
+[ingest]
+flush_interval = "5s"
+buffer_size    = 1024

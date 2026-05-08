@@ -4,6 +4,7 @@
 package bus
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
@@ -15,31 +16,34 @@ import (
 )
 
 func TestNatsKV_Disconnected(t *testing.T) {
+	ctx := context.Background()
 	nb := NewNatsBus("std")
 	kv := nb.KV()
 
-	_, err := kv.Put("bucket", "key", []byte("val"))
+	_, err := kv.Put(ctx, "bucket", "key", []byte("val"))
 	assert.Error(t, err)
 
-	_, _, err = kv.Get("bucket", "key")
+	_, _, err = kv.Get(ctx, "bucket", "key")
 	assert.Error(t, err)
 
-	err = kv.Delete("bucket", "key")
+	err = kv.Delete(ctx, "bucket", "key")
 	assert.Error(t, err)
 
-	_, err = kv.Watch("bucket", ">", nil)
+	_, err = kv.Watch(ctx, "bucket", ">", nil)
 	assert.Error(t, err)
 
-	_, err = kv.Keys("bucket")
+	_, err = kv.Keys(ctx, "bucket")
 	assert.Error(t, err)
 
-	err = kv.EnsureBucket("bucket", "memory", 1, 0)
+	err = kv.EnsureBucket(ctx, "bucket", "memory", 1, 0)
 	assert.Error(t, err)
 }
 
 func TestNatsKV_Lifecycle(t *testing.T) {
+	ctx := context.Background()
+
 	// 1. Start ephemeral NATS
-	s, err := snake.NewServer(snake.Config{
+	s, err := snake.NewServer(ctx, snake.Config{
 		Port:        -1,
 		ClusterName: "kv-test",
 		StoreDir:    t.TempDir(),
@@ -59,43 +63,45 @@ func TestNatsKV_Lifecycle(t *testing.T) {
 	bucket := "test_bucket"
 
 	// 3. Ensure Bucket
-	err = kv.EnsureBucket(bucket, "memory", 1, 1*time.Hour)
+	err = kv.EnsureBucket(ctx, bucket, "memory", 1, 1*time.Hour)
 	require.NoError(t, err)
 
 	// 4. Put/Get
 	val := []byte("hello world")
-	rev1, err := kv.Put(bucket, "msg", val)
+	rev1, err := kv.Put(ctx, bucket, "msg", val)
 	require.NoError(t, err)
 	assert.True(t, rev1 > 0)
 
-	got, rev2, err := kv.Get(bucket, "msg")
+	got, rev2, err := kv.Get(ctx, bucket, "msg")
 	require.NoError(t, err)
 	assert.Equal(t, val, got)
 	assert.Equal(t, rev1, rev2)
 
 	// 5. Get Non-Existent
-	gotNone, revNone, err := kv.Get(bucket, "unknown")
+	gotNone, revNone, err := kv.Get(ctx, bucket, "unknown")
 	require.NoError(t, err)
 	assert.Nil(t, gotNone)
 	assert.Equal(t, uint64(0), revNone)
 
 	// 6. Keys
-	keys, err := kv.Keys(bucket)
+	keys, err := kv.Keys(ctx, bucket)
 	require.NoError(t, err)
 	assert.Contains(t, keys, "msg")
 
 	// 7. Delete
-	err = kv.Delete(bucket, "msg")
+	err = kv.Delete(ctx, bucket, "msg")
 	require.NoError(t, err)
 
-	gotDeleted, _, err := kv.Get(bucket, "msg")
+	gotDeleted, _, err := kv.Get(ctx, bucket, "msg")
 	require.NoError(t, err)
 	assert.Nil(t, gotDeleted)
 }
 
 func TestNatsKV_Watch(t *testing.T) {
+	ctx := context.Background()
+
 	// 1. Start ephemeral NATS
-	s, err := snake.NewServer(snake.Config{
+	s, err := snake.NewServer(ctx, snake.Config{
 		Port:        -1,
 		ClusterName: "watch-test",
 		StoreDir:    t.TempDir(),
@@ -109,7 +115,7 @@ func TestNatsKV_Watch(t *testing.T) {
 
 	kv := nb.KV()
 	bucket := "watch_bucket"
-	_ = kv.EnsureBucket(bucket, "memory", 1, 0)
+	_ = kv.EnsureBucket(ctx, bucket, "memory", 1, 0)
 
 	// 2. Setup Watcher
 	var wg sync.WaitGroup
@@ -126,7 +132,7 @@ func TestNatsKV_Watch(t *testing.T) {
 		wg.Done()
 	}
 
-	sub, err := kv.Watch(bucket, ">", handler)
+	sub, err := kv.Watch(ctx, bucket, ">", handler)
 	require.NoError(t, err)
 	defer func() { _ = sub.Unsubscribe() }()
 
@@ -134,8 +140,8 @@ func TestNatsKV_Watch(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// 3. Trigger Updates
-	_, _ = kv.Put(bucket, "foo.bar", []byte("val1"))
-	_, _ = kv.Put(bucket, "foo.baz", []byte("val2"))
+	_, _ = kv.Put(ctx, bucket, "foo.bar", []byte("val1"))
+	_, _ = kv.Put(ctx, bucket, "foo.baz", []byte("val2"))
 
 	// 4. Verification
 	done := make(chan struct{})

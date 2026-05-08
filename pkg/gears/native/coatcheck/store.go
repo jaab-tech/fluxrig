@@ -74,7 +74,7 @@ func (s *StoreLogic) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxms
 	// Or Daemon calculates it from "TsInit + TTL"? Yes.
 
 	bucket := s.gear.config.Bucket
-	_, err = s.gear.ctx.Bus().KV().Put(bucket, key, valBytes)
+	_, err = s.gear.ctx.Bus().KV().Put(ctx, bucket, key, valBytes)
 	if err != nil {
 		return nil, fmt.Errorf("coatcheck store: kv put failed: %w", err)
 	}

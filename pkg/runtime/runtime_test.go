@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/jaab-tech/fluxrig/pkg/bus"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/jaab-tech/fluxrig/pkg/idgen"
@@ -44,7 +46,7 @@ func (m *MockBus) Publish(ctx context.Context, subject string, msg *fluxmsg.Flux
 	}
 	return nil
 }
-func (m *MockBus) PublishRaw(ctx context.Context, subject string, data []byte, fluxID uint64) error {
+func (m *MockBus) PublishRaw(ctx context.Context, subject string, data []byte, fluxID uuid.UUID) error {
 	return nil
 }
 func (m *MockBus) Subscribe(subject string, handler bus.Handler) (bus.Subscription, error) {
@@ -90,10 +92,11 @@ func (m *MockManager) Import(ctx context.Context, filePath, name, tag string) (s
 func (m *MockManager) ImportScenario(ctx context.Context, filePath, name, tag string) (string, string, string, error) {
 	return "", "", "", nil
 }
-func (m *MockManager) Load(ctx context.Context, urn string) ([]byte, error) {
+
+func (m *MockManager) Load(ctx context.Context, u string) ([]byte, error) {
 	return nil, nil
 }
-func (m *MockManager) Export(ctx context.Context, urn, outputPath string) error {
+func (m *MockManager) Export(ctx context.Context, u, outputPath string) error {
 	return nil
 }
 func (m *MockManager) List(ctx context.Context) ([]manager.ArtifactInfo, error) {
@@ -115,9 +118,10 @@ func TestManager_Lifecycle(t *testing.T) {
 	// 1. Setup Dependencies
 	mockBus := &MockBus{}
 	mockSpecMgr := &MockManager{}
-	gen, _ := idgen.New(1)
+	mid := uuid.New()
+	gen, _ := idgen.New(mid)
 
-	mgr := NewManager(100, "test-rack", mockBus, gen, mockSpecMgr, 5*time.Second, 5*time.Second, 500*time.Millisecond)
+	mgr := NewManager(mid, "test-rack", mockBus, gen, mockSpecMgr, 5*time.Second, 5*time.Second, 500*time.Millisecond, false, false)
 
 	// 2. Apply Scenario
 	sc := &registry.Scenario{
@@ -147,8 +151,9 @@ func TestManager_Lifecycle(t *testing.T) {
 func TestManager_Errors(t *testing.T) {
 	mockBus := &MockBus{}
 	mockSpecMgr := &MockManager{}
-	gen, _ := idgen.New(1)
-	mgr := NewManager(100, "test-rack", mockBus, gen, mockSpecMgr, 5*time.Second, 5*time.Second, 500*time.Millisecond)
+	mid := uuid.New()
+	gen, _ := idgen.New(mid)
+	mgr := NewManager(mid, "test-rack", mockBus, gen, mockSpecMgr, 5*time.Second, 5*time.Second, 500*time.Millisecond, false, false)
 
 	// 1. Unknown Gear Type
 	sc := &registry.Scenario{
@@ -187,7 +192,7 @@ func TestManager_Errors(t *testing.T) {
 
 	// 4. Subscribe Failure
 	failBus := &MockBus{FailSubscribe: true}
-	mgr2 := NewManager(100, "test-rack", failBus, gen, mockSpecMgr, 5*time.Second, 5*time.Second, 500*time.Millisecond)
+	mgr2 := NewManager(mid, "test-rack", failBus, gen, mockSpecMgr, 5*time.Second, 5*time.Second, 500*time.Millisecond, false, false)
 	// Use good gear, but bad bus
 	sc2 := &registry.Scenario{
 		Meta: registry.ScenarioMeta{Name: "test", Version: "1.0"},
@@ -213,8 +218,9 @@ func TestManager_Errors(t *testing.T) {
 func TestManager_Drain(t *testing.T) {
 	mockBus := &MockBus{}
 	mockSpecMgr := &MockManager{}
-	gen, _ := idgen.New(1)
-	mgr := NewManager(100, "test-rack", mockBus, gen, mockSpecMgr, 1*time.Second, 1*time.Second, 100*time.Millisecond)
+	mid := uuid.New()
+	gen, _ := idgen.New(mid)
+	mgr := NewManager(mid, "test-rack", mockBus, gen, mockSpecMgr, 1*time.Second, 1*time.Second, 100*time.Millisecond, false, false)
 
 	// Use MockGear for deterministic drain
 	mgr.factory.Register("mock_drain", func() sdk.NativeGear {
@@ -242,9 +248,10 @@ func TestManager_ConvergenceTimeout(t *testing.T) {
 	// Disable reflection in MockBus to simulate convergence delay
 	mockBus := &MockBus{DisableReflect: true}
 	mockSpecMgr := &MockManager{}
-	gen, _ := idgen.New(1)
+	mid := uuid.New()
+	gen, _ := idgen.New(mid)
 	// Short timeouts for fast test
-	mgr := NewManager(100, "test-rack", mockBus, gen, mockSpecMgr, 100*time.Millisecond, 200*time.Millisecond, 50*time.Millisecond)
+	mgr := NewManager(mid, "test-rack", mockBus, gen, mockSpecMgr, 100*time.Millisecond, 200*time.Millisecond, 50*time.Millisecond, false, false)
 
 	sc := &registry.Scenario{
 		Meta: registry.ScenarioMeta{Name: "test", Version: "1.0"},

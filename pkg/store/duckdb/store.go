@@ -7,605 +7,801 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	_ "github.com/duckdb/duckdb-go/v2"
+	"github.com/google/uuid"
+
+	"github.com/jaab-tech/fluxrig/pkg/registry"
 )
 
-// Store manages the DuckDB connection.
+// Store manages the DuckDB connection and implements registry.Registry.
 type Store struct {
-	db      *sql.DB
-	dataDir string       // Directory containing the DB file and telemetry
-	log     *slog.Logger // Logger for store operations
+	db        *sql.DB
+	dataDir   string       // Directory containing the DB file and telemetry
+	log       *slog.Logger // Logger for store operations
+	mu        sync.RWMutex
+	autoAdopt bool
 }
 
 // NewStore opens a DuckDB database file.
 func NewStore(log *slog.Logger, path string) (*Store, error) {
-	// If path is empty, use in-memory
 	dsn := path
 	if dsn == "" {
-		dsn = ":memory:" // Standard in-memory
+		dsn = ":memory:"
 	}
-
 	db, err := sql.Open("duckdb", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open duckdb: %w", err)
 	}
-
 	if err := db.Ping(); err != nil {
 		return nil, fmt.Errorf("failed to ping duckdb: %w", err)
 	}
-
-	// Derive dataDir from path
 	dataDir := "data"
 	if path != "" && path != ":memory:" {
 		dataDir = filepath.Dir(path)
 	}
-
 	return &Store{db: db, dataDir: dataDir, log: log.With("component", "STORE")}, nil
 }
 
-// Close closes the database connection.
 func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-// DB returns the underlying sql.DB instance.
 func (s *Store) DB() *sql.DB {
 	return s.db
 }
 
-// InitializeSchema removed (Use Migrate)
-// InitializeTelemetrySchema removed (Use Migrate)
+func (s *Store) SetAutoAdopt(enabled bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.autoAdopt = enabled
+}
 
-// Wipe drops all tables. internal use for testing.
 func (s *Store) Wipe(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, "DROP TABLE IF EXISTS registry; DROP SEQUENCE IF EXISTS seq_machine_id_server;")
 	return err
 }
 
-// FlushTelemetry exports the current buffer tables to Parquet files and clears them.
-func (s *Store) FlushTelemetry(ctx context.Context, dataDir string) error {
-	tables := map[string]string{
-		"telemetry_logs":    "logs",
-		"telemetry_spans":   "spans",
-		"telemetry_metrics": "metrics",
+// mapError translates database errors to registry package errors.
+func (s *Store) mapError(err error) error {
+	if err == nil {
+		return nil
 	}
-	ts := time.Now().UTC()
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
+	if err == sql.ErrNoRows {
+		return registry.ErrNotFound
 	}
-	defer func() { _ = tx.Rollback() }()
-
-	for table, dirName := range tables {
-		dir := filepath.Join(dataDir, dirName, ts.Format("2006/01/02/15"))
-		if err := os.MkdirAll(dir, 0750); err != nil {
-			return fmt.Errorf("failed to create dir %s: %w", dir, err)
-		}
-
-		filename := fmt.Sprintf("%s_%d.parquet", dirName, ts.UnixNano())
-		path := filepath.Join(dir, filename)
-
-		var count int
-		row := tx.QueryRowContext(ctx, fmt.Sprintf("SELECT count(*) FROM %s", table))
-		if err := row.Scan(&count); err != nil {
-			return err
-		}
-
-		if count == 0 {
-			continue
-		}
-
-		//nolint:gosec
-		query := fmt.Sprintf("COPY (SELECT * FROM %s) TO '%s' (FORMAT 'parquet', COMPRESSION 'zstd')", table, path)
-		if _, err := tx.ExecContext(ctx, query); err != nil {
-			return fmt.Errorf("failed to export %s: %w", table, err)
-		}
-
-		if _, err := tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s", table)); err != nil {
-			return fmt.Errorf("failed to truncate %s: %w", table, err)
-		}
+	msg := err.Error()
+	if strings.Contains(msg, "Constraint Error") || strings.Contains(msg, "unique constraint") {
+		return registry.ErrNameConflict
 	}
-
-	return tx.Commit()
+	return err
 }
 
-// InitializeArchiverSchema removed (Use Migrate)
+// Identity & Enrollment (registry.Registry)
 
-// FlushArchiverBuffer exports buffered messages to Parquet, partitioned by WireID.
-func (s *Store) FlushArchiverBuffer(ctx context.Context, dataDir string) error {
-	ts := time.Now().UTC()
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	// 1. Get Distinct WireIDs with data
-	rows, err := tx.QueryContext(ctx, "SELECT DISTINCT wire_id FROM archiver_buffer")
-	if err != nil {
-		return err
-	}
-	defer func() { _ = rows.Close() }()
-
-	var wireIDs []uint64
-	for rows.Next() {
-		var wid uint64
-		if err := rows.Scan(&wid); err == nil {
-			wireIDs = append(wireIDs, wid)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	_ = rows.Close()
-
-	if len(wireIDs) == 0 {
-		return nil // Nothing to flush
-	}
-
-	// 2. Export each WireID to its own folder structure
-	for _, wid := range wireIDs {
-		// Path: data/messages/<wire_id>/YYYY/MM/DD/HH
-		dir := filepath.Join(dataDir, "messages", fmt.Sprintf("%d", wid), ts.Format("2006/01/02/15"))
-		if err := os.MkdirAll(dir, 0750); err != nil {
-			return fmt.Errorf("failed to create dir %s: %w", dir, err)
-		}
-
-		filename := fmt.Sprintf("messages_%d_%d.parquet", wid, ts.UnixNano())
-		path := filepath.Join(dir, filename)
-
-		// SQL: COPY (SELECT ...) TO 'path'
-		query := fmt.Sprintf( //nolint:gosec
-			"COPY (SELECT ts, flux_id, trace_id, subject, payload, meta FROM archiver_buffer WHERE wire_id = %d) TO '%s' (FORMAT 'parquet', COMPRESSION 'zstd')",
-			wid, path)
-
-		if _, err := tx.ExecContext(ctx, query); err != nil {
-			return fmt.Errorf("failed to export wire %d: %w", wid, err)
-		}
-	}
-
-	// 3. Truncate Buffer
-	if _, err := tx.ExecContext(ctx, "DELETE FROM archiver_buffer"); err != nil {
-		return fmt.Errorf("failed to truncate archiver_buffer: %w", err)
-	}
-
-	return tx.Commit()
+func (s *Store) Register(ctx context.Context, machineID uuid.UUID, name string, secret string, ip string, port int, version string, config map[string]any, mixerID uuid.UUID) (*registry.Rack, error) {
+	return s.RegisterEntity(ctx, 4, machineID, name, secret, ip, port, version, config, nil, mixerID)
 }
 
-// RegisterMixer upserts the Mixer's status in the registry.
-func (s *Store) RegisterMixer(ctx context.Context, mid uint16, name string, eid uint64, addr, version string) error {
-	now := time.Now()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	// Replace by EntityID to allow Mixer to reclaim its identity on restart
-	if _, errDel := tx.ExecContext(ctx, "DELETE FROM registry WHERE entity_id = ? AND type_id = 2", eid); errDel != nil {
-		return errDel
-	}
-
-	attrs := map[string]any{
-		"api_address": addr,
-	}
+func (s *Store) RegisterEntity(ctx context.Context, typeID uint8, machineID uuid.UUID, name string, secret string, ip string, port int, version string, config map[string]any, attrs map[string]any, mixerID uuid.UUID) (*registry.Rack, error) {
+	configJSON, _ := json.Marshal(config)
 	attrsJSON, _ := json.Marshal(attrs)
+	now := time.Now().UTC()
 
-	stats := map[string]any{
-		"goroutines": runtime.NumGoroutine(),
-		"cpu_cores":  runtime.NumCPU(),
+	s.log.Info("Registering Entity", "type_id", typeID, "machine_id", machineID, "name", name, "ip", ip, "port", port, "version", version)
+
+	status := "pending"
+	s.mu.RLock()
+	if s.autoAdopt {
+		status = "active"
 	}
-	statsJSON, _ := json.Marshal(stats)
+	s.mu.RUnlock()
 
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO registry (entity_id, type_id, machine_id, mixer_id, name, status, version, started_at, last_seen, stats, config, attributes)
-		VALUES (?, 2, ?, NULL, ?, 'active', ?, ?, ?, ?, ?, ?)
-	`, eid, mid, name, version, now, now, string(statsJSON), "{}", string(attrsJSON))
+	// Identity Verification Logic (MachineID based)
+	var existingSecret string
+	var existingName string
+	// Explicitly use string comparison for UUID to avoid driver mapping issues in some DuckDB versions
+	err := s.db.QueryRowContext(ctx, "SELECT secret, name FROM registry WHERE machine_id = ? AND type_id = ?", machineID.String(), typeID).Scan(&existingSecret, &existingName)
+	if err != nil && err != sql.ErrNoRows {
+		return nil, s.mapError(err)
+	}
+
+	if err == nil {
+		// Entity exists with THIS MachineID, verify secret
+		if existingSecret != "" && existingSecret != secret {
+			return nil, errors.New("identity mismatch: incorrect secret for existing MachineID")
+		}
+		// Update (Preserve approved name from DB, don't overwrite with handshake name)
+		_, err = s.db.ExecContext(ctx, `
+			UPDATE registry SET 
+				ip = ?, 
+				port = ?, 
+				last_seen = ?, 
+				version = ?,
+				config = ?,
+				attributes = ?,
+				update_count = update_count + 1
+			WHERE machine_id = ? AND type_id = ?
+		`, ip, port, now, version, string(configJSON), string(attrsJSON), machineID, typeID)
+	} else {
+		// New MachineID - Check if name is already taken by ANY entity (Global UNIQUE constraint)
+		if name != "" {
+			var conflictSecret string
+			var conflictMachineID uuid.UUID
+			var conflictTypeID uint8
+			errName := s.db.QueryRowContext(ctx, "SELECT secret, machine_id, type_id FROM registry WHERE name = ?", name).Scan(&conflictSecret, &conflictMachineID, &conflictTypeID)
+			if errName == nil {
+				// Name exists. Verify if it's the SAME type and secret matches for adoption.
+				if conflictTypeID == typeID && conflictSecret != "" && conflictSecret == secret {
+					s.log.Info("Adopting existing name via Secret match", "name", name, "type_id", typeID, "old_machine_id", conflictMachineID, "new_machine_id", machineID)
+					// Update existing record with NEW machineID (Adoption)
+					_, err = s.db.ExecContext(ctx, `
+						UPDATE registry SET 
+							machine_id = ?,
+							ip = ?, 
+							port = ?, 
+							last_seen = ?, 
+							version = ?,
+							config = ?,
+							attributes = ?,
+							update_count = update_count + 1
+						WHERE name = ? AND type_id = ?
+					`, machineID, ip, port, now, version, string(configJSON), string(attrsJSON), name, typeID)
+					if err != nil {
+						return nil, s.mapError(err)
+					}
+					return s.GetEntity(ctx, typeID, machineID)
+				}
+				// No match or no secret, or different type (Global Name Conflict)
+				s.log.Warn("Registration Denied: Global name conflict", "name", name, "requested_type", typeID, "existing_type", conflictTypeID, "existing_machine_id", conflictMachineID)
+				return nil, registry.ErrNameConflict
+			} else if errName != sql.ErrNoRows {
+				return nil, s.mapError(errName)
+			}
+		}
+
+		// Fresh Registration
+		if machineID == uuid.Nil {
+			machineID, _ = uuid.NewV7()
+			s.log.Info("Self-provisioning new MachineID", "name", name, "id", machineID)
+		}
+
+		// Generate v0.4.6 style EntityID (UUID v7 with metadata)
+		eid, _ := uuid.NewV7()
+		copy(eid[9:13], machineID[12:16]) // MachineID hint
+		eid[13] = typeID                  // EntityType
+
+		_, err = s.db.ExecContext(ctx, `
+			INSERT INTO registry (entity_id, type_id, machine_id, name, status, version, ip, port, secret, first_seen, last_seen, config, attributes, mixer_id)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, eid, typeID, machineID, name, status, version, ip, port, secret, now, now, string(configJSON), string(attrsJSON), mixerID)
+	}
+
 	if err != nil {
-		return err
+		return nil, s.mapError(err)
 	}
-
-	return tx.Commit()
+	return s.GetEntity(ctx, typeID, machineID)
 }
 
-// RegisterSnake upserts a Snake (Link) into the registry.
-func (s *Store) RegisterSnake(ctx context.Context, name string, eid uint64, version string, fromRack uint64, toMixer uint64, rackIP string, rackPort int, mixerIP string, mixerPort int, machineID uint16) error {
-	now := time.Now()
-	// No Tx needed? Use same DELETE+INSERT logic as Approve for consistency?
-	// But Snake registration is high frequency. It uses Transactions currently.
-	// Let's stick to Tx for now, assuming no PK collision on unrelated entities.
-	tx, err := s.db.BeginTx(ctx, nil)
+func (s *Store) Approve(ctx context.Context, id uuid.UUID, newName string) (*registry.Rack, error) {
+	// Check if the entity exists
+	var currentName string
+	err := s.db.QueryRowContext(ctx, "SELECT name FROM registry WHERE machine_id = ? AND type_id = 4", id).Scan(&currentName)
 	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	if _, errDel := tx.ExecContext(ctx, "DELETE FROM registry WHERE entity_id = ? AND type_id = 9", eid); errDel != nil {
-		return errDel
+		return nil, s.mapError(err)
 	}
 
-	attrs := map[string]any{
-		"rack":       fmt.Sprintf("%d", fromRack),
-		"mixer":      fmt.Sprintf("%d", toMixer),
-		"rack_ip":    rackIP,
-		"rack_port":  rackPort,
-		"mixer_ip":   mixerIP,
-		"mixer_port": mixerPort,
+	// If a new name is provided, check for conflicts with OTHER entities
+	if newName != "" && newName != currentName {
+		var conflict bool
+		_ = s.db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM registry WHERE name = ? AND machine_id != ?)", newName, id).Scan(&conflict)
+		if conflict {
+			return nil, registry.ErrNameConflict
+		}
+	} else {
+		newName = currentName // Keep current name if empty
 	}
-	attrsJSON, _ := json.Marshal(attrs)
-	stats := map[string]any{}
-	statsJSON, _ := json.Marshal(stats)
 
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO registry (entity_id, type_id, machine_id, mixer_id, name, status, version, started_at, last_seen, stats, attributes)
-		VALUES (?, 9, ?, ?, ?, 'active', ?, ?, ?, ?, ?)
-	`, eid, machineID, toMixer, name, version, now, now, string(statsJSON), string(attrsJSON))
+	res, err := s.db.ExecContext(ctx, `UPDATE registry SET status = 'active', name = ? WHERE machine_id = ? AND type_id = 4`, newName, id)
 	if err != nil {
-		return err
+		return nil, s.mapError(err)
 	}
-
-	return tx.Commit()
-}
-
-// UpdateSnakeStats updates the stats column for a given Snake.
-func (s *Store) UpdateSnakeStats(ctx context.Context, eid uint64, stats map[string]any) error {
-	statsJSON, err := json.Marshal(stats)
-	if err != nil {
-		return err
-	}
-	now := time.Now()
-
-	res, err := s.db.ExecContext(ctx, `
-		UPDATE registry 
-		SET stats = ?, last_seen = ? 
-		WHERE entity_id = ? AND type_id = 9
-	`, string(statsJSON), now, eid)
-
-	if err != nil {
-		return err
-	}
-
 	rows, _ := res.RowsAffected()
 	if rows == 0 {
-		return fmt.Errorf("snake not found: %d", eid)
+		return nil, registry.ErrNotFound
+	}
+	return s.Get(ctx, id)
+}
+
+func (s *Store) List(ctx context.Context, status string) ([]*registry.Rack, error) {
+	query := `
+		SELECT 
+			machine_id, 
+			COALESCE(name, ''), 
+			COALESCE(status, ''), 
+			COALESCE(version, ''), 
+			COALESCE(ip, ''), 
+			COALESCE(port, 0), 
+			COALESCE(secret, ''), 
+			COALESCE(first_seen, '1970-01-01 00:00:00'), 
+			COALESCE(last_seen, '1970-01-01 00:00:00'), 
+			COALESCE(update_count, 0),
+			COALESCE(config, '{}'),
+			COALESCE(stats, '{}')
+		FROM registry WHERE type_id = 4`
+	var args []any
+	if status != "" {
+		query += " AND status = ?"
+		args = append(args, status)
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, s.mapError(err)
+	}
+	defer func() { _ = rows.Close() }()
+	var racks []*registry.Rack
+	for rows.Next() {
+		var r registry.Rack
+		var configStr, statsStr string
+		if errScan := rows.Scan(&r.MachineID, &r.Name, &r.Status, &r.Version, &r.IP, &r.Port, &r.Secret, &r.FirstSeen, &r.LastSeen, &r.UpdateCount, &configStr, &statsStr); errScan != nil {
+			return nil, errScan
+		}
+		_ = json.Unmarshal([]byte(configStr), &r.Config)
+		_ = json.Unmarshal([]byte(statsStr), &r.Stats)
+		racks = append(racks, &r)
+	}
+	if errRows := rows.Err(); errRows != nil {
+		return nil, errRows
+	}
+	return racks, nil
+}
+
+func (s *Store) Get(ctx context.Context, id uuid.UUID) (*registry.Rack, error) {
+	return s.GetEntity(ctx, 4, id)
+}
+
+func (s *Store) GetEntity(ctx context.Context, typeID uint8, id uuid.UUID) (*registry.Rack, error) {
+	var r registry.Rack
+	var configStr, statsStr string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT 
+			machine_id, 
+			COALESCE(name, ''), 
+			COALESCE(status, ''), 
+			COALESCE(version, ''), 
+			COALESCE(ip, ''), 
+			COALESCE(port, 0), 
+			COALESCE(secret, ''), 
+			COALESCE(first_seen, '1970-01-01 00:00:00'), 
+			COALESCE(last_seen, '1970-01-01 00:00:00'), 
+			COALESCE(update_count, 0),
+			COALESCE(config, '{}'),
+			COALESCE(stats, '{}')
+		FROM registry WHERE machine_id = ? AND type_id = ?
+	`, id, typeID).Scan(&r.MachineID, &r.Name, &r.Status, &r.Version, &r.IP, &r.Port, &r.Secret, &r.FirstSeen, &r.LastSeen, &r.UpdateCount, &configStr, &statsStr)
+	if err != nil {
+		return nil, s.mapError(err)
+	}
+	_ = json.Unmarshal([]byte(configStr), &r.Config)
+	_ = json.Unmarshal([]byte(statsStr), &r.Stats)
+	return &r, nil
+}
+
+func (s *Store) Heartbeat(ctx context.Context, id uuid.UUID, stats map[string]any, config map[string]any) error {
+	return s.HeartbeatEntity(ctx, 4, id, stats, config)
+}
+
+func (s *Store) HeartbeatEntity(ctx context.Context, typeID uint8, id uuid.UUID, stats map[string]any, config map[string]any) error {
+	statsJSON, _ := json.Marshal(stats)
+	configJSON, _ := json.Marshal(config)
+	res, err := s.db.ExecContext(ctx, `UPDATE registry SET last_seen = ?, stats = ?, config = ? WHERE machine_id = ? AND type_id = ?`, time.Now().UTC(), string(statsJSON), string(configJSON), id, typeID)
+	if err != nil {
+		return s.mapError(err)
+	}
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		return registry.ErrNotFound
 	}
 	return nil
 }
 
-// ClearSnakes removes all snake entities (used on startup).
+func (s *Store) Remove(ctx context.Context, id uuid.UUID) error {
+	return s.RemoveEntity(ctx, 4, id)
+}
+
+func (s *Store) RemoveByName(ctx context.Context, name string) error {
+	res, err := s.db.ExecContext(ctx, "DELETE FROM registry WHERE name = ? AND type_id = 4", name)
+	if err != nil {
+		return s.mapError(err)
+	}
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		return registry.ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) RemoveEntity(ctx context.Context, typeID uint8, id uuid.UUID) error {
+	res, err := s.db.ExecContext(ctx, "DELETE FROM registry WHERE machine_id = ? AND type_id = ?", id, typeID)
+	if err != nil {
+		return s.mapError(err)
+	}
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		return registry.ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) UpdateStatus(ctx context.Context, id uuid.UUID, status string) error {
+	return s.UpdateStatusEntity(ctx, 4, id, status)
+}
+
+func (s *Store) UpdateStatusEntity(ctx context.Context, typeID uint8, id uuid.UUID, status string) error {
+	res, err := s.db.ExecContext(ctx, "UPDATE registry SET status = ? WHERE machine_id = ? AND type_id = ?", status, id, typeID)
+	if err != nil {
+		return s.mapError(err)
+	}
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		return registry.ErrNotFound
+	}
+	return nil
+}
+
+// Telemetry Queries (registry.Registry)
+
+func (s *Store) QueryLogs(ctx context.Context, q registry.LogQuery) ([]registry.LogEntry, error) {
+	internalLogs, err := s.QueryLogsFiltered(ctx, LogQuery{
+		Limit:    q.Limit,
+		Entity:   q.EntityName,
+		MinLevel: q.MinLevel,
+		Since:    q.Since,
+		Until:    q.Until,
+	})
+	if err != nil {
+		return nil, err
+	}
+	entries := make([]registry.LogEntry, len(internalLogs))
+	for i, l := range internalLogs {
+		entries[i] = registry.LogEntry{
+			Timestamp:  l.Timestamp,
+			EntityName: l.EntityName,
+			Severity:   l.Severity,
+			Body:       l.Body,
+			Attributes: l.Attributes,
+		}
+	}
+	return entries, nil
+}
+
+func (s *Store) QueryMetrics(ctx context.Context, q registry.MetricQuery) ([]registry.MetricEntry, error) {
+	internalMetrics, err := s.QueryMetricsFiltered(ctx, MetricQuery{
+		Limit:  q.Limit,
+		Entity: q.EntityName,
+		Name:   q.Name,
+		Since:  q.Since,
+		Until:  q.Until,
+	})
+	if err != nil {
+		return nil, err
+	}
+	entries := make([]registry.MetricEntry, len(internalMetrics))
+	for i, m := range internalMetrics {
+		entries[i] = registry.MetricEntry{
+			Timestamp:  m.Timestamp,
+			EntityName: m.EntityName,
+			Name:       m.Name,
+			Type:       m.Type,
+			Value:      m.Value,
+			Attributes: m.Attributes,
+		}
+	}
+	return entries, nil
+}
+
+// Mixed Registry Operations (Legacy/Internal)
+
+func (s *Store) RegisterMixer(ctx context.Context, mid uuid.UUID, name string, eid uuid.UUID, addr, version string) error {
+	s.log.Info("Registering Mixer Component", "mid", mid, "name", name, "eid", eid, "addr", addr, "version", version)
+	now := time.Now()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, errDel := tx.ExecContext(ctx, "DELETE FROM registry WHERE entity_id = ? AND type_id = 2", eid); errDel != nil {
+		return errDel
+	}
+	attrs, _ := json.Marshal(map[string]any{"api_address": addr})
+	stats, _ := json.Marshal(map[string]any{"goroutines": runtime.NumGoroutine(), "cpu_cores": runtime.NumCPU()})
+	_, errReg := tx.ExecContext(ctx, `
+		INSERT INTO registry (entity_id, type_id, machine_id, name, status, version, first_seen, last_seen, stats, config, attributes)
+		VALUES (?, 2, ?, ?, 'active', ?, ?, ?, ?, ?, ?)
+	`, eid, mid, name, version, now, now, string(stats), "{}", string(attrs))
+	if errReg != nil {
+		return s.mapError(errReg)
+	}
+	return tx.Commit()
+}
+
+func (s *Store) RegisterSnake(ctx context.Context, name string, eid uuid.UUID, version string, fromRack uuid.UUID, toMixer uuid.UUID, rackIP string, rackPort int, mixerIP string, mixerPort int, machineID uuid.UUID) error {
+	s.log.Info("Registering Snake Transport", "name", name, "eid", eid, "from_rack", fromRack, "to_mixer", toMixer, "machine_id", machineID)
+	now := time.Now()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, errDel := tx.ExecContext(ctx, "DELETE FROM registry WHERE entity_id = ? AND type_id = 9", eid); errDel != nil {
+		return errDel
+	}
+	attrs, _ := json.Marshal(map[string]any{
+		"rack": fromRack.String(), "mixer": toMixer.String(), "rack_ip": rackIP, "rack_port": rackPort, "mixer_ip": mixerIP, "mixer_port": mixerPort,
+	})
+	_, errReg := tx.ExecContext(ctx, `
+		INSERT INTO registry (entity_id, type_id, machine_id, mixer_id, name, status, version, first_seen, last_seen, stats, attributes)
+		VALUES (?, 9, ?, ?, ?, 'active', ?, ?, ?, ?, ?)
+	`, eid, machineID, toMixer, name, version, now, now, "{}", string(attrs))
+	if errReg != nil {
+		return s.mapError(errReg)
+	}
+	return tx.Commit()
+}
+
+func (s *Store) UpdateSnakeStats(ctx context.Context, eid uuid.UUID, stats map[string]any) error {
+	statsJSON, _ := json.Marshal(stats)
+	res, err := s.db.ExecContext(ctx, `UPDATE registry SET stats = ?, last_seen = ? WHERE entity_id = ? AND type_id = 9`, string(statsJSON), time.Now(), eid)
+	if err != nil {
+		return s.mapError(err)
+	}
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		return fmt.Errorf("snake not found: %s", eid)
+	}
+	return nil
+}
+
 func (s *Store) ClearSnakes(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, "DELETE FROM registry WHERE type_id = 9")
 	return err
 }
 
-// RemoveSnake deletes a Snake from the registry.
-func (s *Store) RemoveSnake(ctx context.Context, eid uint64) error {
+func (s *Store) RemoveSnake(ctx context.Context, eid uuid.UUID) error {
 	res, err := s.db.ExecContext(ctx, "DELETE FROM registry WHERE entity_id = ? AND type_id = 9", eid)
 	if err != nil {
-		return err
+		return s.mapError(err)
 	}
 	rows, _ := res.RowsAffected()
 	if rows == 0 {
-		return fmt.Errorf("snake not found: %d", eid)
+		return fmt.Errorf("snake not found: %s", eid)
 	}
 	return nil
 }
 
-// GetEntityIDByName resolves an entity name to its ID.
-func (s *Store) GetEntityIDByName(ctx context.Context, name string) (uint64, error) {
-	var eid uint64
-	row := s.db.QueryRowContext(ctx, "SELECT entity_id FROM registry WHERE name = ?", name)
-	if err := row.Scan(&eid); err != nil {
-		return 0, err
-	}
-	return eid, nil
+func (s *Store) GetEntityIDByName(ctx context.Context, name string) (uuid.UUID, error) {
+	var eid uuid.UUID
+	err := s.db.QueryRowContext(ctx, "SELECT entity_id FROM registry WHERE name = ?", name).Scan(&eid)
+	return eid, s.mapError(err)
 }
 
-// RegisterScenario upserts a Scenario into the registry.
-func (s *Store) RegisterScenario(ctx context.Context, eid uint64, name, version string, gearCount, wireCount int, mixerID uint64) error {
+func (s *Store) RegisterScenario(ctx context.Context, eid uuid.UUID, name, version string, gearCount, wireCount int, mixerID uuid.UUID) error {
+	s.log.Info("Registering Scenario", "eid", eid, "name", name, "gears", gearCount, "wires", wireCount, "mixer_id", mixerID)
 	now := time.Now()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-
 	if _, errDel := tx.ExecContext(ctx, "DELETE FROM registry WHERE name = ? AND type_id = 10", name); errDel != nil {
 		return errDel
 	}
-
-	attrs := map[string]any{
-		"gear_count": gearCount,
-		"wire_count": wireCount,
+	attrs, _ := json.Marshal(map[string]any{"gear_count": gearCount, "wire_count": wireCount})
+	_, errReg := tx.ExecContext(ctx, `
+		INSERT INTO registry (entity_id, type_id, mixer_id, name, status, version, first_seen, last_seen, stats, attributes)
+		VALUES (?, 10, ?, ?, 'active', ?, ?, ?, ?, ?)
+	`, eid, mixerID, name, version, now, now, "{}", string(attrs))
+	if errReg != nil {
+		return s.mapError(errReg)
 	}
-	attrsJSON, _ := json.Marshal(attrs)
-	statsJSON, _ := json.Marshal(map[string]any{})
-
-	// Extract MachineID from EntityID (Type 9 [8] + MachineID [16] + Sequence [40])
-	// But currently we don't have utility here.
-	mid := uint16((eid >> 40) & 0xFFFF) //nolint:gosec
-
-	// Wait, if eid was generated with seq 0?, mid is 0?
-	// The idgen uses:
-	// id := (uint64(idType) << 56) | (uint64(machineID) << 40) | (seq & 0xFFFFFFFFFF)
-	// So (eid >> 40) & 0xFFFF extracts machineID correctly.
-
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO registry (entity_id, type_id, machine_id, mixer_id, name, status, version, started_at, last_seen, stats, attributes)
-		VALUES (?, 10, ?, ?, ?, 'active', ?, ?, ?, ?, ?)
-	`, eid, mid, mixerID, name, version, now, now, string(statsJSON), string(attrsJSON))
-	if err != nil {
-		return err
-	}
-
 	return tx.Commit()
 }
 
-// RegisterGear upserts a Gear into the registry.
-func (s *Store) RegisterGear(ctx context.Context, eid uint64, name, gearType, mode, bind, connect string, scenarioID uint64, machineID uint16, ports map[string]uint64, mixerID uint64) error {
+func (s *Store) RegisterGear(ctx context.Context, eid uuid.UUID, name, gearType, mode, bind, connect string, scenarioID uuid.UUID, machineID uuid.UUID, ports map[string]uuid.UUID, mixerID uuid.UUID) error {
+	s.log.Info("Registering Gear", "eid", eid, "name", name, "type", gearType, "scenario_id", scenarioID, "machine_id", machineID)
 	now := time.Now()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-
 	if _, errDel := tx.ExecContext(ctx, "DELETE FROM registry WHERE name = ? AND type_id = 5", name); errDel != nil {
 		return errDel
 	}
-
-	attrs := map[string]any{
-		"gear_type":   gearType,
-		"mode":        mode,
-		"bind":        bind,
-		"connect":     connect,
-		"scenario_id": fmt.Sprintf("%d", scenarioID),
-		"ports":       ports,
+	pMap := make(map[string]string)
+	for k, v := range ports {
+		pMap[k] = v.String()
 	}
-	attrsJSON, _ := json.Marshal(attrs)
-	statsJSON, _ := json.Marshal(map[string]any{})
-
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO registry (entity_id, type_id, machine_id, mixer_id, name, status, version, started_at, last_seen, stats, attributes)
+	attrs, _ := json.Marshal(map[string]any{
+		"gear_type": gearType, "mode": mode, "bind": bind, "connect": connect, "scenario_id": scenarioID.String(), "ports": pMap,
+	})
+	_, errReg := tx.ExecContext(ctx, `
+		INSERT INTO registry (entity_id, type_id, machine_id, mixer_id, name, status, version, first_seen, last_seen, stats, attributes)
 		VALUES (?, 5, ?, ?, ?, 'active', '', ?, ?, ?, ?)
-	`, eid, machineID, mixerID, name, now, now, string(statsJSON), string(attrsJSON))
-	if err != nil {
-		return err
+	`, eid, machineID, mixerID, name, now, now, "{}", string(attrs))
+	if errReg != nil {
+		return s.mapError(errReg)
 	}
-
 	return tx.Commit()
 }
 
-// RegisterWire upserts a Wire into the registry.
-func (s *Store) RegisterWire(ctx context.Context, eid uint64, fromName, toName string, fromID, toID uint64, scenarioID uint64, machineID uint16, mixerID uint64) error {
+func (s *Store) RegisterWire(ctx context.Context, eid uuid.UUID, fromName, toName string, fromID, toID uuid.UUID, scenarioID uuid.UUID, machineID uuid.UUID, mixerID uuid.UUID) error {
+	s.log.Info("Registering Wire", "eid", eid, "from", fromName, "to", toName, "scenario_id", scenarioID, "machine_id", machineID)
 	now := time.Now()
 	name := fmt.Sprintf("%s->%s", fromName, toName)
-
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-
 	if _, errDel := tx.ExecContext(ctx, "DELETE FROM registry WHERE name = ? AND type_id = 8", name); errDel != nil {
 		return errDel
 	}
-
-	attrs := map[string]any{
-		"from":        fmt.Sprintf("%d", fromID),
-		"to":          fmt.Sprintf("%d", toID),
-		"scenario_id": fmt.Sprintf("%d", scenarioID),
-	}
-	attrsJSON, _ := json.Marshal(attrs)
-	statsJSON, _ := json.Marshal(map[string]any{})
-
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO registry (entity_id, type_id, machine_id, mixer_id, name, status, version, started_at, last_seen, stats, attributes)
+	attrs, _ := json.Marshal(map[string]any{"from": fromID.String(), "to": toID.String(), "scenario_id": scenarioID.String()})
+	_, errReg := tx.ExecContext(ctx, `
+		INSERT INTO registry (entity_id, type_id, machine_id, mixer_id, name, status, version, first_seen, last_seen, stats, attributes)
 		VALUES (?, 8, ?, ?, ?, 'active', '', ?, ?, ?, ?)
-	`, eid, machineID, mixerID, name, now, now, string(statsJSON), string(attrsJSON))
-	if err != nil {
-		return err
+	`, eid, machineID, mixerID, name, now, now, "{}", string(attrs))
+	if errReg != nil {
+		return s.mapError(errReg)
 	}
-
 	return tx.Commit()
 }
 
-// RegisterPort upserts a Port into the registry.
-func (s *Store) RegisterPort(ctx context.Context, eid uint64, name string, portType uint16, gearID uint64, scenarioID uint64, machineID uint16, mixerID uint64) error {
+func (s *Store) RegisterPort(ctx context.Context, eid uuid.UUID, name string, portType uint16, gearID uuid.UUID, scenarioID uuid.UUID, machineID uuid.UUID, mixerID uuid.UUID) error {
+	s.log.Info("Registering Port", "eid", eid, "name", name, "type", portType, "gear_id", gearID, "scenario_id", scenarioID)
 	now := time.Now()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-
-	// 1. Delete Existing
-	_, err = tx.ExecContext(ctx, "DELETE FROM registry WHERE name = ? AND type_id = ?", name, portType)
-	if err != nil {
-		return err
-	}
-
-	attrs := map[string]any{
-		"gear": fmt.Sprintf("%d", gearID),
-		// scenario_id removed from schema
-	}
-	attrsJSON, _ := json.Marshal(attrs)
-	statsJSON, _ := json.Marshal(map[string]any{})
-
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO registry (entity_id, type_id, machine_id, mixer_id, name, status, version, started_at, last_seen, stats, attributes)
+	_, _ = tx.ExecContext(ctx, "DELETE FROM registry WHERE name = ? AND type_id = ?", name, portType)
+	attrs, _ := json.Marshal(map[string]any{"gear": gearID.String()})
+	_, errReg := tx.ExecContext(ctx, `
+		INSERT INTO registry (entity_id, type_id, machine_id, mixer_id, name, status, version, first_seen, last_seen, stats, attributes)
 		VALUES (?, ?, ?, ?, ?, 'active', '', ?, ?, ?, ?)
-	`, eid, portType, machineID, mixerID, name, now, now, string(statsJSON), string(attrsJSON))
-	if err != nil {
-		return err
+	`, eid, portType, machineID, mixerID, name, now, now, "{}", string(attrs))
+	if errReg != nil {
+		return s.mapError(errReg)
 	}
-
 	return tx.Commit()
 }
 
-// ActivateRack promotes a rack from 'pending' to 'active' status.
 func (s *Store) ActivateRack(ctx context.Context, rackName string) error {
-	res, err := s.db.ExecContext(ctx, `
-		UPDATE registry 
-		SET status = 'active', last_seen = ? 
-		WHERE name = ? AND type_id = 4 AND status = 'pending'
-	`, time.Now(), rackName)
+	_, err := s.db.ExecContext(ctx, `UPDATE registry SET status = 'active', last_seen = ? WHERE name = ? AND type_id = 4 AND status = 'pending'`, time.Now(), rackName)
+	return s.mapError(err)
+}
+
+func (s *Store) GetRackByName(ctx context.Context, rackName string) (machineID uuid.UUID, err error) {
+	err = s.db.QueryRowContext(ctx, `SELECT machine_id FROM registry WHERE name = ? AND type_id = 4`, rackName).Scan(&machineID)
+	return machineID, s.mapError(err)
+}
+
+func (s *Store) ClearScenarioEntities(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, "DELETE FROM registry WHERE type_id IN (5, 6, 7, 8, 10)")
+	return s.mapError(err)
+}
+
+// Telemetry Logic (Internal)
+
+func (s *Store) FlushTelemetry(ctx context.Context, dataDir string) error {
+	tables := map[string]string{"telemetry_logs": "logs", "telemetry_spans": "spans", "telemetry_metrics": "metrics"}
+	ts := time.Now().UTC()
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	rows, _ := res.RowsAffected()
-	if rows == 0 {
-		// Already active or not found - not an error
-		return nil
-	}
-	return nil
-}
-
-// GetRackByName retrieves a rack's machine_id by name.
-func (s *Store) GetRackByName(ctx context.Context, rackName string) (machineID uint16, err error) {
-	row := s.db.QueryRowContext(ctx, `
-		SELECT machine_id FROM registry 
-		WHERE name = ? AND type_id = 4
-	`, rackName)
-	if err := row.Scan(&machineID); err != nil {
-		return 0, err
-	}
-	return machineID, nil
-}
-
-// ClearScenarioEntities removes all Gear, Wire, and Scenario entities.
-func (s *Store) ClearScenarioEntities(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, "DELETE FROM registry WHERE type_id IN (5, 6, 7, 8, 10)")
-	return err
-}
-
-// TelemetryLog represents a log entry.
-type TelemetryLog struct {
-	Timestamp  time.Time      `json:"timestamp"`
-	EntityName string         `json:"entity_name"`
-	Severity   string         `json:"severity"`
-	Body       string         `json:"body"`
-	Attributes map[string]any `json:"attributes"`
-}
-
-// LogQuery defines filters for querying logs.
-type LogQuery struct {
-	Limit    int
-	Entity   string    // Optional: filter by entity name/pattern
-	MinLevel string    // Optional: minimum severity (ERROR, WARN, INFO, DEBUG)
-	Since    time.Time // Time filter (if zero, defaults to 24h ago)
-	Until    time.Time // Optional: end time (defaults to now)
-}
-
-// QueryLogsFiltered retrieves logs with comprehensive filtering.
-// Defaults to last 24 hours if no time filter specified.
-func (s *Store) QueryLogsFiltered(ctx context.Context, q LogQuery) ([]TelemetryLog, error) {
-	// Apply 24-hour default if no time filter
-	if q.Since.IsZero() {
-		q.Since = time.Now().Add(-24 * time.Hour)
-		slog.Info("Query logs defaulting to last 24 hours", "since", q.Since)
-	}
-
-	// Build WHERE conditions
-	var conditions []string
-	var args []interface{}
-
-	conditions = append(conditions, "timestamp >= ?")
-	args = append(args, q.Since)
-
-	if !q.Until.IsZero() {
-		conditions = append(conditions, "timestamp <= ?")
-		args = append(args, q.Until)
-	}
-	if q.Entity != "" {
-		conditions = append(conditions, "entity_name LIKE ?")
-		args = append(args, q.Entity)
-	}
-	if q.MinLevel != "" {
-		// Map severity to numeric for comparison
-		severityOrder := map[string]int{"DEBUG": 0, "INFO": 1, "WARN": 2, "ERROR": 3}
-		if minOrder, ok := severityOrder[q.MinLevel]; ok {
-			var levels []string
-			for level, order := range severityOrder {
-				if order >= minOrder {
-					levels = append(levels, "'"+level+"'")
-				}
-			}
-			conditions = append(conditions, "severity IN ("+strings.Join(levels, ",")+")")
+	defer func() { _ = tx.Rollback() }()
+	for table, dirName := range tables {
+		dir := filepath.Join(dataDir, "telemetry", dirName, ts.Format("2006/01/02/15"))
+		_ = os.MkdirAll(dir, 0750)
+		path := filepath.Join(dir, fmt.Sprintf("%s_%d.parquet", dirName, ts.UnixNano()))
+		var count int
+		_ = tx.QueryRowContext(ctx, fmt.Sprintf("SELECT count(*) FROM %s", table)).Scan(&count)
+		if count == 0 {
+			continue
+		}
+		if _, errExport := tx.ExecContext(ctx, fmt.Sprintf("COPY (SELECT * FROM %s) TO '%s' (FORMAT 'parquet', COMPRESSION 'zstd')", table, path)); errExport != nil {
+			return errExport
+		}
+		if _, errTrunc := tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s", table)); errTrunc != nil {
+			return errTrunc
 		}
 	}
+	return tx.Commit()
+}
 
-	whereClause := "WHERE " + strings.Join(conditions, " AND ")
+func (s *Store) FlushArchiverBuffer(ctx context.Context, dataDir string) error {
+	ts := time.Now().UTC()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	rows, err := tx.QueryContext(ctx, "SELECT DISTINCT wire_id FROM archiver_buffer")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+	var wireIDs []string
+	for rows.Next() {
+		var wid string
+		if errScan := rows.Scan(&wid); errScan == nil {
+			wireIDs = append(wireIDs, wid)
+		}
+	}
+	if errRows := rows.Err(); errRows != nil {
+		return errRows
+	}
+	for _, wid := range wireIDs {
+		dir := filepath.Join(dataDir, "messages", wid, ts.Format("2006/01/02/15"))
+		_ = os.MkdirAll(dir, 0750)
+		path := filepath.Join(dir, fmt.Sprintf("messages_%s_%d.parquet", wid, ts.UnixNano()))
+		if _, errExport := tx.ExecContext(ctx, fmt.Sprintf("COPY (SELECT ts, flux_id, trace_id, subject, payload, meta FROM archiver_buffer WHERE wire_id = '%s') TO '%s' (FORMAT 'parquet', COMPRESSION 'zstd')", wid, path)); errExport != nil {
+			return errExport
+		}
+	}
+	_, errTrunc := tx.ExecContext(ctx, "DELETE FROM archiver_buffer")
+	if errTrunc != nil {
+		return errTrunc
+	}
+	return tx.Commit()
+}
 
-	query := ""
+func (s *Store) QueryLogsFiltered(ctx context.Context, q LogQuery) ([]TelemetryLog, error) {
+	if q.Since.IsZero() {
+		q.Since = time.Now().Add(-24 * time.Hour)
+	}
+
+	// 1. Determine if we have Parquet files to include
 	logsDir := filepath.Join(s.dataDir, "telemetry", "logs")
-	if hasParquetFiles(logsDir) {
-		// Query both active table AND parquet files
-		parquetPath := filepath.Join(logsDir, "**", "*.parquet")
-		//nolint:gosec // whereClause built from validated params
-		query = fmt.Sprintf(`
+	parquetGlob := filepath.Join(logsDir, "**", "*.parquet")
+	hasParquet := false
+	_ = filepath.Walk(logsDir, func(path string, info os.FileInfo, err error) error {
+		if err == nil && !info.IsDir() && filepath.Ext(path) == ".parquet" {
+			hasParquet = true
+			return filepath.SkipDir
+		}
+		return nil
+	})
+
+	// 2. Build Query
+	var query string
+	if hasParquet {
+		query = `
 			SELECT timestamp, entity_name, severity, body, attributes FROM (
 				SELECT timestamp, entity_name, severity, body, attributes FROM telemetry_logs
 				UNION ALL
-				SELECT timestamp, entity_name, severity, body, attributes FROM read_parquet('%s')
-			) %s ORDER BY timestamp DESC LIMIT ?`,
-			parquetPath, whereClause)
+				SELECT timestamp, entity_name, severity, body, attributes FROM read_parquet('` + parquetGlob + `')
+			) WHERE timestamp >= ?`
 	} else {
-		// Query only active table
-		//nolint:gosec // whereClause built from validated params
-		query = fmt.Sprintf(
-			"SELECT timestamp, entity_name, severity, body, attributes FROM telemetry_logs %s ORDER BY timestamp DESC LIMIT ?",
-			whereClause)
+		query = "SELECT timestamp, entity_name, severity, body, attributes FROM telemetry_logs WHERE timestamp >= ? "
 	}
 
+	args := []any{q.Since}
+	if !q.Until.IsZero() {
+		query += " AND timestamp <= ? "
+		args = append(args, q.Until)
+	}
+	if q.Entity != "" {
+		query += " AND entity_name = ?"
+		args = append(args, q.Entity)
+	}
+	if q.MinLevel != "" {
+		query += " AND severity = ?"
+		args = append(args, strings.ToUpper(q.MinLevel))
+	}
+
+	query += " ORDER BY timestamp DESC LIMIT ?"
 	args = append(args, q.Limit)
+
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return nil, s.mapError(err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	var logs []TelemetryLog
+	logs := []TelemetryLog{} // Non-nil empty slice
 	for rows.Next() {
 		var l TelemetryLog
-		var attrAny any
-		if err := rows.Scan(&l.Timestamp, &l.EntityName, &l.Severity, &l.Body, &attrAny); err != nil {
-			return nil, err
+		var attrStr string
+		if errScan := rows.Scan(&l.Timestamp, &l.EntityName, &l.Severity, &l.Body, &attrStr); errScan != nil {
+			return nil, errScan
 		}
-
-		// Handle Attributes unmarshaling (DuckDB can return JSON as map or []byte)
-		if m, ok := attrAny.(map[string]any); ok {
-			l.Attributes = m
-		} else if b, ok := attrAny.([]byte); ok && len(b) > 0 {
-			_ = json.Unmarshal(b, &l.Attributes)
-		} else if str, ok := attrAny.(string); ok && len(str) > 0 {
-			_ = json.Unmarshal([]byte(str), &l.Attributes)
-		}
-
+		_ = json.Unmarshal([]byte(attrStr), &l.Attributes)
 		logs = append(logs, l)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
+	if errRows := rows.Err(); errRows != nil {
+		return nil, errRows
 	}
 	return logs, nil
 }
 
-// QueryLogs retrieves recent logs (backwards compatibility).
-func (s *Store) QueryLogs(ctx context.Context, limit int) ([]TelemetryLog, error) {
-	return s.QueryLogsFiltered(ctx, LogQuery{Limit: limit})
+func (s *Store) QueryMetricsFiltered(ctx context.Context, q MetricQuery) ([]TelemetryMetric, error) {
+	if q.Since.IsZero() {
+		q.Since = time.Now().Add(-24 * time.Hour)
+	}
+
+	// 1. Determine if we have Parquet files to include
+	metricsDir := filepath.Join(s.dataDir, "telemetry", "metrics")
+	parquetGlob := filepath.Join(metricsDir, "**", "*.parquet")
+	hasParquet := false
+	_ = filepath.Walk(metricsDir, func(path string, info os.FileInfo, err error) error {
+		if err == nil && !info.IsDir() && filepath.Ext(path) == ".parquet" {
+			hasParquet = true
+			return filepath.SkipDir
+		}
+		return nil
+	})
+
+	// 2. Build Query
+	var query string
+	if hasParquet {
+		query = `
+			SELECT timestamp, entity_name, name, type, value, attributes FROM (
+				SELECT timestamp, entity_name, name, type, value, attributes FROM telemetry_metrics
+				UNION ALL
+				SELECT timestamp, entity_name, name, type, value, attributes FROM read_parquet('` + parquetGlob + `')
+			) WHERE timestamp >= ?`
+	} else {
+		query = "SELECT timestamp, entity_name, name, type, value, attributes FROM telemetry_metrics WHERE timestamp >= ? "
+	}
+
+	args := []any{q.Since}
+	if q.Entity != "" {
+		query += " AND entity_name = ?"
+		args = append(args, q.Entity)
+	}
+	if q.Name != "" {
+		query += " AND name = ?"
+		args = append(args, q.Name)
+	}
+
+	query += " ORDER BY timestamp DESC LIMIT ?"
+	args = append(args, q.Limit)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, s.mapError(err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	metrics := []TelemetryMetric{} // Non-nil empty slice
+	for rows.Next() {
+		var m TelemetryMetric
+		var attrStr string
+		if errScan := rows.Scan(&m.Timestamp, &m.EntityName, &m.Name, &m.Type, &m.Value, &attrStr); errScan != nil {
+			return nil, errScan
+		}
+		_ = json.Unmarshal([]byte(attrStr), &m.Attributes)
+		metrics = append(metrics, m)
+	}
+	if errRows := rows.Err(); errRows != nil {
+		return nil, errRows
+	}
+	return metrics, nil
 }
 
-// TelemetryMetric represents a metric point.
 type TelemetryMetric struct {
 	Timestamp  time.Time      `json:"timestamp"`
 	EntityName string         `json:"entity_name"`
@@ -615,116 +811,26 @@ type TelemetryMetric struct {
 	Attributes map[string]any `json:"attributes"`
 }
 
-// MetricQuery defines filters for querying metrics.
+type TelemetryLog struct {
+	Timestamp  time.Time      `json:"timestamp"`
+	EntityName string         `json:"entity_name"`
+	Severity   string         `json:"severity"`
+	Body       string         `json:"body"`
+	Attributes map[string]any `json:"attributes"`
+}
+
+type LogQuery struct {
+	Limit    int
+	Entity   string
+	MinLevel string
+	Since    time.Time
+	Until    time.Time
+}
+
 type MetricQuery struct {
 	Limit  int
-	Entity string    // Optional: filter by entity name
-	Name   string    // Optional: filter by metric name
-	Since  time.Time // Time filter (if zero, defaults to 24h ago)
-	Until  time.Time // Optional: end time
-}
-
-// QueryMetricsFiltered retrieves metrics with comprehensive filtering.
-// Defaults to last 24 hours if no time filter specified.
-func (s *Store) QueryMetricsFiltered(ctx context.Context, q MetricQuery) ([]TelemetryMetric, error) {
-	// Apply 24-hour default if no time filter
-	if q.Since.IsZero() {
-		q.Since = time.Now().Add(-24 * time.Hour)
-		slog.Info("Query metrics defaulting to last 24 hours", "since", q.Since)
-	}
-
-	// Build WHERE conditions
-	var conditions []string
-	var args []interface{}
-
-	conditions = append(conditions, "timestamp >= ?")
-	args = append(args, q.Since)
-
-	if !q.Until.IsZero() {
-		conditions = append(conditions, "timestamp <= ?")
-		args = append(args, q.Until)
-	}
-	if q.Entity != "" {
-		conditions = append(conditions, "entity_name LIKE ?")
-		args = append(args, q.Entity)
-	}
-	if q.Name != "" {
-		conditions = append(conditions, "name LIKE ?")
-		args = append(args, q.Name)
-	}
-
-	whereClause := "WHERE " + strings.Join(conditions, " AND ")
-
-	query := ""
-	metricsDir := filepath.Join(s.dataDir, "telemetry", "metrics")
-	if hasParquetFiles(metricsDir) {
-		// Query both active table AND parquet files
-		parquetPath := filepath.Join(metricsDir, "**", "*.parquet")
-		//nolint:gosec // whereClause built from validated params
-		query = fmt.Sprintf(`
-			SELECT timestamp, entity_name, name, type, value, attributes FROM (
-				SELECT timestamp, entity_name, name, type, value, attributes FROM telemetry_metrics
-				UNION ALL
-				SELECT timestamp, entity_name, name, type, value, attributes FROM read_parquet('%s', hive_partitioning=true)
-			) %s ORDER BY timestamp DESC LIMIT ?`,
-			parquetPath, whereClause)
-	} else {
-		// Query only active table
-		//nolint:gosec // whereClause built from validated params
-		query = fmt.Sprintf(
-			"SELECT timestamp, entity_name, name, type, value, attributes FROM telemetry_metrics %s ORDER BY timestamp DESC LIMIT ?",
-			whereClause)
-	}
-
-	args = append(args, q.Limit)
-	rows, err := s.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-
-	var metrics []TelemetryMetric
-	for rows.Next() {
-		var m TelemetryMetric
-		var attrAny any
-		if err := rows.Scan(&m.Timestamp, &m.EntityName, &m.Name, &m.Type, &m.Value, &attrAny); err != nil {
-			return nil, err
-		}
-
-		// Handle Attributes unmarshaling (DuckDB can return JSON as map or []byte)
-		if attrs, ok := attrAny.(map[string]any); ok {
-			m.Attributes = attrs
-		} else if b, ok := attrAny.([]byte); ok && len(b) > 0 {
-			_ = json.Unmarshal(b, &m.Attributes)
-		} else if s, ok := attrAny.(string); ok && len(s) > 0 {
-			_ = json.Unmarshal([]byte(s), &m.Attributes)
-		}
-
-		metrics = append(metrics, m)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return metrics, nil
-}
-
-// QueryMetrics retrieves recent metrics (backwards compatibility).
-func (s *Store) QueryMetrics(ctx context.Context, limit int) ([]TelemetryMetric, error) {
-	return s.QueryMetricsFiltered(ctx, MetricQuery{Limit: limit})
-}
-
-// hasParquetFiles checks if there are any .parquet files in the given directory or subdirectories.
-func hasParquetFiles(dir string) bool {
-	found := false
-	_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil // ignore errors
-		}
-		if !info.IsDir() && strings.HasSuffix(info.Name(), ".parquet") {
-			found = true
-			return fmt.Errorf("found") // stop walking
-		}
-		return nil
-	})
-	return found
+	Entity string
+	Name   string
+	Since  time.Time
+	Until  time.Time
 }

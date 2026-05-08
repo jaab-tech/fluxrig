@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/fxamacker/cbor/v2"
+	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
@@ -20,21 +21,15 @@ import (
 )
 
 func setupBus(t *testing.T) (*snake.Server, *bus.NatsBus, string) {
-	// 1. Start Snake
-	s, err := snake.NewServer(snake.Config{
+	s, err := snake.NewServer(context.Background(), snake.Config{
 		Port:        -1,
 		ClusterName: "run-test",
+		StoreDir:    t.TempDir(),
 	})
 	if err != nil {
 		t.Fatalf("Failed to start snake: %v", err)
 	}
 
-	// 2. Connect Bus
-	// We need to verify that NewNatsBus is called
-	// Since we can't easily mock the bus package function without dependency injection,
-	// we will rely on the interface in the real code.
-	// For this test, we just check the config parsing.
-	// 2. Connect Bus
 	b := bus.NewNatsBus("flux")
 	url := s.ClientURL()
 	if errCon := b.Connect(url, bus.ConnectOptions{
@@ -45,7 +40,6 @@ func setupBus(t *testing.T) (*snake.Server, *bus.NatsBus, string) {
 		t.Fatalf("Bus connect failed: %v", errCon)
 	}
 
-	// 3. Create Stream (Required for JS Publish)
 	nc, err := nats.Connect(url)
 	if err != nil {
 		t.Fatalf("NATS connect failed: %v", err)
@@ -57,7 +51,7 @@ func setupBus(t *testing.T) (*snake.Server, *bus.NatsBus, string) {
 	}
 	_, err = js.CreateStream(context.Background(), jetstream.StreamConfig{
 		Name:     "flux",
-		Subjects: []string{"fluxrig.>"},
+		Subjects: []string{"flux.>"},
 	})
 	if err != nil {
 		t.Fatalf("Failed to create stream: %v", err)
@@ -71,50 +65,46 @@ func TestSendHello(t *testing.T) {
 	defer s.Shutdown()
 	defer b.Close()
 
-	// 1. Subscribe to verify
 	nc, err := nats.Connect(url)
 	if err != nil {
 		t.Fatalf("NATS connect failed: %v", err)
 	}
 	defer nc.Close()
 
-	sub, err := nc.SubscribeSync("fluxrig.agent.hello")
+	sub, err := nc.SubscribeSync("flux.agent.hello")
 	if err != nil {
 		t.Fatal(err)
 	}
 	_ = nc.Flush()
 
-	// 2. Send Hello
+	machineID := uuid.New()
 	payload := &fluxmsg.HelloPayload{
 		Name:      "unit-test-rack",
-		MachineID: 123,
+		MachineID: machineID,
 		IP:        "127.0.0.1",
 		Port:      9999,
 		Secret:    "secret-123",
 	}
 
-	gen, _ := idgen.New(1)
+	gen, _ := idgen.New(uuid.New())
 	if errSend := sendHello(b, payload, gen); errSend != nil {
 		t.Fatalf("sendHello failed: %v", errSend)
 	}
 
-	// 3. Verify
 	msg, err := sub.NextMsg(5 * time.Second)
 	if err != nil {
 		t.Fatalf("Did not receive hello: %v", err)
 	}
 
-	// Unpack FluxMsg
 	var fMsg fluxmsg.FluxMsg
 	if errUnmarshal := cbor.Unmarshal(msg.Data, &fMsg); errUnmarshal != nil {
 		t.Fatal(errUnmarshal)
 	}
 
-	if fMsg.SrcGearID != 123 {
-		t.Errorf("Expected SrcID 123, got %d", fMsg.SrcGearID)
+	if fMsg.SrcGearID != machineID {
+		t.Errorf("Expected SrcID %v, got %v", machineID, fMsg.SrcGearID)
 	}
 
-	// Unpack Payload using Helper (since Data is map[string]any)
 	p, err := fluxmsg.ParseHello(fMsg.Data)
 	if err != nil {
 		t.Fatalf("Failed to parse hello payload: %v", err)
@@ -135,16 +125,17 @@ func TestSendHeartbeat(t *testing.T) {
 		t.Fatalf("NATS connect failed: %v", err)
 	}
 	defer nc.Close()
-	sub, _ := nc.SubscribeSync("fluxrig.agent.heartbeat")
-	_ = nc.Flush() // Ensure subscription is active before sending
+	sub, _ := nc.SubscribeSync("flux.agent.heartbeat")
+	_ = nc.Flush()
 
-	gen, _ := idgen.New(1)
+	machineID := uuid.New()
+	gen, _ := idgen.New(uuid.New())
 	hbCfg := &config.RackConfig{}
-	if errHB := sendHeartbeat(context.Background(), b, 456, hbCfg, gen); errHB != nil {
+	if errHB := sendHeartbeat(context.Background(), b, machineID, hbCfg, gen); errHB != nil {
 		t.Fatal(errHB)
 	}
 
-	msg, err := sub.NextMsg(5 * time.Second) // Increased timeout for CI
+	msg, err := sub.NextMsg(5 * time.Second)
 	if err != nil {
 		t.Fatal("No heartbeat received")
 	}
@@ -154,7 +145,7 @@ func TestSendHeartbeat(t *testing.T) {
 		t.Fatalf("Failed to unmarshal FluxMsg: %v", errUnmarshal)
 	}
 
-	if fMsg.SrcGearID != 456 {
+	if fMsg.SrcGearID != machineID {
 		t.Error("Wrong SrcID")
 	}
 
@@ -163,17 +154,11 @@ func TestSendHeartbeat(t *testing.T) {
 		t.Fatalf("Failed to parse heartbeat: %v", err)
 	}
 
-	if hb.MachineID != 456 {
+	if hb.MachineID != machineID {
 		t.Error("Wrong HB ID")
 	}
 
-	// Check stats presence (goroutines)
 	if _, ok := hb.Stats["goroutines"]; !ok {
 		t.Error("Missing goroutines stat")
 	}
 }
-
-// TestConfigLoading can invoke internal logic if exposed, but config loading is mostly
-// `pkg/config`. We want to test logic in `RunAgent` that handles defaults.
-// This is harder without refactoring RunAgent to be non-blocking or mockable.
-// Skipping RunAgent loop for now, helper coverage covers protocol.

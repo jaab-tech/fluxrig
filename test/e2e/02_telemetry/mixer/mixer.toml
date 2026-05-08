@@ -10,11 +10,11 @@ port = 4225
 url = "nats://localhost:4225"
 # store_dir removed
 stream_name = "flux-telemetry"
-stream_subjects = ["flux.telemetry.>"]
+stream_subjects = ["flux.telemetry.>", "flux.agent.>"]
 
 [store]
 dir = "./data"
-database_file = "fluxrig_test.duckdb"
+database_file = "flux.duckdb"
 cluster_key_file = "cluster.key"
 
 [observability]

@@ -36,7 +36,7 @@ var rackCmd = &cobra.Command{
 			Name:       "fluxrig-rack-init",
 			Writer:     os.Stdout,
 		})
-		logger.Log(cmd.Context(), loggerPkg.ParseLevel(initLevel), "Initializing FluxRig Rack CLI...")
+		logger.Log(cmd.Context(), loggerPkg.ParseLevel(initLevel), "Initializing fluxrig Rack CLI...")
 
 		// 2. Load Configuration
 		// We load config first to know WHERE to log.
@@ -55,7 +55,7 @@ var rackCmd = &cobra.Command{
 		logger = loggerPkg.New(loggerPkg.Config{
 			Level:      cfg.Logging.Level,
 			EntityType: loggerPkg.TypeRack,
-			Name:       cfg.Rack.Name,
+			Name:       cfg.Base.Name,
 			Writer:     os.Stdout, // CLI always to stdout, tests capture via redirection
 		})
 		// Buffer pre-telemetry logs for 1-to-1 parity
@@ -63,7 +63,7 @@ var rackCmd = &cobra.Command{
 		bufLogger := slog.New(bufHandler)
 		slog.SetDefault(bufLogger)
 
-		bufLogger.Info("Starting FluxRig Rack...", "version", version.Version)
+		bufLogger.Info("Starting fluxrig Rack...", "version", version.Version)
 		bufLogger.Debug("Diagnostic: Logger calibrated for Debug/Trace visibility")
 
 		// 3. Connect to Bus & Start Agent

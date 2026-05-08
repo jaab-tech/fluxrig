@@ -13,11 +13,13 @@ import (
 	"github.com/ThreeDotsLabs/watermill"
 	"github.com/ThreeDotsLabs/watermill/message"
 	"github.com/fxamacker/cbor/v2"
+	"github.com/google/uuid"
 
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/jaab-tech/fluxrig/pkg/pki"
 	"github.com/jaab-tech/fluxrig/pkg/registry"
 	"github.com/jaab-tech/fluxrig/pkg/router"
+	"github.com/jaab-tech/fluxrig/pkg/version"
 )
 
 // ScenarioProvider defines the subset of ScenarioController used by Enrollment.
@@ -31,13 +33,13 @@ type EnrollmentController struct {
 	publisher       message.Publisher
 	signer          *pki.ClusterKey
 	scenario        ScenarioProvider
-	mixerID         uint64 // Mixer's fluxEntityID
+	mixerID         uuid.UUID // Mixer's fluxEntityID
 	pushDelay       time.Duration
 	processedHellos sync.Map // Deduplication cache: Name -> time.Time
 	logger          *slog.Logger
 }
 
-func NewEnrollmentController(log *slog.Logger, reg registry.Registry, pub message.Publisher, signer *pki.ClusterKey, mixerID uint64, pushDelay time.Duration) *EnrollmentController {
+func NewEnrollmentController(log *slog.Logger, reg registry.Registry, pub message.Publisher, signer *pki.ClusterKey, mixerID uuid.UUID, pushDelay time.Duration) *EnrollmentController {
 	return &EnrollmentController{
 		reg:       reg,
 		publisher: pub,
@@ -76,6 +78,7 @@ func (c *EnrollmentController) RegisterRoutes(r *router.RouterWrapper) {
 }
 
 func (c *EnrollmentController) HandleHello(msg *message.Message) ([]*message.Message, error) {
+	c.logger.Debug("MIXER HandleHello Triggered", "len", len(msg.Payload))
 	// 1. Unmarshal FluxMsg
 	var fm fluxmsg.FluxMsg
 	if err := cbor.Unmarshal(msg.Payload, &fm); err != nil {
@@ -90,7 +93,7 @@ func (c *EnrollmentController) HandleHello(msg *message.Message) ([]*message.Mes
 		return nil, nil
 	}
 
-	c.logger.Info("Received Hello", "name", hello.Name, "ip", hello.IP, "port", hello.Port)
+	c.logger.Info("Received Hello", "name", hello.Name, "id", hello.MachineID, "ip", hello.IP, "port", hello.Port)
 
 	// Deduplication Check with TTL (Bypassed if secret provided for recovery)
 	if hello.Secret == "" {
@@ -105,27 +108,35 @@ func (c *EnrollmentController) HandleHello(msg *message.Message) ([]*message.Mes
 	}
 
 	// 3. Register
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	rack, err := c.reg.Register(ctx, hello.Name, hello.Secret, hello.IP, hello.Port, hello.Version, hello.Config, c.mixerID)
+	rack, err := c.reg.Register(ctx, hello.MachineID, hello.Name, hello.Secret, hello.IP, hello.Port, hello.Version, hello.Config, c.mixerID)
 	if err != nil {
 		c.logger.Error("failed to register rack", "error", err)
-		// If DB failure, we might retry, but for now log and drop.
+		if err == registry.ErrNameConflict {
+			// Do not retry on name conflict, it requires manual intervention
+			return nil, nil
+		}
+		// For other errors (DB down), we might want Watermill to retry
 		return nil, err
 	}
 
 	c.logger.Info("Rack Registered", "id", rack.MachineID, "name", rack.Name, "status", rack.Status)
 
 	// 4. Issue Passport (StateEnvelope)
-	// Construct Rack State
+	// Construct Rack State with lifecycle metadata
 	rackState := pki.RackState{
 		MixerID:     c.mixerID,
 		MachineID:   rack.MachineID,
 		Name:        rack.Name,
 		Status:      rack.Status,
-		Secret:      rack.Secret, // Embed Secret in Passport
+		Secret:      rack.Secret,
 		MixerPublic: c.signer.Public,
+		Version:     version.Version,
+		CreatedAt:   rack.FirstSeen.Unix(),
+		UpdatedAt:   rack.LastSeen.Unix(),
+		UpdateCount: rack.UpdateCount,
 	}
 
 	// Create Envelope and Sign
@@ -144,13 +155,13 @@ func (c *EnrollmentController) HandleHello(msg *message.Message) ([]*message.Mes
 
 	// Publish Response
 	// Topic: fluxrig.agent.enrollment.<Name>.<Nonce>
-	topic := fmt.Sprintf("fluxrig.agent.enrollment.%s.%s", hello.Name, hello.Nonce)
+	topic := fmt.Sprintf("flux.agent.enrollment.%s.%s", hello.Name, hello.Nonce)
 
 	// Prepare HelloResponse
 	resp := fluxmsg.HelloResponse{
 		Status:   rack.Status,
 		Passport: envBytes,
-		Message:  fmt.Sprintf("Welcome to FluxRig. Status: %s", rack.Status),
+		Message:  fmt.Sprintf("Welcome to fluxrig. Status: %s", rack.Status),
 	}
 	respData, _ := resp.ToData() // Convert to map[string]any
 
@@ -223,7 +234,7 @@ func (c *EnrollmentController) HandleHeartbeat(msg *message.Message) ([]*message
 
 	respMsg := fluxmsg.New()
 	respMsg.Data = respData
-	respMsg.SrcGearID = 0
+	respMsg.SrcGearID = uuid.Nil
 
 	respBytes, err := cbor.Marshal(respMsg)
 	if err != nil {
@@ -232,7 +243,7 @@ func (c *EnrollmentController) HandleHeartbeat(msg *message.Message) ([]*message
 
 	// Reply with Status Update via Notification Topic
 	// Racks listen to 'fluxrig.agent.notify.<ID>' for status changes.
-	topic := fmt.Sprintf("fluxrig.agent.notify.%d", hb.MachineID)
+	topic := fmt.Sprintf("flux.agent.notify.%s", hb.MachineID)
 
 	pubMsg := message.NewMessage(watermill.NewUUID(), respBytes)
 	if err := c.publisher.Publish(topic, pubMsg); err != nil {

@@ -99,7 +99,7 @@ log_info "Rack PID: $RACK_PID"
 log_info "Running Health Check..."
 "${ROOT_DIR}/bin/fluxrig" check -c "rack.toml"
 if [ $? -ne 0 ]; then
-    fail "FluxRig Check FAILED"
+    fail "fluxrig Check FAILED"
 fi
 
 # 6. Verify Registration (Loop)
@@ -162,8 +162,8 @@ fi
 
 # 8. Verify DB Tables and Content
 log_info "Verifying DB Content (Snapshot)..."
-cp "$WORK_DIR/mixer/data/fluxrig_test.duckdb" "$WORK_DIR/mixer/data/snapshot.duckdb"
-[ -f "$WORK_DIR/mixer/data/fluxrig_test.duckdb.wal" ] && cp "$WORK_DIR/mixer/data/fluxrig_test.duckdb.wal" "$WORK_DIR/mixer/data/snapshot.duckdb.wal"
+cp "$WORK_DIR/mixer/data/flux.duckdb" "$WORK_DIR/mixer/data/snapshot.duckdb"
+[ -f "$WORK_DIR/mixer/data/flux.duckdb.wal" ] && cp "$WORK_DIR/mixer/data/flux.duckdb.wal" "$WORK_DIR/mixer/data/snapshot.duckdb.wal"
 
 log_info "Checking 'registry' table (Racks)..."
 DB_OUT=$(duckdb -readonly -csv -noheader -c "SELECT name, machine_id FROM registry WHERE name='rack-e2e-01' AND type_id=4;" "$WORK_DIR/mixer/data/snapshot.duckdb")

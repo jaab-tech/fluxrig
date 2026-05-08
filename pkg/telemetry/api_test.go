@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
@@ -65,11 +66,11 @@ func TestLog(t *testing.T) {
 	telemetry.ResetGlobalsForTest()
 	mockBus := bus.NewMockBus()
 	// Test Writer directly
-	gen, _ := idgen.New(1)
-	_ = telemetry.NewNatsWriter(mockBus, 12345, "test-name", "flux.test", gen, 1)
+	gen, _ := idgen.New(uuid.New())
+	_ = telemetry.NewNatsWriter(mockBus, uuid.New(), "test-name", "flux.test", gen, 1)
 	cfg := telemetry.Config{
 		ServiceName: "test-service",
-		EntityID:    12345,
+		EntityID:    uuid.New(),
 		BaseSubject: "test.telemetry",
 	}
 

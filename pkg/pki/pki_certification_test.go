@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -33,8 +34,8 @@ func TestPKI_Certification(t *testing.T) {
 
 	t.Run("RackState_Signing_Verification_Logic", func(t *testing.T) {
 		state := &RackState{
-			MixerID:     101,
-			MachineID:   7,
+			MixerID:     uuid.New(),
+			MachineID:   uuid.New(),
 			Name:        "certification-rack",
 			Status:      "active",
 			Secret:      "deadbeef-certification-secret",

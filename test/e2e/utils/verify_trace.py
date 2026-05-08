@@ -8,9 +8,9 @@ import datetime
 def verify_log(log_path):
     print(f"[VerifyTrace] Scanning {log_path}...")
     
-    # Regex for attributes in key="value" or key=value format
-    # simplistic parser for the log line
-    id_re = re.compile(r'flux_id="?(0x[0-9a-fA-F]+)"?')
+    # Regex for UUIDs
+    UUID_PATTERN = r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+    id_re = re.compile(rf'flux_id="?({UUID_PATTERN})"?(?:\s+|$)')
     path_re = re.compile(r'flux_path="?(\[\{.*?\}\])"?')
 
     # Entity Decoding Logic
@@ -19,16 +19,9 @@ def verify_log(log_path):
         0x05: "Gear", 0x06: "PortIn", 0x07: "PortOut", 0x08: "Wire"
     }
 
-    def decode_eid_components(val_hex):
-        try:
-            val = int(val_hex, 16)
-            type_id = (val >> 56) & 0xFF
-            ent_type = ENTITY_TYPES.get(type_id, "Unk")
-            mid = (val >> 40) & 0xFFFF
-            seq = val & 0xFFFFFFFFFF
-            return ent_type, mid, seq
-        except: 
-            return "Unk", 0, 0
+    def decode_eid_components(val_str):
+        # We don't decode UUID components for now as they are opaque v7
+        return "ID", 0, 0
 
     def format_ts_human(ns_str):
         try:
@@ -44,12 +37,12 @@ def verify_log(log_path):
     
     # regex for subject parsing: subject="flux.gear.<gear>.<port>"
     subject_re = re.compile(r'subject="flux\.gear\.([^"]+)\.([^"]+)"')
-    # regex for port_id="0x..."
-    pid_re = re.compile(r'port_id="(0x[0-9a-fA-F]+)"')
+    # regex for port_id="<uuid>"
+    pid_re = re.compile(rf'port_id="?({UUID_PATTERN})"?(?:\s+|$)')
     # regex for flux.name="..."
     fname_re = re.compile(r'flux\.name="([^"]+)"')
     # regex for Bus Receive: Bus Receive | ... port_id="..." gear="..."
-    bus_recv_re = re.compile(r'Bus Receive.*port_id="(0x[0-9a-fA-F]+)".*gear="([^"]+)"')
+    bus_recv_re = re.compile(rf'Bus Receive.*port_id="?({UUID_PATTERN})"?.*gear="([^"]+)"')
 
     with open(log_path, 'r') as f:
         for line in f:
@@ -92,8 +85,8 @@ def verify_log(log_path):
             if m_fname and m_path:
                 gname = m_fname.group(1)
                 path_str = m_path.group(1)
-                # Find all g:IDs
-                g_ids = re.findall(r'g:(0x[0-9a-fA-F]+)', path_str)
+                # Find all g:UUIDs
+                g_ids = re.findall(rf'g:({UUID_PATTERN})', path_str)
                 for gid in g_ids:
                      # Just overwrite (safe because Gear ID <-> Name is 1:1 in a session)
                      id_map[gid] = gname
@@ -113,31 +106,11 @@ def verify_log(log_path):
     print(f"[VerifyTrace] Found traces for {len(traces)} FluxIDs.")
     print(f"[VerifyTrace] Discovered {len(id_map)} ID mappings.")
     
-    # Hop Regex: {g:0x... p:0x... t:...}
-    hop_re = re.compile(r'\{g:(0x[0-9a-fA-F]+)\s+p:(0x[0-9a-fA-F]+)\s+t:(\d+)\}')
+    # Hop Regex: {g:<uuid>, p:<uuid>, t:...}
+    hop_re = re.compile(rf'\{{g:({UUID_PATTERN})\s+p:({UUID_PATTERN})\s+t:(\d+)\}}')
 
-    # FluxID Decoding Logic (Sonyflake)
-    # Epoch: 2025-01-01 00:00:00 UTC
-    EPOCH = datetime.datetime(2025, 1, 1, 0, 0, 0, 0, datetime.timezone.utc)
-    
     for fid, paths in traces.items():
-        # Decode FluxID
-        try:
-            val = int(fid, 16)
-            mid = val & 0xFFFF
-            seq = (val >> 16) & 0xFF
-            ts_units = (val >> 24) & 0x7FFFFFFFFF # 39 bits (10ms units)
-            
-            # Calculate Time
-            ts_seconds = ts_units * 0.01
-            dt = EPOCH + datetime.timedelta(seconds=ts_seconds)
-            ts_str = dt.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3] + " UTC"
-
-            fid_parsed = f"(Machine:{mid}, Seq:{seq}, TS:{ts_str})"
-        except:
-            fid_parsed = "(Invalid)"
-
-        print(f"- {fid} {fid_parsed}")
+        print(f"- {fid}")
         
         for p_str in paths:
             hops = hop_re.findall(p_str)

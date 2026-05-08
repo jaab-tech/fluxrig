@@ -12,7 +12,7 @@ from robot.api.deco import keyword
 
 class ProcessKeywords:
     """
-    Keywords for managing FluxRig processes (Mixer, Rack) and workspace.
+    Keywords for managing fluxrig processes (Mixer, Rack) and workspace.
     Expects 'self.processes' and 'self.root_dir' to be available on the instance.
     """
 
@@ -29,7 +29,7 @@ class ProcessKeywords:
     @keyword
     def force_cleanup_environment(self):
         """
-        Safely kills any lingering FluxRig binaries (mixer/rack) from previous runs.
+        Safely kills any lingering fluxrig binaries (mixer/rack) from previous runs.
         Does NOT use 'pkill -f' to avoid killing the IDE/Agent.
         """
         targets = ["fluxrig", "fluxrig-mixer", "iso8583-tool"]
@@ -132,9 +132,9 @@ class ProcessKeywords:
         return key_path
 
     @keyword
-    def start_mixer(self, config_file: str, work_dir: str, alias: str = "mixer"):
+    def start_mixer(self, config_file: str, work_dir: str, alias: str = "mixer", extra_args: list = None):
         """
-        Starts the FluxRig Mixer process.
+        Starts the fluxrig Mixer process.
         Uses CWD Isolation so TOML relative paths populate the component directory.
         """
         bin_path = os.path.join(self.root_dir, "bin", "fluxrig-mixer")
@@ -160,6 +160,9 @@ class ProcessKeywords:
         env.pop("FLUXRIG_LOGGING_FILENAME", None)
 
         cmd = [bin_path, "-c", config_file]
+        if extra_args:
+            cmd.extend(extra_args)
+            
         logger.info(f"Starting Mixer '{alias}': {' '.join(cmd)}")
         logger.info(f"  > CWD: {comp_home}")
         logger.info(f"  > Expected Log: {abs_log_path}")
@@ -191,9 +194,9 @@ class ProcessKeywords:
             logger.warn("wait_for_healthy not found, skipping health check.")
 
     @keyword
-    def start_rack(self, config_file: str, work_dir: str, mixer_home: str = None, alias: str = "rack"):
+    def start_rack(self, config_file: str, work_dir: str, mixer_home: str = None, alias: str = "rack", extra_args: list = None):
         """
-        Starts a FluxRig Rack process.
+        Starts a fluxrig Rack process.
         Uses CWD Isolation.
         """
         bin_path = os.path.join(self.root_dir, "bin", "fluxrig")
@@ -222,6 +225,9 @@ class ProcessKeywords:
         env.pop("FLUXRIG_LOGGING_FILENAME", None)
 
         cmd = [bin_path, "rack", "-c", config_file]
+        if extra_args:
+            cmd.extend(extra_args)
+            
         logger.info(f"Starting Rack '{alias}': {' '.join(cmd)}")
         logger.info(f"  > CWD: {comp_home}")
 
@@ -296,6 +302,6 @@ class ProcessKeywords:
             output = subprocess.check_output(cmd, stderr=subprocess.STDOUT, cwd=work_dir).decode()
             logger.info(output)
             if "FAIL" in output:
-                 raise AssertionError(f"FluxRig Check Failed:\n{output}")
+                 raise AssertionError(f"fluxrig Check Failed:\n{output}")
         except subprocess.CalledProcessError as e:
-            raise AssertionError(f"FluxRig Check Error (Code {e.returncode}):\n{e.output.decode()}")
+            raise AssertionError(f"fluxrig Check Error (Code {e.returncode}):\n{e.output.decode()}")

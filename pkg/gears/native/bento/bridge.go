@@ -4,8 +4,9 @@
 package bento
 
 import (
-	"fmt"
+	"encoding/json"
 
+	"github.com/google/uuid"
 	"github.com/warpstreamlabs/bento/public/service"
 
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
@@ -29,11 +30,17 @@ func ToBentoMessage(fm *fluxmsg.FluxMsg) *service.Message {
 	}
 
 	// Bridge Critical Identity Fields to Metadata
-	// This ensures they are preserved even if the payload changes
-	m.MetaSet("flux_id", fmt.Sprintf("%d", fm.FluxID))
+	m.MetaSet("flux_id", fm.FluxID.String())
 	m.MetaSet("trace_id", fm.TraceID)
-	if fm.RefFluxID != 0 {
-		m.MetaSet("ref_flux_id", fmt.Sprintf("%d", fm.RefFluxID))
+	if fm.RefFluxID != uuid.Nil {
+		m.MetaSet("ref_flux_id", fm.RefFluxID.String())
+	}
+
+	// NEW: Preserve Path for Telemetry Fidelity
+	if len(fm.Path) > 0 {
+		if pathBytes, err := json.Marshal(fm.Path); err == nil {
+			m.MetaSet("flux_path", string(pathBytes))
+		}
 	}
 
 	return m
@@ -48,15 +55,20 @@ func FromBentoMessage(bm *service.Message) (*fluxmsg.FluxMsg, error) {
 	_ = bm.MetaWalk(func(k, v string) error {
 		switch k {
 		case "flux_id":
-			// We treat flux_id as immutable read-only here typically,
-			// but if we are bridging back, we might want to restore it.
-			// For now, we leave new FluxID generation to the Rack unless explicitly needed?
-			// Actually, for "Processor" mode, preserving ID is good.
-			// fmt.Sscanf(v, "%d", &fm.FluxID) // Optional: Restore ID?
+			if id, err := uuid.Parse(v); err == nil {
+				fm.FluxID = id
+			}
 		case "trace_id":
 			fm.TraceID = v
 		case "ref_flux_id":
-			// fmt.Sscanf(v, "%d", &fm.RefFluxID)
+			if id, err := uuid.Parse(v); err == nil {
+				fm.RefFluxID = id
+			}
+		case "flux_path":
+			var path []*fluxmsg.Hop
+			if err := json.Unmarshal([]byte(v), &path); err == nil {
+				fm.Path = path
+			}
 		default:
 			fm.Metadata[k] = v
 		}
@@ -72,10 +84,6 @@ func FromBentoMessage(bm *service.Message) (*fluxmsg.FluxMsg, error) {
 			fm.Data = asMap
 		} else {
 			// If it's a list or scalar, we put it in a wrapped key or rely on Raw
-			// But FluxMsg.Data is map[string]any.
-			// Fallback: If root is array, we might need a convention.
-			// For now, let's assume object root for FluxMsg compatibility.
-			// If not object, we marshal to bytes and set RawPayload instead.
 			bytes, _ := bm.AsBytes()
 			fm.RawPayload = bytes
 		}
@@ -86,9 +94,6 @@ func FromBentoMessage(bm *service.Message) (*fluxmsg.FluxMsg, error) {
 	}
 
 	// Explicitly set RawPayload if Data is present too, for consistency?
-	// Usually FluxRig sets one or the other as primary.
-	// If we have Data, we don't strictly need Payload unless for audit.
-	// Let's ensure RawPayload is populated if Data is empty.
 	if len(fm.Data) == 0 && len(fm.RawPayload) == 0 {
 		bytes, _ := bm.AsBytes()
 		fm.RawPayload = bytes

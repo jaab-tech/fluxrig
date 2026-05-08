@@ -36,7 +36,7 @@ func main() {
 	// 39 bits time | 8 bits seq | 16 bits machine
 
 	// Default Epoch: 2014-09-01 (Sonyflake default)
-	// BUT FluxRig uses 2025-01-01 (as seen in pkg/idgen/idgen.go)
+	// BUT fluxrig uses 2025-01-01 (as seen in pkg/idgen/idgen.go)
 
 	// Reconstruct decomposition manually to apply custom Epoch
 	// ID structure:
@@ -55,7 +55,7 @@ func main() {
 	fmt.Printf("MachineID: %d (0x%x)\n", machineID, machineID)
 	fmt.Printf("Sequence : %d\n", sequence)
 
-	// FluxRig Epoch
+	// fluxrig Epoch
 	epoch := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	duration := time.Duration(timeUnit) * 10 * time.Millisecond // #nosec G115
 	ts := epoch.Add(duration)

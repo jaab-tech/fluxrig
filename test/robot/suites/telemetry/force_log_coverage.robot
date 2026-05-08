@@ -1,6 +1,6 @@
 *** Settings ***
 Documentation     Force Log Coverage Suite
-...               This suite runs FluxRig in various modes to trigger
+...               This suite runs fluxrig in various modes to trigger
 ...               log messages that are not covered by the standard happy path.
 ...               Goals:
 ...               1. Trigger Debug/Trace logs (via FLUXRIG_TRACE=true).
@@ -15,13 +15,13 @@ ${TIMEOUT}        5s
 
 *** Test Cases ***
 Trigger Debug Logs
-    [Documentation]    Runs FluxRig with FLUXRIG_TRACE=true to emit debug logs.
+    [Documentation]    Runs fluxrig with FLUXRIG_TRACE=true to emit debug logs.
     [Setup]    Remove File    rack.log
     ${env}=    Create Dictionary    FLUXRIG_TRACE=true    FLUXRIG_STDOUT_ENABLED=true
-    Log    Starting FluxRig Rack help to emit Trace Logs...
+    Log    Starting fluxrig Rack help to emit Trace Logs...
     # Use 'rack' subcommand to ensure logger initialization
     ${result}=    Run Process    ${FLUXRIG_BIN}    rack    env=${env}    timeout=5s
-    Log    FluxRig Trace Output:\n${result.stdout}
+    Log    fluxrig Trace Output:\n${result.stdout}
     
     # Standard format: 2026-04-07... | INFO | ...
     Should Contain    ${result.stdout}    | INFO |
@@ -29,10 +29,10 @@ Trigger Debug Logs
     Should Contain    ${result.stdout}    | TRACE |
 
 Trigger Config Error Logs
-    [Documentation]    Runs FluxRig with invalid configuration to trigger error logs.
+    [Documentation]    Runs fluxrig with invalid configuration to trigger error logs.
     ${env}=    Create Dictionary    FLUXRIG_NATS_URL=nats://invalid-host:4222
-    Log    Starting FluxRig with Bad Config...
+    Log    Starting fluxrig with Bad Config...
     ${result}=    Run Process    ${FLUXRIG_BIN}    rack    -c    non_existent.toml    env=${env}    timeout=${TIMEOUT}
-    Log    FluxRig Bad Config Output:\n${result.stderr}
+    Log    fluxrig Bad Config Output:\n${result.stderr}
     # Cobra prints errors to stderr
     Should Contain    ${result.stderr}    Error: failed to load config

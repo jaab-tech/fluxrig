@@ -7,11 +7,11 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"os"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -36,21 +36,23 @@ type Manager struct {
 	idGen              *idgen.IDGenerator // Wrapper that satisfies sdk.IDGenerator
 	mgr                manager.Manager    // Spec/Scenario Manager
 	factory            *gears.Factory
-	machineID          uint64
+	machineID          uuid.UUID
 	rackName           string
 	timeout            time.Duration
 	convergenceTimeout time.Duration
 	handshakeInterval  time.Duration
 
 	activeGears map[string]sdk.NativeGear
-	gearPorts   map[string]map[string]uint64 // gear -> port -> entityID
-	gearIDs     map[string]uint64            // gear -> entityID
+	gearPorts   map[string]map[string]uuid.UUID // gear -> port -> entityID
+	gearIDs     map[string]uuid.UUID            // gear -> entityID
 	activeSubs  []bus.Subscription
 	hotSubjects map[string]chan struct{}
+	trace       bool
+	debug       bool
 	mu          sync.Mutex
 }
 
-func NewManager(machineID uint64, name string, b bus.Bus, ig *idgen.IDGenerator, specMgr manager.Manager, opTimeout, convTimeout, handshakeInterval time.Duration) *Manager {
+func NewManager(machineID uuid.UUID, name string, b bus.Bus, ig *idgen.IDGenerator, specMgr manager.Manager, opTimeout, convTimeout, handshakeInterval time.Duration, trace, debug bool) *Manager {
 	return &Manager{
 		bus:                b,
 		idGen:              ig,
@@ -61,9 +63,11 @@ func NewManager(machineID uint64, name string, b bus.Bus, ig *idgen.IDGenerator,
 		timeout:            opTimeout,
 		convergenceTimeout: convTimeout,
 		handshakeInterval:  handshakeInterval,
+		trace:              trace,
+		debug:              debug,
 		activeGears:        make(map[string]sdk.NativeGear),
-		gearPorts:          make(map[string]map[string]uint64),
-		gearIDs:            make(map[string]uint64),
+		gearPorts:          make(map[string]map[string]uuid.UUID),
+		gearIDs:            make(map[string]uuid.UUID),
 		hotSubjects:        make(map[string]chan struct{}),
 	}
 }
@@ -89,7 +93,7 @@ type GearContextImpl struct {
 	ctx       context.Context
 	cfg       map[string]any
 	name      string
-	machineID uint64
+	machineID uuid.UUID
 	logger    *slog.Logger
 	idGen     sdk.IDGenerator
 	bus       bus.Bus
@@ -100,7 +104,7 @@ type GearContextImpl struct {
 func (g *GearContextImpl) Context() context.Context { return g.ctx }
 func (g *GearContextImpl) Config() map[string]any   { return g.cfg }
 func (g *GearContextImpl) GearName() string         { return g.name }
-func (g *GearContextImpl) MachineID() uint64        { return g.machineID }
+func (g *GearContextImpl) MachineID() uuid.UUID     { return g.machineID }
 func (g *GearContextImpl) Logger() *slog.Logger     { return g.logger }
 func (g *GearContextImpl) IDGen() sdk.IDGenerator   { return g.idGen }
 func (g *GearContextImpl) Bus() bus.Bus             { return g.bus }
@@ -135,6 +139,13 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err
 	// 1. Stop Existing
 	m.stopAll()
 
+	// Purge NATS stream to ensure no stale messages interfere with the new scenario
+	if b := m.bus; b != nil {
+		if n, ok := b.(interface{ Purge(context.Context) error }); ok {
+			_ = n.Purge(ctx)
+		}
+	}
+
 	// 1b. Build Gear Deployment Map (name -> rack) for global wire resolution
 	gearDeploy := make(map[string]string)
 	for _, g := range sc.Gears {
@@ -158,7 +169,7 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err
 		}
 
 		// 3b. Generate Port IDs (Implicit In/Out for Phase 3)
-		var inID, outID uint64
+		var inID, outID uuid.UUID
 
 		if gSpec.Ports != nil {
 			// Use IDs assigned by Mixer
@@ -171,21 +182,21 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err
 		}
 
 		// Fallback for missing IDs (should not happen if from Mixer)
-		if inID == 0 {
+		if inID == uuid.Nil {
 			inID = m.idGen.NextEntityID(idgen.EntityPortInput)
 		}
-		if outID == 0 {
+		if outID == uuid.Nil {
 			outID = m.idGen.NextEntityID(idgen.EntityPortOutput)
 		}
 
-		m.gearPorts[gSpec.Name] = map[string]uint64{
+		m.gearPorts[gSpec.Name] = map[string]uuid.UUID{
 			"in":  inID,
 			"out": outID,
 		}
 
 		// 3c. Generate or Use Gear ID (Prefer Spec ID if from Mixer)
-		var gearID uint64
-		if gSpec.ID > 0 {
+		var gearID uuid.UUID
+		if gSpec.ID != uuid.Nil {
 			gearID = gSpec.ID
 		} else {
 			gearID = m.idGen.NextEntityID(idgen.EntityGear)
@@ -241,25 +252,26 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err
 		fromGear, _ := parsePortRef(wire.From)
 		sourceRack := gearDeploy[fromGear]
 		if sourceRack == "" {
-			// Fallback: If not in scenario gears, it might be a global/shared subject.
-			// Default to flux.msg.global (or keep as is if we want to support legacy).
-			// For standard FluxRig wires, sourceRack should always exist.
-			m.logger().Warn("wire source gear not found in scenario", "gear", fromGear, "wire", wire.From)
-			sourceRack = "global"
+			// Gear without explicit deploy target runs on the local rack.
+			sourceRack = m.rackName
 		}
 
 		subject := fmt.Sprintf("flux.msg.%s.%s", sourceRack, wire.From)
 
 		// Determine Wire Label (ID vs Name)
 		wireLabel := fmt.Sprintf("%s -> %s", wire.From, wire.To)
-		if wire.ID > 0 {
+		if wire.ID != uuid.Nil {
 			wireLabel = fmt.Sprintf("%x", wire.ID)
 		}
 
 		var sub bus.Subscription
 		sub, err = m.bus.Subscribe(subject, func(ctx context.Context, msg *fluxmsg.FluxMsg) {
+			if msg == nil {
+				m.logger().Error("Subscribe Handler Triggered with nil msg", "subject", subject)
+				return
+			}
 			// PROBE HANDLING
-			if msg != nil && msg.Flags&fluxmsg.FlagSyncProbe != 0 {
+			if msg.Flags&fluxmsg.FlagSyncProbe != 0 {
 				m.mu.Lock()
 				if ch, ok := m.hotSubjects[subject]; ok {
 					close(ch)
@@ -278,19 +290,19 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err
 			})
 
 			// TRACE Logging: Bus Receive (Port In)
-			if m.logger().Enabled(ctx, logger.LevelTrace) {
+			if m.logger().Enabled(ctx, logger.LevelTrace) || m.trace {
 				m.logger().Log(ctx, logger.LevelTrace, "Bus Receive",
-					"flux_id", fmt.Sprintf("0x%x", msg.FluxID),
+					"flux_id", msg.FluxID.String(),
 					"wire", wireLabel,
 					"gear", toGear,
-					"port_id", fmt.Sprintf("0x%x", portID),
+					"port_id", portID.String(),
 					"payload_hex", fmt.Sprintf("0x%x", msg.RawPayload),
 					"meta", fmt.Sprintf("%v", msg.Metadata),
 					"path", formatHops(msg.Path),
 				)
-			} else if os.Getenv("FLUXRIG_DEBUG") == "true" {
+			} else if m.debug {
 				m.logger().Debug("FluxMsg received",
-					"flux_id", fmt.Sprintf("%x", msg.FluxID),
+					"flux_id", msg.FluxID.String(),
 					"wire", wireLabel,
 				)
 			}
@@ -300,14 +312,44 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err
 			timeoutCtx, cancel := context.WithTimeout(ctx, m.timeout)
 			defer cancel()
 
+			// 1. INSTRUMENTATION: Gear Process Span
+			tracer := otel.GetTracerProvider().Tracer("fluxrig/runtime")
+			spanName := fmt.Sprintf("gear_process %s", toGear)
+			processCtx, span := tracer.Start(timeoutCtx, spanName,
+				trace.WithAttributes(
+					attribute.String("gear", toGear),
+					attribute.String("flux_id", msg.FluxID.String()),
+				),
+			)
+			defer span.End()
+
 			start := time.Now()
-			resp, pErr := targetGear.Process(timeoutCtx, msg)
+			// Panic Recovery Middleware (Technical Audit May 2026)
+			var resp *fluxmsg.FluxMsg
+			var pErr error
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						m.logger().Error("gear process panic recovered",
+							"gear", toGear,
+							"panic", r,
+							"flux_id", msg.FluxID.String(),
+						)
+						pErr = fmt.Errorf("gear panic: %v", r)
+					}
+				}()
+				resp, pErr = targetGear.Process(processCtx, msg)
+			}()
 			duration := float64(time.Since(start).Microseconds()) / 1000.0 // Record in ms for consistency with metric name
 
 			// INSTRUMENTATION: Gear Input
 			if tm := telemetry.GetMetrics(); tm != nil {
 				metricCtx := ctx
-				attrs := metric.WithAttributes(attribute.String("gear", toGear))
+				attrs := metric.WithAttributes(
+					attribute.String("gear", toGear),
+					attribute.String("flux.id", m.gearIDs[toGear].String()),
+					attribute.String("flux.name", toGear),
+				)
 
 				tm.GearMessagesIn.Add(metricCtx, 1, attrs)
 				tm.GearProcessingTime.Record(metricCtx, duration, attrs)
@@ -322,8 +364,39 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err
 				return
 			}
 
-			if os.Getenv("FLUXRIG_DEBUG") == "true" && resp != nil {
-				m.logger().Debug("FluxMsg processed", "flux_id", fmt.Sprintf("%x", msg.FluxID))
+			if resp != nil {
+				if m.debug {
+					m.logger().Debug("FluxMsg processed", "flux_id", resp.FluxID.String())
+				}
+
+				// Resolve Out Subject for this gear
+				outSubject := fmt.Sprintf("flux.msg.%s.%s.out", m.rackName, toGear)
+
+				// Resolve Out Port ID
+				outPortID := m.gearPorts[toGear]["out"]
+
+				// Append Hop (Departure from Out Port)
+				resp.Path = append(resp.Path, &fluxmsg.Hop{
+					GearID: m.gearIDs[toGear],
+					PortID: outPortID,
+					TsNano: time.Now().UnixNano(),
+				})
+
+				// INSTRUMENTATION: Gear Output
+				if tm := telemetry.GetMetrics(); tm != nil {
+					metricCtx := timeoutCtx
+					attrs := metric.WithAttributes(
+						attribute.String("gear", toGear),
+						attribute.String("flux.id", m.gearIDs[toGear].String()),
+						attribute.String("flux.name", toGear),
+					)
+					tm.GearMessagesOut.Add(metricCtx, 1, attrs)
+				}
+
+				// Publish Response (Continues Trace)
+				if pubErr := m.bus.Publish(processCtx, outSubject, resp); pubErr != nil {
+					m.logger().Error("emit failed for response", "gear", toGear, "error", pubErr)
+				}
 			}
 		})
 		if err != nil {
@@ -346,6 +419,7 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err
 
 	// 6. Start Gears
 	for name, g := range m.activeGears {
+		name, g := name, g // Shadow variables for closure safety
 		outSubject := fmt.Sprintf("flux.msg.%s.%s.out", m.rackName, name)
 
 		// Port ID for implicit out
@@ -360,7 +434,7 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err
 
 		emitFunc := func(msg *fluxmsg.FluxMsg) {
 			// Ensure FluxID exists
-			if msg.FluxID == 0 {
+			if msg.FluxID == uuid.Nil {
 				id, _ := m.idGen.NextFluxID()
 				msg.FluxID = id
 			}
@@ -375,21 +449,24 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err
 			// TRACE Logging: Bus Emit (Port Out)
 			if m.logger().Enabled(context.Background(), logger.LevelTrace) {
 				m.logger().Log(context.Background(), logger.LevelTrace, "Bus Emit",
-					"flux_id", fmt.Sprintf("0x%x", msg.FluxID),
+					"flux_id", msg.FluxID.String(),
 					"gear", name,
-					"port_id", fmt.Sprintf("0x%x", portID),
+					"port_id", portID.String(),
 					"subject", outSubject,
 					"payload_hex", fmt.Sprintf("0x%x", msg.RawPayload),
 					"meta", fmt.Sprintf("%v", msg.Metadata),
 					"path", formatHops(msg.Path),
 				)
 			}
-			m.logger().Debug("Bus Emit", "flux_id", fmt.Sprintf("0x%x", msg.FluxID), "subject", outSubject)
 
 			// INSTRUMENTATION: Gear Output
 			if tm := telemetry.GetMetrics(); tm != nil {
 				metricCtx := context.Background()
-				attrs := metric.WithAttributes(attribute.String("gear", name))
+				attrs := metric.WithAttributes(
+					attribute.String("gear", name),
+					attribute.String("flux.id", m.gearIDs[name].String()),
+					attribute.String("flux.name", name),
+				)
 				tm.GearMessagesOut.Add(metricCtx, 1, attrs)
 			}
 
@@ -511,8 +588,8 @@ func (m *Manager) stopAll() {
 		m.logger().Debug("gear stopped", "name", name)
 	}
 	m.activeGears = make(map[string]sdk.NativeGear)
-	m.gearPorts = make(map[string]map[string]uint64)
-	m.gearIDs = make(map[string]uint64)
+	m.gearPorts = make(map[string]map[string]uuid.UUID)
+	m.gearIDs = make(map[string]uuid.UUID)
 	m.hotSubjects = make(map[string]chan struct{})
 }
 
@@ -610,7 +687,7 @@ func formatHops(path []*fluxmsg.Hop) string {
 		if i > 0 {
 			res += ", "
 		}
-		res += fmt.Sprintf("{g:%x, p:%x}", h.GearID, h.PortID)
+		res += fmt.Sprintf("{g:%s, p:%s}", h.GearID, h.PortID)
 	}
 	res += "]"
 	return res

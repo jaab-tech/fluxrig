@@ -296,7 +296,9 @@ func (c *CompositeField) encodeTag(tag string) ([]byte, error) {
 		return []byte(tag), nil
 	case "int":
 		i, _ := strconv.Atoi(tag)
-		// How many bytes for int tag? Default 1?
+		if i > 255 {
+			return nil, fmt.Errorf("int tag overflow: %d > 255", i)
+		}
 		return []byte{byte(i)}, nil
 	default:
 		return []byte(tag), nil

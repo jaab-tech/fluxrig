@@ -2,7 +2,7 @@
 
 **Location**: `test/robot/suites/iso8583`
 
-This suite contains the Robot Framework tests for verifying the **FluxRig ISO8583 Gear** and **Coat Check (Context Correlation)** patterns. It is designed to validate both functional correctness and high-throughput performance characteristics.
+This suite contains the Robot Framework tests for verifying the **fluxrig ISO8583 Gear** and **Coat Check (Context Correlation)** patterns. It is designed to validate both functional correctness and high-throughput performance characteristics.
 
 ---
 
@@ -145,7 +145,7 @@ graph LR
 *   **Correlation Key**: `meta.iso8583.raw_header`
     *   The `iso8583-tool` automatically injects a **timestamp** into the 12-byte header.
     *   This enables **Stateless RTT Calculation** (round-trip time) without server-side state.
-    *   FluxRig uses this unique header as the **Correlation Key** for the Coat Check pattern.
+    *   fluxrig uses this unique header as the **Correlation Key** for the Coat Check pattern.
 *   **Storage**: NATS JetStream KV (`iso_loop_txns`).
 *   **Missing Key Policy**: `error` (Test fails immediately if a response arrives with no matching request).
 

@@ -36,9 +36,20 @@ func (b *Bridge) Close(ctx context.Context) error {
 // NewCounterCtor implements service.MetricsExporter.
 func (b *Bridge) NewCounterCtor(name string, labelKeys ...string) service.MetricsExporterCounterCtor {
 	return func(labels ...string) service.MetricsExporterCounter {
-		cnt, err := b.meter.Int64Counter("bento." + name)
+		// Map Bento standard metrics to FluxRig standards
+		mappedName := "bento." + name
+		switch name {
+		case "input_count":
+			mappedName = "flux.gear.messages_in"
+		case "output_count":
+			mappedName = "flux.gear.messages_out"
+		case "output_error":
+			mappedName = "flux.gear.errors"
+		}
+
+		cnt, err := b.meter.Int64Counter(mappedName)
 		if err != nil {
-			slog.Error("failed to create bento counter", "name", name, "error", err)
+			slog.Error("failed to create bento counter", "name", mappedName, "error", err)
 			return &noopCounter{}
 		}
 		return &otelCounter{

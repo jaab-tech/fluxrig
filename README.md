@@ -12,7 +12,7 @@
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License"></a>
   <img src="https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go&logoColor=white" alt="Go Version">
-  <img src="https://img.shields.io/badge/Version-v0.4.4-green" alt="Version">
+  <img src="https://img.shields.io/badge/Version-v0.5.0--dev-green" alt="Version">
 </p>
 
 > **The high-performance connectivity and protocol orchestration platform for distributed mission-critical infrastructure.**
@@ -29,7 +29,7 @@
 
 ## Core Architecture
 
-FluxRig uses a modular architecture inspired by the precision of a **Recording Studio** and the scale of a **Live Event Stage**:
+fluxrig uses a modular architecture inspired by the precision of a **Recording Studio** and the scale of a **Live Event Stage**:
 
 1.  **The Mixer**: The central Front of House (FOH) control plane and entity registry.
 2.  **The Rack**: The edge node agent that hosts and executes processing logic (Gears).
@@ -37,78 +37,40 @@ FluxRig uses a modular architecture inspired by the precision of a **Recording S
 
 ## Getting Started
 
+> [!TIP]
+> Want to see it in action immediately? Check out the **[5-Minute Quickstart](https://fluxrig.org/docs/tutorials/quickstart)** guide!
+
 ### Prerequisites
 *   **Go 1.25+**
 *   **Make**
 *   **GCC/Clang** (Required for Mixer/DuckDB)
 *   **golangci-lint** (For contributors)
 
-### Build & Run
-
-1.  **Build**:
-    ```bash
-    make build
-    ```
-    Binaries will be placed in `bin/`.
-
-2.  **Run (Zero-Config)**:
-    FluxRig is designed for "Zero-Config" first runs. The Mixer automatically generates a persistent Cluster Authority keypair if one is missing, ensuring that the control plane is immediately operational for development.
-
-> [!TIP]
-> **Global Gears**: In the `getting_started.yaml` example, gears do not have an explicit `deploy` target. These are treated as "Global Gears" and will automatically run on any Rack that connects to the Mixer.
-
-    ```bash
-    # 1. Optional: Perform a diagnostic check
-    ./bin/fluxrig check
-
-    # 2. Start the Mixer (Control Plane + Embedded NATS)
-    ./bin/fluxrig-mixer --auto-adopt
-
-    # 3. Start a Rack Agent (Edge Execution)
-    ./bin/fluxrig rack
-    ```
-
-### Your First Scenario: "Hello World"
-
-FluxRig uses YAML-based scenarios to define edge logic. Follow these steps to run a basic telemetry generator:
-
-1.  **Start the Mixer with the Scenario**:
-    The Mixer can load a scenario directly on startup as a positional argument (we use `--auto-adopt` here to bypass manual approval for this demo):
-    ```bash
-    ./bin/fluxrig-mixer --auto-adopt examples/scenarios/getting_started.yaml
-    ```
-
-2.  **Start a Rack Agent**:
-    Open a new terminal and start the agent. It will connect to the Mixer and automatically pull the "Getting Started" logic:
-    ```bash
-    ./bin/fluxrig rack
-    ```
-
-3.  **Verify Execution**:
-    The Rack will initialize the `bento` gear. You should see periodic "Hello from FluxRig" messages and random metrics in the Rack console.
-
-### Advanced Configuration
-
-For production environments, you can customize settings using TOML files or environment variables. To get started with a custom setup, copy the templates from the `examples/` directory to your project root:
-
+### 1. Build from source
 ```bash
-cp examples/configs/fluxrig-mixer.toml.example fluxrig-mixer.toml
-cp examples/configs/fluxrig.toml.example fluxrig.toml
+git clone https://github.com/jaab-tech/fluxrig.git
+cd fluxrig
+make build
 ```
 
-See [examples/configs/](examples/configs/) for additional templates.
+### 2. Start the Control Plane
+```bash
+# Starts the Mixer and imports the getting_started scenario
+./bin/fluxrig-mixer --auto-adopt examples/scenarios/getting_started.yaml
+```
 
-    **Security Keys**:
-    The "Zero-Config" auto-generated key is perfect for local development. For production, you should explicitly generate and manage your keys using the `keys` command. This ensures full control over the key lifecycle and backup procedures.
-    ```bash
-    ./bin/fluxrig keys gen-cluster --dir ./my-secrets
-    ```
-    See the **[Security Reference](https://fluxrig.org/docs/reference/core/security)** for details on the "Offline Trust" model.
+### 3. Connect an Edge Node
+Open a new terminal and start the edge agent:
+```bash
+./bin/fluxrig rack
+```
 
-4.  **Working Examples**:
-    For complete end-to-end working topologies, refer to our automated test suites:
-    *   **[test/e2e/](test/e2e/)**: High-fidelity Go-based integration scenarios (ISO8583, Telemetry, TLS).
-    *   **[test/robot/](test/robot/)**: Comprehensive acceptance tests and performance benchmarks.
+For the complete breakdown of this topology, how the declarative `bento` configuration works, and how to query the real-time telemetry, please follow the **[5-Minute Quickstart](https://fluxrig.org/docs/tutorials/quickstart)**.
+
+### Automated Testing
+For complete end-to-end working topologies, refer to our automated test suites:
+*   **[test/e2e/](test/e2e/)**: High-fidelity Go-based integration scenarios (ISO8583, Telemetry, TLS).
+*   **[test/robot/](test/robot/)**: Comprehensive acceptance tests and performance benchmarks.
 
 ## Documentation
 

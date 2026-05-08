@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/jaab-tech/fluxrig/pkg/bus"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/jaab-tech/fluxrig/pkg/ingest"
@@ -22,24 +24,22 @@ func TestTelemetrySink_Logs(t *testing.T) {
 	store, _ := duckdb.NewStore(slog.Default(), ":memory:")
 	defer func() { _ = store.Close() }()
 
-	// Init Schema
 	if err := store.Migrate(context.Background()); err != nil {
 		t.Fatalf("Failed to init schema: %v", err)
 	}
 
-	sink := ingest.NewTelemetrySink(mockBus, store, "test-mixer", 1*time.Minute, nil)
-	if err := sink.Start(); err != nil {
+	sink := ingest.NewTelemetrySink(mockBus, store, "flux.telemetry.>", "test-mixer", 1*time.Minute, nil)
+	if err := sink.Start(context.Background()); err != nil {
 		t.Fatalf("Failed to start sink: %v", err)
 	}
 	defer func() { _ = sink.Stop() }()
 
-	// Create Log Batch
 	logMsg := fluxmsg.New()
 	logMsg.Metadata["type"] = "telemetry.batch.logs"
 
 	logData := map[string]interface{}{
 		"timestamp":  int64(1700000000000000),
-		"machine_id": "test-machine",
+		"machine_id": uuid.New(),
 		"trace_id":   "trace-1",
 		"span_id":    "span-1",
 		"severity":   "INFO",
@@ -54,7 +54,6 @@ func TestTelemetrySink_Logs(t *testing.T) {
 		t.Fatalf("Failed to publish logs: %v", err)
 	}
 
-	// Poll DB
 	deadline := time.Now().Add(2 * time.Second)
 	found := false
 	for time.Now().Before(deadline) {
@@ -73,10 +72,7 @@ func TestTelemetrySink_Logs(t *testing.T) {
 }
 
 func TestTelemetrySink_Lifecycle(t *testing.T) {
-	// 1. Setup Mock Bus
 	mockBus := bus.NewMockBus()
-
-	// 2. Setup Test DB
 	tmpFile := "test_sink.db"
 	store, err := duckdb.NewStore(slog.Default(), tmpFile)
 	if err != nil {
@@ -87,66 +83,42 @@ func TestTelemetrySink_Lifecycle(t *testing.T) {
 		_ = os.Remove(tmpFile)
 	}()
 
-	// Init Schema for persistence test
 	if err := store.Migrate(context.Background()); err != nil {
 		t.Fatalf("Failed to init schema: %v", err)
 	}
 
-	// 3. Init Sink
-	sink := ingest.NewTelemetrySink(mockBus, store, "test-mixer", 1*time.Minute, nil)
-
-	// 4. Start
-	if err := sink.Start(); err != nil {
+	sink := ingest.NewTelemetrySink(mockBus, store, "flux.telemetry.>", "test-mixer", 1*time.Minute, nil)
+	if err := sink.Start(context.Background()); err != nil {
 		t.Fatalf("Failed to start sink: %v", err)
 	}
 
-	// Verify Subscription
 	if len(mockBus.Handlers) == 0 {
 		t.Error("Expected subscription to be registered")
 	}
 
-	// 5. Test Persistence (Trace)
-	// We simulate a message on the bus
 	traceMsg := fluxmsg.New()
 	traceMsg.Metadata["type"] = "telemetry.batch.spans"
 
-	// Construct a raw batch payload matching what NatsExporter sends
 	spanData := map[string]interface{}{
 		"trace_id":   "12345678901234567890123456789012",
 		"span_id":    "1234567890123456",
 		"name":       "test-span-ingest",
-		"start_time": int64(1700000000000000), // Micros
+		"start_time": int64(1700000000000000),
 		"end_time":   int64(1700000001000000),
-		"machine_id": "test-machine",
+		"machine_id": uuid.New(),
 		"attributes": map[string]interface{}{"foo": "bar"},
 	}
 	traceMsg.Data = map[string]interface{}{
 		"batch": []interface{}{spanData},
 	}
 
-	// We can't publish easily because Sink uses Subscribe, not a persistent queue we can inspect via Store immediately without a little wait/sync.
-	// But MockBus executes handlers synchronously in the same goroutine if they are registered!
-	// Wait, MockBus.Publish -> go handler(msg). It is async in generic mock usually.
-	// Let's check MockBus implementation.
-	// In step 1337: "go handler(msg)" -> It is async.
-
-	// So we need to Publish and then wait/poll DB.
-
 	if err := mockBus.Publish(context.Background(), "flux.telemetry.spans", traceMsg); err != nil {
 		t.Fatalf("Failed to publish trace: %v", err)
 	}
 
-	// Poll DB for result
 	deadline := time.Now().Add(2 * time.Second)
 	found := false
 	for time.Now().Before(deadline) {
-		// Check Spans table
-		// API: InitializeTelemetrySchema must be called!
-		// We forgot to init schema in setup?
-		// NewStore doesn't init schema automatically?
-		// store.go says InitializeSchema and InitializeTelemetrySchema are methods.
-		// We need to call them.
-
 		row := store.DB().QueryRow("SELECT count(*) FROM telemetry_spans WHERE trace_id = ?", "12345678901234567890123456789012")
 		var count int
 		if err := row.Scan(&count); err == nil && count > 0 {
@@ -160,14 +132,12 @@ func TestTelemetrySink_Lifecycle(t *testing.T) {
 		t.Error("Synthesized span not found in DuckDB after ingestion")
 	}
 
-	// 6. Stop
 	if err := sink.Stop(); err != nil {
 		t.Fatalf("Failed to stop sink: %v", err)
 	}
 }
 
 func TestTelemetrySink_SchemaInit(t *testing.T) {
-	// Helper to separate schema init verification
 	store, _ := duckdb.NewStore(slog.Default(), ":memory:")
 	defer func() { _ = store.Close() }()
 
@@ -176,7 +146,6 @@ func TestTelemetrySink_SchemaInit(t *testing.T) {
 		t.Fatalf("Failed to init schema: %v", err)
 	}
 
-	// Check table existence
 	_, err := store.DB().Exec("SELECT * FROM telemetry_spans LIMIT 0")
 	if err != nil {
 		t.Errorf("spans table missing: %v", err)
@@ -190,19 +159,19 @@ func TestTelemetrySink_Metrics(t *testing.T) {
 	ctx := context.Background()
 	_ = store.Migrate(ctx)
 
-	sink := ingest.NewTelemetrySink(mockBus, store, "test-mixer", 1*time.Minute, nil)
-	// Start sink
-	_ = sink.Start()
+	sink := ingest.NewTelemetrySink(mockBus, store, "flux.telemetry.>", "test-mixer", 1*time.Minute, nil)
+	_ = sink.Start(ctx)
 	defer func() { _ = sink.Stop() }()
 
-	// 1. Batch Metrics
+	testEntityID := uuid.New()
+
 	batchMsg := fluxmsg.New()
 	batchMsg.Metadata["type"] = "telemetry.batch.metrics"
 	batchMsg.Data = map[string]interface{}{
 		"batch": []interface{}{
 			map[string]interface{}{
 				"timestamp":   int64(1700000000000000),
-				"entity_id":   100,
+				"entity_id":   testEntityID,
 				"entity_name": "test-metric",
 				"name":        "cpu",
 				"type":        "gauge",
@@ -212,20 +181,18 @@ func TestTelemetrySink_Metrics(t *testing.T) {
 	}
 	_ = mockBus.Publish(context.Background(), "flux.telemetry.metrics", batchMsg)
 
-	// 2. Single Metric
 	singleMsg := fluxmsg.New()
 	singleMsg.Metadata["type"] = "telemetry.metric"
 	singleMsg.Data = map[string]interface{}{
 		"timestamp":   time.Now().UnixMicro(),
-		"entity_id":   101,
+		"entity_id":   testEntityID,
 		"entity_name": "single-metric",
 		"name":        "mem",
 		"type":        "gauge",
-		"value":       1024,
+		"value":       1024.0,
 	}
 	_ = mockBus.Publish(context.Background(), "flux.telemetry.metric", singleMsg)
 
-	// Poll
 	deadline := time.Now().Add(2 * time.Second)
 	foundBatch, foundSingle := false, false
 	for time.Now().Before(deadline) {
@@ -264,31 +231,29 @@ func TestTelemetrySink_MiscLogs(t *testing.T) {
 	ctx := context.Background()
 	_ = store.Migrate(ctx)
 
-	sink := ingest.NewTelemetrySink(mockBus, store, "test-mixer", 1*time.Minute, nil)
-	_ = sink.Start()
+	sink := ingest.NewTelemetrySink(mockBus, store, "flux.telemetry.>", "test-mixer", 1*time.Minute, nil)
+	_ = sink.Start(ctx)
 	defer func() { _ = sink.Stop() }()
 
-	// 1. Single Log JSON
+	testEntityID := uuid.New()
+
 	jsonMsg := fluxmsg.New()
 	jsonMsg.Metadata["type"] = "telemetry.log.json"
-	// Record is raw json
 	jsonMsg.Data = map[string]interface{}{
 		"record": json.RawMessage(`{"entity_name":"json-log","body":"hello json","timestamp":1700000000000000}`),
 	}
 	_ = mockBus.Publish(context.Background(), "flux.telemetry.log.json", jsonMsg)
 
-	// 2. Single Log CBOR (WAL style)
 	walMsg := fluxmsg.New()
 	walMsg.Metadata["type"] = "telemetry.log"
-	// Data IS the log
 	walMsg.Data = map[string]interface{}{
 		"entity_name": "wal-log",
 		"body":        "hello wal",
 		"timestamp":   int64(1700000000000000),
+		"entity_id":   testEntityID,
 	}
 	_ = mockBus.Publish(context.Background(), "flux.telemetry.log", walMsg)
 
-	// Poll
 	deadline := time.Now().Add(2 * time.Second)
 	foundJSON, foundWAL := false, false
 	for time.Now().Before(deadline) {

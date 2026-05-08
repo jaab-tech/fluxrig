@@ -5,12 +5,14 @@ package pki
 
 import (
 	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
 
 	"github.com/fxamacker/cbor/v2"
+	"github.com/google/uuid"
 )
 
 // --- Mixer Side ---
@@ -19,6 +21,18 @@ import (
 type ClusterKey struct {
 	Private ed25519.PrivateKey // 64 bytes
 	Public  ed25519.PublicKey  // 32 bytes
+}
+
+// GenerateClusterKey creates a new random ClusterKey.
+func GenerateClusterKey() (*ClusterKey, error) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	return &ClusterKey{
+		Private: priv,
+		Public:  pub,
+	}, nil
 }
 
 // Sign creates a StateEnvelope for a Rack.
@@ -90,12 +104,16 @@ type StateEnvelope struct {
 // The Scenario field is optional and contains the projected scenario for this rack.
 // When present, it is signed along with the identity for tamper-proof storage.
 type RackState struct {
-	MixerID     uint64            `cbor:"mixer_id"`     // Mixer's fluxEntityID (binary)
-	MachineID   uint16            `cbor:"machine_id"`   // Rack's unique machine ID
+	MixerID     uuid.UUID         `cbor:"mixer_id"`     // Mixer's fluxEntityID (binary)
+	MachineID   uuid.UUID         `cbor:"machine_id"`   // Rack's unique machine ID
 	Name        string            `cbor:"name"`         // Rack's display name
 	Status      string            `cbor:"status"`       // e.g. "pending", "active"
 	Secret      string            `cbor:"secret"`       // Bearer Token
 	MixerPublic ed25519.PublicKey `cbor:"mixer_pub"`    // Mixer's signing key (for verification)
+	Version     string            `cbor:"version"`      // Service version of the issuing Mixer
+	CreatedAt   int64             `cbor:"created_at"`   // Unix timestamp of initial issuance
+	UpdatedAt   int64             `cbor:"updated_at"`   // Unix timestamp of last update
+	UpdateCount int               `cbor:"update_count"` // Number of times this passport was re-issued
 	Scenario    []byte            `cbor:"scenario"`     // YAML-encoded projected scenario (optional)
 	ScenarioVer string            `cbor:"scenario_ver"` // Scenario version for quick check
 }
@@ -120,6 +138,20 @@ func (e *StateEnvelope) Verify() (*RackState, error) {
 	return &state, nil
 }
 
+// VerifyMixer checks the envelope's signature using a provided Cluster Public Key.
+// Use this for mixer.flux files.
+func (e *StateEnvelope) VerifyMixer(pub ed25519.PublicKey) (*MixerState, error) {
+	if !ed25519.Verify(pub, e.Payload, e.Signature) {
+		return nil, fmt.Errorf("signature verification failed! state is tampered")
+	}
+
+	var state MixerState
+	if err := cbor.Unmarshal(e.Payload, &state); err != nil {
+		return nil, fmt.Errorf("invalid mixer payload format: %w", err)
+	}
+	return &state, nil
+}
+
 // Save writes the envelope to disk.
 func (e *StateEnvelope) Save(path string) error {
 	data, err := cbor.Marshal(e)
@@ -140,4 +172,45 @@ func LoadStateEnvelope(path string) (*StateEnvelope, error) {
 		return nil, err
 	}
 	return &env, nil
+}
+
+// MixerState represents the sovereign identity of the Authority node.
+type MixerState struct {
+	MachineID   uuid.UUID `cbor:"machine_id"`
+	Name        string    `cbor:"name"`
+	Version     string    `cbor:"version"`
+	CreatedAt   int64     `cbor:"created_at"`
+	UpdatedAt   int64     `cbor:"updated_at"`
+	UpdateCount int       `cbor:"update_count"`
+}
+
+// SignMixer signs the Mixer's own identity using the Cluster Key.
+func (c *ClusterKey) SignMixer(state *MixerState) (*StateEnvelope, error) {
+	payload, err := cbor.Marshal(state)
+	if err != nil {
+		return nil, err
+	}
+	sig := ed25519.Sign(c.Private, payload)
+	return &StateEnvelope{
+		Payload:   payload,
+		Signature: sig,
+	}, nil
+}
+
+// LoadMixerState reads and verifies the Mixer's identity envelope.
+func LoadMixerState(path string, clusterPub ed25519.PublicKey) (*MixerState, error) {
+	env, err := LoadStateEnvelope(path)
+	if err != nil {
+		return nil, err
+	}
+
+	if !ed25519.Verify(clusterPub, env.Payload, env.Signature) {
+		return nil, fmt.Errorf("mixer identity verification failed! passport is tampered")
+	}
+
+	var state MixerState
+	if err := cbor.Unmarshal(env.Payload, &state); err != nil {
+		return nil, err
+	}
+	return &state, nil
 }

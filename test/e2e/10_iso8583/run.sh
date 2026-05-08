@@ -119,8 +119,15 @@ function deploy_scenario() {
     fi
     
     # Allow time for Rack to receive config update and restart gears
-    sleep 5
-    wait_for_port $ISO_PORT 10 || fail "ISO Gear failed to re-bind on port $ISO_PORT"
+    local gear_to_wait="iso-gateway"
+    if [[ "$scenario_file" == *"client"* ]]; then gear_to_wait="iso-client"; fi
+    
+    wait_for_gear "$gear_to_wait" 15 || fail "Gear $gear_to_wait failed to start"
+    
+    # Wait for port only if it's a server scenario
+    if [[ "$gear_to_wait" == "iso-gateway" ]]; then
+       wait_for_port $ISO_PORT 10 || fail "ISO Gear failed to bind on port $ISO_PORT"
+    fi
 }
 
 function wait_for_gear() {
@@ -129,7 +136,7 @@ function wait_for_gear() {
     local start_offset=$3
     log_info "Waiting for gear $gear_name to start..."
     for i in $(seq 1 $timeout); do
-        if tail -n +$((start_offset+1)) "${WORK_DIR}/rack/logs/rack.log" | grep -q "starting gear.*flux.name=\"$gear_name\""; then
+        if tail -n +$((start_offset+1)) "${WORK_DIR}/rack/logs/rack.log" | grep -q "starting gear.*flux.name=\"\?$gear_name\"\{0,1\}"; then
             log_success "Gear $gear_name is READY"
             return 0
         fi
@@ -162,9 +169,10 @@ function verify_mti() {
     local phase_id=$4
     
     # Grep only new lines
-    local counts=$(tail -n +$((start_line+1)) "${WORK_DIR}/rack/logs/rack.log" | grep -o 'mti="[0-9]*"' | sed 's/mti=//' | sort | uniq -c | awk '{print $2 "(" $1 ")"}' | tr '\n' ' ')
+    # Grep only new lines. Match both mti=0800 and mti:0800 (from metadata map)
+    local counts=$(tail -n +$((start_line+1)) "${WORK_DIR}/rack/logs/rack.log" | grep -oE 'mti[:=][0-9]{4}' | grep -oE '[0-9]{4}' | sort | uniq -c | awk '{print $2 "(" $1 ")"}' | tr '\n' ' ')
     
-    if [ -n "$counts" ] && [[ "$counts" == *"\"$expected\""* ]]; then
+    if [ -n "$counts" ] && [[ "$counts" == *"$expected"* ]]; then
         log_success "[$label] MTI $expected parsed. Counts: $counts"
         record_result "$phase_id" "PASS" "$label [Ingress]" "MTIs: $counts" "rack.log"
     else
@@ -309,12 +317,12 @@ else
     record_result "1" "FAIL" "Dynamic ASCII-BE [Egress]" "Python Validation Failed"
 fi
 verify_mti "$LOG_START" "0800" "Dynamic ASCII-BE" "1"
-verify_metrics "fluxrig_rack_messages_total" 1 "Dynamic ASCII-BE" "1" "direction=inbound"
-verify_metrics "fluxrig_rack_messages_total" 1 "Dynamic ASCII-BE" "1" "direction=outbound"
-verify_metrics "fluxrig_rack_latency_seconds.count" 1 "Dynamic ASCII-BE" "1" "direction=inbound"
-verify_metrics "fluxrig_rack_bytes_total" 1 "Dynamic ASCII-BE" "1" "direction=inbound"
-verify_metrics "fluxrig_rack_bytes_total" 1 "Dynamic ASCII-BE" "1" "direction=outbound"
-verify_metrics "fluxrig_rack_connections_total" 1 "Dynamic ASCII-BE" "1"
+verify_metrics "flux.gear.messages_in" 1 "Dynamic ASCII-BE" "1" "direction=inbound"
+verify_metrics "flux.gear.messages_out" 1 "Dynamic ASCII-BE" "1" "direction=outbound"
+verify_metrics "flux.gear.processing_time_ms.count" 1 "Dynamic ASCII-BE" "1" "direction=inbound"
+verify_metrics "flux.port.bytes_in" 1 "Dynamic ASCII-BE" "1" "direction=inbound"
+verify_metrics "flux.port.bytes_out" 1 "Dynamic ASCII-BE" "1" "direction=outbound"
+verify_metrics "flux.port.connections_total" 1 "Dynamic ASCII-BE" "1"
 
 # --- Phase 2: Dynamic ASCII + Little Endian (Mismatch Check) ---
 banner "Matrix Phase 2: Mismatch Check (LE -> BE Gear)"
@@ -329,11 +337,6 @@ banner "Matrix Phase 3: ASCII + Little Endian"
 deploy_scenario "03_scenario_ascii_le.yaml" "ascii_le"
 
 LOG_START=$(get_log_offset)
-log_info "Injecting Matching Static (ASCII-LE PCAP)..."
-python3 "${BASE_DIR}/sample_injector.py" --port $ISO_PORT --pcap "${BASE_DIR}/samples/iso8583_ascii_sample.pcapng"
-verify_mti "$LOG_START" "0200" "Static ASCII-LE" "3"
-
-LOG_START=$(get_log_offset)
 log_info "Injecting E2E Traffic (ASCII-LE)..."
 if "$VENV_PYTHON" "${BASE_DIR}/iso8583_tool.py" --e2e --host 127.0.0.1 --port $ISO_PORT --encoding ascii --endian little --count 1; then
     record_result "3" "PASS" "Dynamic ASCII-LE [Egress]" "Python E2E Verified"
@@ -341,6 +344,11 @@ else
     record_result "3" "FAIL" "Dynamic ASCII-LE [Egress]" "Python Validation Failed"
 fi
 verify_mti "$LOG_START" "0800" "Dynamic ASCII-LE" "3"
+
+LOG_START=$(get_log_offset)
+log_info "Injecting Matching Static (ASCII-LE PCAP)..."
+python3 "${BASE_DIR}/sample_injector.py" --port $ISO_PORT --pcap "${BASE_DIR}/samples/iso8583_ascii_sample.pcapng"
+verify_mti "$LOG_START" "0200" "Static ASCII-LE" "3"
 
 # --- Phase 4: BCD + Big Endian ---
 banner "Matrix Phase 4: BCD + Big Endian"
@@ -368,11 +376,6 @@ banner "Matrix Phase 6: BCD + Little Endian"
 deploy_scenario "06_scenario_bcd_le.yaml" "bcd_le"
 
 LOG_START=$(get_log_offset)
-log_info "Injecting Matching Static (BCD-LE PCAP)..."
-python3 "${BASE_DIR}/sample_injector.py" --pcap "${BASE_DIR}/samples/iso8583_bin_sample.pcapng" --host 127.0.0.1 --port 8583
-verify_mti "$LOG_START" "0200" "Static BCD-LE" "6"
-
-LOG_START=$(get_log_offset)
 log_info "Injecting E2E Traffic (BCD-LE)..."
 if "$VENV_PYTHON" "${BASE_DIR}/iso8583_tool.py" --e2e --host 127.0.0.1 --port $ISO_PORT --encoding bcd --endian little --count 1; then
     record_result "6" "PASS" "Dynamic BCD-LE [Egress]" "Python E2E Verified"
@@ -380,6 +383,11 @@ else
     record_result "6" "FAIL" "Dynamic BCD-LE [Egress]" "Python Validation Failed"
 fi
 verify_mti "$LOG_START" "0800" "Dynamic BCD-LE" "6"
+
+LOG_START=$(get_log_offset)
+log_info "Injecting Matching Static (BCD-LE PCAP)..."
+python3 "${BASE_DIR}/sample_injector.py" --pcap "${BASE_DIR}/samples/iso8583_bin_sample.pcapng" --host 127.0.0.1 --port 8583
+verify_mti "$LOG_START" "0200" "Static BCD-LE" "6"
 
 # --- Phase 7: Visa V.I.P ---
 banner "Matrix Phase 7: Visa V.I.P (EBCDIC + Header)"
@@ -413,11 +421,11 @@ wait_for_gear "codec-encode" 10 "$DEPLOY_OFFSET" || fail "codec-encode failed to
 LOG_START=$(get_log_offset)
 log_info "Injecting Codec E2E Traffic (BCD MTI)..."
 # Using e2e mode which starts a listener on 10000 and injects to 8583
-if "$VENV_PYTHON" "${BASE_DIR}/iso8583_tool.py" --e2e --host 127.0.0.1 --port $ISO_PORT --mock-port 10000 --encoding bcd --endian big --count 1 > /tmp/iso_tool_output.txt 2>&1; then
+if "$VENV_PYTHON" "${BASE_DIR}/iso8583_tool.py" --e2e --host 127.0.0.1 --port $ISO_PORT --mock-port 10000 --encoding bcd --endian big --count 1 > /tmp/fluxrig_iso_tool_output.txt 2>&1; then
     record_result "8" "PASS" "Codec Round-Trip [Egress]" "Transparency OK"
 else
     record_result "8" "FAIL" "Codec Round-Trip [Egress]" "Byte Transparency Failed"
-    cat /tmp/iso_tool_output.txt
+    cat /tmp/fluxrig_iso_tool_output.txt
     tail -n 20 "${WORK_DIR}/rack/logs/rack.log"
 fi
 verify_mti "$LOG_START" "0800" "Codec Round-Trip" "8"

@@ -22,6 +22,8 @@ import (
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
+	"github.com/google/uuid"
+
 	"github.com/jaab-tech/fluxrig/pkg/bus"
 	"github.com/jaab-tech/fluxrig/pkg/config"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
@@ -29,6 +31,7 @@ import (
 	"github.com/jaab-tech/fluxrig/pkg/lockfile"
 	loggerPkg "github.com/jaab-tech/fluxrig/pkg/logger"
 	"github.com/jaab-tech/fluxrig/pkg/manager"
+	"github.com/jaab-tech/fluxrig/pkg/netutil"
 	"github.com/jaab-tech/fluxrig/pkg/pki"
 	"github.com/jaab-tech/fluxrig/pkg/registry"
 	rt "github.com/jaab-tech/fluxrig/pkg/runtime"
@@ -39,7 +42,7 @@ import (
 // ErrReconnect indicates the agent needs to restart its session (e.g. identity change)
 var ErrReconnect = fmt.Errorf("reconnect needed")
 
-// RunAgent implements the main loop of the FluxRig Rack Agent.
+// RunAgent implements the main loop of the fluxrig Rack Agent.
 func RunAgent(cfg *config.RackConfig, logger *slog.Logger, logBuffer *telemetry.BufferHandler) error {
 	logger.Debug("Starting Rack Agent", "config", cfg)
 
@@ -77,9 +80,11 @@ func RunAgent(cfg *config.RackConfig, logger *slog.Logger, logBuffer *telemetry.
 }
 
 func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger, logBuffer *telemetry.BufferHandler) error {
+	// 0. Set Message Limits (Priority 1 Hardening)
+	fluxmsg.SetLimits(cfg.Rack.MaxHops, cfg.Rack.MaxPayloadSize)
+
 	// 0. Try Load Passport (Offline Capability)
-	statePath := filepath.Join(cfg.Store.Dir, cfg.Store.StateFile)
-	logger.Debug("DEBUG: FLUXRIG_E2E_SCENARIO", "val", os.Getenv("FLUXRIG_E2E_SCENARIO"))
+	statePath := filepath.Join(cfg.Base.StateDir, cfg.Base.StateFile)
 	logger.Debug("Attempting to load Passport", "path", statePath)
 	var secret string
 	var currentStatus string
@@ -87,7 +92,7 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 		if s, errVer := env.Verify(); errVer == nil {
 			logger.Debug("Loaded Cached Passport", "id", s.MachineID, "name", s.Name)
 			cfg.Rack.MachineID = s.MachineID
-			cfg.Rack.Name = s.Name // Ensure name is loaded for telemetry init
+			cfg.Base.Name = s.Name // Ensure name is loaded for telemetry init
 			secret = s.Secret
 			currentStatus = s.Status
 		} else {
@@ -98,10 +103,15 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 	}
 
 	// 1. Parse Timeouts
-	connectTimeout, _ := time.ParseDuration(cfg.Rack.Bus.ConnectTimeout)
-	reconnectWait, _ := time.ParseDuration(cfg.Rack.Bus.ReconnectWait)
+	connectTimeout, _ := time.ParseDuration(cfg.Snake.ConnectTimeout)
+	reconnectWait, _ := time.ParseDuration(cfg.Snake.ReconnectWait)
 	enrollTimeout, _ := time.ParseDuration(cfg.Rack.EnrollmentTimeout)
+	enrollInterval, _ := time.ParseDuration(cfg.Rack.EnrollmentInterval)
 	hbInterval, _ := time.ParseDuration(cfg.Rack.HeartbeatInterval)
+	inactiveThreshold, _ := time.ParseDuration(cfg.Snake.InactiveThreshold)
+	if inactiveThreshold == 0 {
+		inactiveThreshold = 30 * time.Second
+	}
 
 	// Synchronization Contexts
 	// These are now strictly configuration-driven with safe defaults in pkg/config
@@ -120,13 +130,18 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 		return fmt.Errorf("invalid rack.handshake_interval: %w", errParse)
 	}
 
-	subRetryWait, errParse := time.ParseDuration(cfg.Rack.Bus.SubscriptionRetryWait)
+	subRetryWait, errParse := time.ParseDuration(cfg.Snake.SubscriptionRetryWait)
 	if errParse != nil {
-		return fmt.Errorf("invalid rack.bus.subscription_retry_wait: %w", errParse)
+		return fmt.Errorf("invalid snake.subscription_retry_wait: %w", errParse)
+	}
+
+	opTimeout, errParse := time.ParseDuration(cfg.Snake.OperationTimeout)
+	if errParse != nil {
+		return fmt.Errorf("invalid snake.operation_timeout: %w", errParse)
 	}
 
 	// 2. Identify effective name for Enrollment and Bus
-	helloName := cfg.Rack.Name
+	helloName := cfg.Base.Name
 	if helloName == "" {
 		prefix := cfg.Rack.NamePrefix
 		if prefix == "" {
@@ -134,21 +149,23 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 		}
 		helloName = fmt.Sprintf("%spending-%d", prefix, time.Now().UnixNano())
 	}
+	logger = logger.With("name", helloName)
 
 	// 2b. Connect to Bus
-	logger.Debug("Connecting to Bus", "url", cfg.Rack.Bus.URL, "name", helloName)
+	logger.Debug("Connecting to Snake", "url", cfg.Snake.URL, "name", helloName)
 	opts := bus.ConnectOptions{
 		Name:                      helloName, // Must match helloName for Mixer topology mapping
-		Domain:                    cfg.Rack.Bus.Domain,
+		Domain:                    cfg.Snake.Domain,
 		ConnectTimeout:            connectTimeout,
 		ReconnectWait:             reconnectWait,
-		OperationTimeout:          5 * time.Second,
+		OperationTimeout:          opTimeout,
 		SubscriptionRetryWait:     subRetryWait,
-		SubscriptionRetryAttempts: cfg.Rack.Bus.SubscriptionRetryAttempts,
-		RootCA:                    cfg.Rack.Bus.RootCA,
-		InsecureSkipVerify:        cfg.Rack.Bus.InsecureSkipVerify,
+		SubscriptionRetryAttempts: cfg.Snake.SubscriptionRetryAttempts,
+		InactiveThreshold:         inactiveThreshold,
+		RootCA:                    cfg.Snake.RootCAFile,
+		InsecureSkipVerify:        cfg.Snake.InsecureSkipVerify,
 	}
-	natsBus := bus.NewNatsBus(cfg.Rack.Bus.StreamName)
+	natsBus := bus.NewNatsBus(cfg.Snake.StreamName)
 	busConnected := false
 
 	clientName := helloName
@@ -172,9 +189,9 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 		runtimeStarted = true
 	}
 
-	if errCon := natsBus.Connect(cfg.Rack.Bus.URL, opts); errCon != nil {
-		if cfg.Rack.MachineID != 0 {
-			logger.Warn("Bus Unavailable. Starting in OFFLINE Mode", "error", errCon)
+	if errCon := natsBus.Connect(cfg.Snake.URL, opts); errCon != nil {
+		if cfg.Rack.MachineID != uuid.Nil {
+			logger.Warn("Snake Unavailable. Starting in OFFLINE Mode", "error", errCon)
 		} else {
 			return fmt.Errorf("bus unavailable and no passport found: %w", errCon)
 		}
@@ -190,7 +207,6 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 	}
 
 	// 2.5 Initialize Spec Manager & Runtime
-	opTimeout, _ := time.ParseDuration(cfg.Rack.Bus.OperationTimeout)
 
 	// Spec Manager (Git-backed Registry)
 	specStorePath := filepath.Join(cfg.Store.Dir, "store")
@@ -203,13 +219,13 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 	managedBus := telemetry.NewInstrumentedBus(natsBus, nil)
 
 	// Runtime Helper: Re-initializes the routing layer with correct identity
-	reinitRuntime := func(nodeID uint16, nodeName string, nodeGen *idgen.IDGenerator) {
+	reinitRuntime := func(nodeID uuid.UUID, nodeName string, nodeGen *idgen.IDGenerator) {
 		if rtManager != nil {
 			logger.Info("Stopping existing Runtime Manager for Identity Rotation")
 			rtManager.Shutdown()
 		}
 		logger.Info("Initializing Runtime Manager", "id", nodeID, "name", nodeName)
-		rtManager = rt.NewManager(uint64(nodeID), nodeName, managedBus, nodeGen, specMgr, opTimeout, convTimeout, handshakeInterval)
+		rtManager = rt.NewManager(nodeID, nodeName, managedBus, nodeGen, specMgr, opTimeout, convTimeout, handshakeInterval, cfg.Logging.Trace, cfg.Logging.Debug)
 	}
 
 	// Initial Init (might be 0/pending)
@@ -235,18 +251,10 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 		Nonce:     sessionNonce,
 		Secret:    secret,
 		MachineID: mID,
-		IP:        "127.0.0.1",
-		Port:      8092,
+		IP:        getRackIP(cfg),
+		Port:      0,
 		Version:   version.Version,
 		Config:    map[string]any{"rack": cfg.Rack, "logging": cfg.Logging}, // Report runtime config
-	}
-
-	if busConnected {
-		if errSend := sendHello(managedBus, hello, gen); errSend != nil {
-			logger.Error("Failed to send Hello", "error", errSend)
-		} else {
-			logger.Info("Sent Hello", "name", hello.Name)
-		}
 	}
 
 	reconnectCh := make(chan struct{}, 1)
@@ -254,7 +262,7 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 
 	// 3.5 Wait for Passport (State Issuance)
 	// We listen for [fluxrig.agent.enrollment.<name>.<nonce>]
-	enrollTopic := fmt.Sprintf("fluxrig.agent.enrollment.%s.%s", helloName, sessionNonce)
+	enrollTopic := fmt.Sprintf("flux.agent.enrollment.%s.%s", helloName, sessionNonce)
 	logger.Info("Waiting for Passport...", "topic", enrollTopic)
 
 	// Channel to signal graceful shutdown from callbacks
@@ -284,48 +292,44 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 
 		defer func() { _ = sub.Unsubscribe() }()
 
-		// Wait with timeout
-		select {
-		case resp := <-passportCh:
-			// Process Passport if present
-			if len(resp.Passport) > 0 {
-				env := pki.StateEnvelope{}
-				if errUnmarshal := cbor.Unmarshal(resp.Passport, &env); errUnmarshal != nil {
-					logger.Error("Failed to unmarshal passport envelope", "error", errUnmarshal)
-					return errUnmarshal
-				}
+		// Initial attempt
+		if errSend := sendHello(managedBus, hello, gen); errSend != nil {
+			logger.Error("Failed to send initial Hello", "error", errSend)
+		} else {
+			logger.Info("Sent Hello", "name", hello.Name)
+		}
 
-				// Re-verify
-				state, errVerify := env.Verify()
-				if errVerify != nil {
-					logger.Error("Passport invalid", "error", errVerify)
-					return errVerify
-				}
+		// Enrollment Loop with Retries
+		enrollTicker := time.NewTicker(enrollInterval)
+		defer enrollTicker.Stop()
 
-				logger.Info("Passport Verified", "id", state.MachineID, "name", state.Name)
-				// Save path already calculated as statePath
-				if errMk := os.MkdirAll(cfg.Store.Dir, 0750); errMk != nil {
-					return errMk
-				}
+		enrollDeadline := time.After(enrollTimeout)
 
-				if errSave := env.Save(statePath); errSave != nil {
-					logger.Error("Failed to save state.flux", "error", errSave)
-					return errSave
-				}
-				logger.Info("Passport Saved", "path", statePath)
-				mID = state.MachineID
-
-				if resp.Status == "active" {
-					// INITIALIZE TELEMETRY WITH CONFIRMED IDENTITY
-					// Now we have the real identity (Name + ID) - this is the first and only telemetry init
-					newGen, _ := idgen.New(state.MachineID)
-					newEntityID := newGen.NewEntityID(idgen.EntityRack, 0)
+	enrollLoop:
+		for {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-enrollDeadline:
+				if cfg.Rack.MachineID == uuid.Nil {
+					logger.Warn("Enrollment Timeout. No Passport received.")
+					// NOTE: In deferred adoption mode, we no longer initialize telemetry for pending fallbacks.
+					// The Rack remains silent until officially adopted.
+					fallbackName := cfg.Base.Name
+					if fallbackName == "" {
+						fallbackName = "pending"
+					}
+					logger.Info("Rack enrollment timed out. Waiting for manual adoption.", "name", fallbackName)
+				} else {
+					logger.Info("Resuming Session (Offline/Timeout)", "id", cfg.Rack.MachineID)
+					// Resuming from saved passport - init telemetry with saved identity
+					entityID := gen.NewEntityID(idgen.EntityRack)
 
 					telCfg := telemetry.Config{
 						ServiceName:         cfg.Telemetry.ServiceName,
 						ServiceVersion:      version.Version,
-						EntityID:            newEntityID,
-						EntityName:          state.Name,
+						EntityID:            entityID,
+						EntityName:          cfg.Base.Name,
 						Component:           string(loggerPkg.TypeRack),
 						BatchIntervalString: cfg.Telemetry.BatchInterval,
 						BaseSubject:         cfg.Telemetry.BaseSubject,
@@ -342,111 +346,134 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 						},
 					}
 
-					// Override Level if FLUXRIG_TRACE is set
-					if os.Getenv("FLUXRIG_TRACE") == "true" || os.Getenv("FLUXRIG_TRACE") == "1" {
-						telCfg.Logging.Level = "trace"
-					}
-
-					// Initialize dedicated Telemetry Bus (Isolation)
-					telBus := bus.NewNatsBus("flux-telemetry") // Bound to dedicated JS stream
-					if errBus := telBus.Connect(cfg.Rack.Bus.URL, bus.ConnectOptions{
-						Name:           clientName + "-telemetry",
-						ConnectTimeout: connectTimeout,
-						ReconnectWait:  reconnectWait,
-						Domain:         cfg.Rack.Bus.Domain, // Usually same domain
-						RootCA:         cfg.Rack.Bus.RootCA,
-					}); errBus != nil {
-						logger.Warn("Failed to connect telemetry bus", "error", errBus)
-						// Fallback to shared bus if needed? No, fail fast for isolation.
-					} else {
-						defer telBus.Close()
-					}
-
-					if os.Getenv("FLUXRIG_DISABLE_TELEMETRY") != "true" {
-						sDown, errInit := telemetry.Init(context.Background(), telCfg, telBus, logBuffer, newGen)
+					if !cfg.Telemetry.Disabled {
+						sDown, errInit := telemetry.Init(context.Background(), telCfg, natsBus, logBuffer, gen)
 						if errInit != nil {
-							logger.Warn("Failed to init telemetry", "error", errInit)
+							logger.Warn("Failed to init telemetry (resume)", "error", errInit)
 						} else {
 							telShutdown = sDown
-							telBusCleanup = telBus
-							// Update logger to use OTel Bridge
-							logger = slog.Default().With(
-								"component", string(loggerPkg.TypeRack),
-								"name", state.Name,
-							)
+							// 4. Initialize Data Plane
+							rtManager = rt.NewManager(cfg.Rack.MachineID, cfg.Base.Name, natsBus, gen, specMgr, opTimeout, convTimeout, handshakeInterval, cfg.Logging.Trace, cfg.Logging.Debug)
+							if errStart := rtManager.Start(); errStart != nil {
+								logger.Error("Failed to start runtime (resume)", "error", errStart)
+							}
+							logger = slog.Default().With("component", string(loggerPkg.TypeRack), "name", cfg.Base.Name)
 							slog.SetDefault(logger)
-							// Re-initialize Runtime with correct identity
-							reinitRuntime(state.MachineID, state.Name, newGen)
-							isSessionActive = true
-							runtimeStarted = true
+							logger.Info("Telemetry Initialized (resume)", "id", cfg.Rack.MachineID, "name", cfg.Base.Name)
 						}
+					}
+				}
+				break enrollLoop
+
+			case <-enrollTicker.C:
+				if errSend := sendHello(managedBus, hello, gen); errSend != nil {
+					logger.Error("Failed to re-send Hello", "error", errSend)
+				} else {
+					logger.Info("Sent Hello (Retry)", "name", hello.Name)
+				}
+
+			case resp := <-passportCh:
+				// Process Passport if present
+				if len(resp.Passport) > 0 {
+					env := pki.StateEnvelope{}
+					if errUnmarshal := cbor.Unmarshal(resp.Passport, &env); errUnmarshal != nil {
+						logger.Error("Failed to unmarshal passport envelope", "error", errUnmarshal)
+						return errUnmarshal
+					}
+
+					// Re-verify
+					state, errVerify := env.Verify()
+					if errVerify != nil {
+						logger.Error("Passport invalid", "error", errVerify)
+						return errVerify
+					}
+
+					logger.Info("Passport Verified", "id", state.MachineID, "name", state.Name)
+					// Save path already calculated as statePath
+					if errMk := os.MkdirAll(cfg.Base.StateDir, 0750); errMk != nil {
+						return errMk
+					}
+
+					if errSave := env.Save(statePath); errSave != nil {
+						logger.Error("Failed to save state.flux", "error", errSave)
+						return errSave
+					}
+					logger.Info("Passport Saved", "path", statePath)
+					mID = state.MachineID
+
+					if resp.Status == "active" {
+						// INITIALIZE TELEMETRY WITH CONFIRMED IDENTITY
+						newGen, _ := idgen.New(state.MachineID)
+						newEntityID := newGen.NewEntityID(idgen.EntityRack)
+
+						telCfg := telemetry.Config{
+							ServiceName:         cfg.Telemetry.ServiceName,
+							ServiceVersion:      version.Version,
+							EntityID:            newEntityID,
+							EntityName:          state.Name,
+							Component:           string(loggerPkg.TypeRack),
+							BatchIntervalString: cfg.Telemetry.BatchInterval,
+							BaseSubject:         cfg.Telemetry.BaseSubject,
+							MaxBatchSize:        cfg.Telemetry.MaxBatchSize,
+							Logging:             cfg.Logging,
+							Store:               cfg.Store,
+							Throttling:          cfg.Logging.Throttling,
+							StdoutEnabled:       true,
+							StdoutLevel:         "info",
+							Metrics: telemetry.MetricsConfig{
+								HostEnabled:    cfg.Telemetry.Metrics.HostEnabled,
+								RuntimeEnabled: cfg.Telemetry.Metrics.RuntimeEnabled,
+								BentoEnabled:   cfg.Telemetry.Metrics.BentoEnabled,
+							},
+						}
+
+						if cfg.Logging.Trace {
+							telCfg.Logging.Level = "trace"
+						}
+
+						telBus := bus.NewNatsBus("flux-telemetry")
+						if errBus := telBus.Connect(cfg.Snake.URL, bus.ConnectOptions{
+							Name:              clientName + "-telemetry",
+							ConnectTimeout:    connectTimeout,
+							ReconnectWait:     reconnectWait,
+							Domain:            cfg.Snake.Domain,
+							InactiveThreshold: inactiveThreshold,
+							RootCA:            cfg.Snake.RootCAFile,
+						}); errBus != nil {
+							logger.Warn("Failed to connect telemetry bus", "error", errBus)
+						} else {
+							defer telBus.Close()
+						}
+
+						if !cfg.Telemetry.Disabled {
+							sDown, errInit := telemetry.Init(context.Background(), telCfg, telBus, logBuffer, newGen)
+							if errInit != nil {
+								logger.Warn("Failed to init telemetry", "error", errInit)
+							} else {
+								telShutdown = sDown
+								telBusCleanup = telBus
+								logger = slog.Default().With(
+									"component", string(loggerPkg.TypeRack),
+									"name", state.Name,
+								)
+								slog.SetDefault(logger)
+								reinitRuntime(state.MachineID, state.Name, newGen)
+								isSessionActive = true
+								runtimeStarted = true
+							}
+						}
+					} else {
+						logger.Info("Rack is PENDING adoption. Run 'fluxrig admin racks approve <ID>' to activate.", "id", mID)
+						isSessionActive = false
 					}
 				} else {
-					logger.Info("Rack is PENDING adoption. Run 'fluxrig admin racks approve <ID>' to activate.", "id", mID)
-					isSessionActive = false
-				}
-			} else {
-				// No passport? Should not happen in strict mode implementation
-				logger.Warn("No passport received in HelloResponse?")
-			}
-
-			// STATUS HANDLING
-			newStatus := resp.Status
-			logger.Info("Current Status", "status", newStatus)
-
-		case <-time.After(enrollTimeout):
-			if cfg.Rack.MachineID == 0 {
-				logger.Warn("Enrollment Timeout. No Passport received.")
-				// NOTE: In deferred adoption mode, we no longer initialize telemetry for pending fallbacks.
-				// The Rack remains silent until officially adopted.
-				fallbackName := cfg.Rack.Name
-				if fallbackName == "" {
-					fallbackName = "pending"
-				}
-				logger.Info("Rack enrollment timed out. Waiting for manual adoption.", "name", fallbackName)
-			} else {
-				logger.Info("Resuming Session (Offline/Timeout)", "id", cfg.Rack.MachineID)
-				// Resuming from saved passport - init telemetry with saved identity
-				entityID := gen.NewEntityID(idgen.EntityRack, 0)
-
-				telCfg := telemetry.Config{
-					ServiceName:         cfg.Telemetry.ServiceName,
-					ServiceVersion:      version.Version,
-					EntityID:            entityID,
-					EntityName:          cfg.Rack.Name,
-					Component:           string(loggerPkg.TypeRack),
-					BatchIntervalString: cfg.Telemetry.BatchInterval,
-					BaseSubject:         cfg.Telemetry.BaseSubject,
-					MaxBatchSize:        cfg.Telemetry.MaxBatchSize,
-					Logging:             cfg.Logging,
-					Store:               cfg.Store,
-					Throttling:          cfg.Logging.Throttling,
-					StdoutEnabled:       true,
-					StdoutLevel:         "info",
-					Metrics: telemetry.MetricsConfig{
-						HostEnabled:    cfg.Telemetry.Metrics.HostEnabled,
-						RuntimeEnabled: cfg.Telemetry.Metrics.RuntimeEnabled,
-						BentoEnabled:   cfg.Telemetry.Metrics.BentoEnabled,
-					},
+					logger.Warn("No passport received in HelloResponse?")
 				}
 
-				if os.Getenv("FLUXRIG_DISABLE_TELEMETRY") != "true" {
-					sDown, errInit := telemetry.Init(context.Background(), telCfg, natsBus, logBuffer, gen)
-					if errInit != nil {
-						logger.Warn("Failed to init telemetry (resume)", "error", errInit)
-					} else {
-						telShutdown = sDown
-						// 4. Initialize Data Plane
-						rtManager = rt.NewManager(uint64(cfg.Rack.MachineID), cfg.Rack.Name, natsBus, gen, specMgr, opTimeout, convTimeout, handshakeInterval)
-
-						if errStart := rtManager.Start(); errStart != nil {
-							logger.Error("Failed to start runtime (resume)", "error", errStart)
-						}
-						logger = slog.Default().With("component", string(loggerPkg.TypeRack), "name", cfg.Rack.Name)
-						slog.SetDefault(logger)
-						logger.Info("Telemetry Initialized (resume)", "id", cfg.Rack.MachineID, "name", cfg.Rack.Name)
-					}
-				}
+				// STATUS HANDLING
+				newStatus := resp.Status
+				logger.Info("Current Status", "status", newStatus)
+				break enrollLoop
 			}
 		}
 
@@ -455,8 +482,8 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 		// If enrollment updated them, good. If timeout, we use what we have.
 
 		// 1. Notifications (Status/Commands)
-		if mID > 0 {
-			notifyTopic := fmt.Sprintf("fluxrig.agent.notify.%d", mID)
+		if mID != uuid.Nil {
+			notifyTopic := fmt.Sprintf("flux.agent.notify.%s", mID.String())
 			_, err = managedBus.Subscribe(notifyTopic, func(ctx context.Context, msg *fluxmsg.FluxMsg) {
 				hbResp, errParse := fluxmsg.ParseHeartbeatResponse(msg.Data)
 				if errParse != nil {
@@ -502,7 +529,7 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 							logger.Error("Adoption: Passport invalid", "error", errVerify)
 						} else {
 							// Save
-							statePath := filepath.Join(cfg.Store.Dir, cfg.Store.StateFile)
+							statePath := filepath.Join(cfg.Base.StateDir, "rack.flux")
 							if errSave := env.Save(statePath); errSave != nil {
 								logger.Error("Adoption: Failed to save state.flux", "error", errSave)
 							} else {
@@ -520,14 +547,14 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 								// 1. Identity name/id changed (Standard rotation)
 								// 2. We were previously PENDING and are now ACTIVE (Promotion)
 								shouldReconnect := false
-								if state.Name != cfg.Rack.Name || state.MachineID != cfg.Rack.MachineID {
-									logger.Info("Adoption: Identity Updated - Restarting Session for Telemetry Rotation", "old_name", cfg.Rack.Name, "new_name", state.Name)
+								if state.Name != cfg.Base.Name || state.MachineID != cfg.Rack.MachineID {
+									logger.Info("Adoption: Identity Updated - Restarting Session for Telemetry Rotation", "old_name", cfg.Base.Name, "new_name", state.Name)
 									shouldReconnect = true
 								}
 
 								if shouldReconnect {
 									// Update config for next session
-									cfg.Rack.Name = state.Name
+									cfg.Base.Name = state.Name
 									cfg.Rack.MachineID = state.MachineID
 
 									// Signal reconnect
@@ -611,7 +638,7 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 		}
 	}
 
-	logger.With("component", "RACK", "name", cfg.Rack.Name).Info("Agent Running", "heartbeat", hbInterval)
+	logger.With("component", "RACK", "name", cfg.Base.Name).Info("Agent Running", "heartbeat", hbInterval)
 
 	// 4.1 Setup Ticker for Heartbeats
 	ticker := time.NewTicker(hbInterval)
@@ -659,7 +686,7 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 
 			// Initialize Telemetry
 			newGen, _ := idgen.New(state.MachineID)
-			newEntityID := newGen.NewEntityID(idgen.EntityRack, 0)
+			newEntityID := newGen.NewEntityID(idgen.EntityRack)
 			telCfg := telemetry.Config{
 				ServiceName:         cfg.Telemetry.ServiceName,
 				ServiceVersion:      version.Version,
@@ -680,16 +707,17 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 					BentoEnabled:   cfg.Telemetry.Metrics.BentoEnabled,
 				},
 			}
-			if os.Getenv("FLUXRIG_TRACE") == "true" || os.Getenv("FLUXRIG_TRACE") == "1" {
+			if cfg.Logging.Trace {
 				telCfg.Logging.Level = "trace"
 			}
 			telBus := bus.NewNatsBus("flux-telemetry")
-			_ = telBus.Connect(cfg.Rack.Bus.URL, bus.ConnectOptions{
-				Name:           clientName + "-telemetry",
-				ConnectTimeout: connectTimeout,
-				ReconnectWait:  reconnectWait,
-				Domain:         cfg.Rack.Bus.Domain,
-				RootCA:         cfg.Rack.Bus.RootCA,
+			_ = telBus.Connect(cfg.Snake.URL, bus.ConnectOptions{
+				Name:              clientName + "-telemetry",
+				ConnectTimeout:    connectTimeout,
+				ReconnectWait:     reconnectWait,
+				Domain:            cfg.Snake.Domain,
+				InactiveThreshold: inactiveThreshold,
+				RootCA:            cfg.Snake.RootCAFile,
 			})
 
 			sDown, _ := telemetry.Init(context.Background(), telCfg, telBus, logBuffer, newGen)
@@ -752,7 +780,7 @@ func sendHello(b bus.Bus, p *fluxmsg.HelloPayload, gen *idgen.IDGenerator) error
 	msg := fluxmsg.New()
 	msg.Data = data
 	// Need to set src_id if we have it
-	msg.SrcGearID = uint64(p.MachineID)
+	msg.SrcGearID = p.MachineID
 
 	// Set FluxID
 	id, _ := gen.NextFluxID()
@@ -764,7 +792,7 @@ func sendHello(b bus.Bus, p *fluxmsg.HelloPayload, gen *idgen.IDGenerator) error
 	return b.Publish(context.Background(), fluxmsg.SubjectAgentHello, msg)
 }
 
-func sendHeartbeat(ctx context.Context, b bus.Bus, mid uint16, cfg *config.RackConfig, gen *idgen.IDGenerator) error {
+func sendHeartbeat(ctx context.Context, b bus.Bus, mid uuid.UUID, cfg *config.RackConfig, gen *idgen.IDGenerator) error {
 	stats := map[string]any{
 		"goroutines": runtime.NumGoroutine(),
 	}
@@ -784,7 +812,7 @@ func sendHeartbeat(ctx context.Context, b bus.Bus, mid uint16, cfg *config.RackC
 	id, _ := gen.NextFluxID()
 	msg.FluxID = id
 	msg.Data = data
-	msg.SrcGearID = uint64(mid)
+	msg.SrcGearID = mid
 
 	return b.Publish(ctx, fluxmsg.SubjectAgentHeartbeat, msg)
 }
@@ -794,7 +822,7 @@ var configPath string
 
 var runCmd = &cobra.Command{
 	Use:   "run",
-	Short: "Start the FluxRig Agent",
+	Short: "Start the fluxrig Agent",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		var cfg *config.RackConfig
 		var err error
@@ -824,9 +852,9 @@ var runCmd = &cobra.Command{
 func setupLogger(cfg *config.RackConfig) *slog.Logger {
 	level := cfg.Logging.Level
 	// Env Override (Common convention)
-	if os.Getenv("FLUXRIG_TRACE") != "" {
+	if cfg.Logging.Trace {
 		level = "trace"
-	} else if os.Getenv("FLUXRIG_DEBUG") != "" {
+	} else if cfg.Logging.Debug {
 		level = "debug"
 	}
 	// Fallback to defaults handled in logger.New or parseLevel
@@ -843,4 +871,15 @@ func setupLogger(cfg *config.RackConfig) *slog.Logger {
 func init() {
 	runCmd.Flags().StringVarP(&configPath, "config", "c", "", "Path to configuration file")
 	rootCmd.AddCommand(runCmd)
+}
+
+func getRackIP(cfg *config.RackConfig) string {
+	if cfg.Rack.IP != "" {
+		return cfg.Rack.IP
+	}
+	return getLocalIP()
+}
+
+func getLocalIP() string {
+	return netutil.LocalIPv4()
 }

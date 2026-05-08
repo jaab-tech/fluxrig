@@ -6,9 +6,12 @@ package snake
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -33,19 +36,36 @@ type Config struct {
 	StreamSubjects []string
 	TLSCert        string
 	TLSKey         string
+	TLSCA          string
+	TLSVerify      bool
+	LogLevel       string
 }
 
 // NewServer creates and starts an embedded NATS server with JetStream enabled.
-func NewServer(cfg Config) (*Server, error) {
+func NewServer(ctx context.Context, cfg Config) (*Server, error) {
 	opts := &server.Options{
 		Port:       cfg.Port,
 		JetStream:  true,
 		StoreDir:   cfg.StoreDir,
 		ServerName: "fluxrig-mixer-embedded",
-		NoSigs:     true, // FluxRig handles signals, preventing double-shutdown panic
-		Debug:      true,
-		Trace:      true,
+		NoSigs:     true, // fluxrig handles signals, preventing double-shutdown panic
+		HTTPPort:   0,    // Disable HTTP for security/simplicity
 	}
+
+	// Map LogLevel to NATS Debug/Trace
+	switch strings.ToLower(cfg.LogLevel) {
+	case "debug":
+		opts.Debug = true
+	case "trace":
+		opts.Debug = true
+		opts.Trace = true
+	}
+
+	// Internal Optimization: Use Unix Socket for Mixer-to-Snake communication
+	// This bypasses TLS and network stack entirely.
+	unixPath := filepath.Join(cfg.StoreDir, "snake.sock")
+	_ = os.Remove(unixPath) // Clean up old socket
+	// opts.UnixSocket = unixPath // NATS server options for Unix Socket
 
 	// TLS Configuration
 	if cfg.TLSCert != "" && cfg.TLSKey != "" {
@@ -58,10 +78,24 @@ func NewServer(cfg Config) (*Server, error) {
 			ClientAuth:   tls.NoClientCert,
 			MinVersion:   tls.VersionTLS12,
 		}
-		opts.TLS = true
-		opts.TLSCert = cfg.TLSCert
-		opts.TLSKey = cfg.TLSKey
-		opts.TLSVerify = false
+
+		if cfg.TLSCA != "" {
+			caCert, err := os.ReadFile(cfg.TLSCA)
+			if err != nil {
+				return nil, fmt.Errorf("failed to load snake tls ca: %w", err)
+			}
+			caCertPool := x509.NewCertPool()
+			caCertPool.AppendCertsFromPEM(caCert)
+			opts.TLSConfig.ClientCAs = caCertPool
+			if cfg.TLSVerify {
+				opts.TLSConfig.ClientAuth = tls.RequireAndVerifyClientCert
+			}
+		}
+
+		// DO NOT set opts.TLS = true
+		// DO NOT set opts.TLSCert / opts.TLSKey (as they force TLS)
+		opts.AllowNonTLS = true // Allows plain connections alongside TLS
+		opts.TLSVerify = cfg.TLSVerify
 	}
 
 	// JetStream Configuration
@@ -83,42 +117,53 @@ func NewServer(cfg Config) (*Server, error) {
 	}
 
 	// Start NATS
+	slog.Info("Starting NATS server...", "port", opts.Port)
 	go ns.Start()
 
 	// Wait for readiness
-	if !ns.ReadyForConnections(5 * time.Second) {
-		return nil, fmt.Errorf("nats server failed to start on port %d (timeout)", cfg.Port)
+	slog.Info("Waiting for NATS readiness...")
+	ready := make(chan bool, 1)
+	go func() {
+		ready <- ns.ReadyForConnections(5 * time.Second)
+	}()
+
+	select {
+	case <-ctx.Done():
+		slog.Warn("Snake startup context canceled")
+		ns.Shutdown()
+		return nil, ctx.Err()
+	case isReady := <-ready:
+		if !isReady {
+			ns.Shutdown()
+			return nil, fmt.Errorf("nats server failed to start on port %d (timeout)", cfg.Port)
+		}
 	}
+	slog.Info("NATS server is ready")
 
 	s := &Server{ns: ns, domain: cfg.ClusterName}
 
 	// 4. Provision Streams
 	if cfg.StreamName != "" {
-		if err := s.ProvisionStream(cfg.StreamName, cfg.StreamSubjects); err != nil {
+		slog.Info("Provisioning streams...", "name", cfg.StreamName)
+		if err := s.ProvisionStream(ctx, cfg.StreamName, cfg.StreamSubjects); err != nil {
 			s.Shutdown()
 			return nil, err
 		}
+		slog.Info("Streams provisioned")
 	}
 
 	return s, nil
 }
 
 // ProvisionStream checks if a stream exists and creates it if not.
-func (s *Server) ProvisionStream(name string, subjects []string) error {
-	// Connect to self
-	url := s.ns.ClientURL()
-	// Use InsecureSkipVerify for self-connection during provisioning IF TLS is enabled
-	var natsOpts []nats.Option
-	if strings.HasPrefix(url, "tls://") {
-		// #nosec G402
-		natsOpts = append(natsOpts, nats.Secure(&tls.Config{InsecureSkipVerify: true}))
-	}
+func (s *Server) ProvisionStream(ctx context.Context, name string, subjects []string) error {
 
 	// Connect to self with retry resilience
 	var nc *nats.Conn
 	var err error
+	slog.Info("Snake connecting in-process for provisioning")
 	for i := 1; i <= 3; i++ {
-		nc, err = nats.Connect(url, natsOpts...)
+		nc, err = s.InProcessConn(nats.InProcessServer(s.ns))
 		if err == nil {
 			break
 		}
@@ -141,7 +186,7 @@ func (s *Server) ProvisionStream(name string, subjects []string) error {
 		return fmt.Errorf("snake: failed to initialize jetstream: %w", jsErr)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	// Check if exists
@@ -190,6 +235,16 @@ func (s *Server) Shutdown() {
 // ClientURL returns the client connection string (e.g. nats://localhost:4222).
 func (s *Server) ClientURL() string {
 	return s.ns.ClientURL()
+}
+
+// InProcessConn returns a NATS connection directly bound to the embedded server.
+func (s *Server) InProcessConn(natsOpts ...nats.Option) (*nats.Conn, error) {
+	url := s.ns.ClientURL()
+	// Force plain protocol to bypass any automatic TLS negotiation
+	if i := len("tls://"); len(url) > i && url[:i] == "tls://" {
+		url = "nats://" + url[i:]
+	}
+	return nats.Connect(url, natsOpts...)
 }
 
 // ClientInfo holds metrics for an individual connection.

@@ -22,7 +22,7 @@ FAILED_TESTS=()
 TEST_DIRS=()
 
 echo -e "${CYAN}==============================================================================${NC}"
-echo -e "${CYAN}FluxRig Unified Regression Suite${NC}"
+echo -e "${CYAN}fluxrig Unified Regression Suite${NC}"
 echo -e "${CYAN}==============================================================================${NC}"
 
 # 1. Discover Tests

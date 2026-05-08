@@ -8,12 +8,13 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/jaab-tech/fluxrig/pkg/registry"
 	"github.com/jaab-tech/fluxrig/pkg/store/duckdb"
 )
 
 func TestRegistry_Comprehensive(t *testing.T) {
-	// 1. Setup Store
 	s, err := duckdb.NewStore(slog.Default(), "")
 	if err != nil {
 		t.Fatalf("NewStore failed: %v", err)
@@ -24,46 +25,39 @@ func TestRegistry_Comprehensive(t *testing.T) {
 		t.Fatalf("Migrate failed: %v", errMig)
 	}
 
-	reg := registry.NewDuckDBRegistry(s)
+	var reg registry.Registry = s
 
 	ctx := context.Background()
+	testID := uuid.New()
 
-	// 1. Get Non-Existent
-	_, err = reg.Get(ctx, 9999)
+	_, err = reg.Get(ctx, testID)
 	if err == nil {
-		t.Error("Get(9999) should fail")
+		t.Error("Get should fail for non-existent ID")
 	}
 
-	// 2. Heartbeat Non-Existent
-	err = reg.Heartbeat(ctx, 9999, map[string]any{"cpu": 1}, nil)
+	err = reg.Heartbeat(ctx, testID, map[string]any{"cpu": 1}, nil)
 	if err == nil {
-		t.Error("Heartbeat(9999) should fail")
+		t.Error("Heartbeat should fail for non-existent ID")
 	}
 
-	// 3. UpdateStatus Non-Existent
-	err = reg.UpdateStatus(ctx, 9999, "inactive")
+	err = reg.UpdateStatus(ctx, testID, "inactive")
 	if err == nil {
-		t.Error("UpdateStatus(9999) should fail")
+		t.Error("UpdateStatus should fail for non-existent ID")
 	}
 
-	// 4. Register with Missing Name (Should fail at DB level due to constraint? Or just insert empty?)
-	// name is not NULL in schema? "name TEXT". Only "PRIMARY KEY" on entity_id.
-	// But `InitializeSchema` creates UNIQUE INDEX on name.
-	// So duplicate name should fail.
-	_, err = reg.Register(ctx, "dup-name", "rack", "dup-name", 8080, "1.2.3.4", map[string]any{"v": "v1"}, 500)
+	mixerID := uuid.New()
+	machineID1 := uuid.New()
+	_, err = reg.Register(ctx, machineID1, "dup-name", "rack", "1.2.3.4", 8080, "v1", map[string]any{"v": "v1"}, mixerID)
 	if err != nil {
 		t.Fatalf("First register failed: %v", err)
 	}
-	// Try duplicate
-	_, err = reg.Register(ctx, "dup-name", "rack", "dup-name", 8081, "1.2.3.4", map[string]any{"v": "v1"}, 501)
-	if err == nil {
-		t.Error("Duplicate Register should fail (Unique Name Index)")
+
+	// Re-registering same machineID should NOT fail
+	_, err = reg.Register(ctx, machineID1, "dup-name", "rack", "1.2.3.4", 8080, "v1", map[string]any{"v": "v1"}, mixerID)
+	if err != nil {
+		t.Errorf("Re-registering same machine should not fail: %v", err)
 	}
 
-	// 5. List with Limits
-	// DuckDBRegistry.List implements status filtering, not pagination (limit/offset args removed/different?)
-	// Interface: List(ctx, status string) ([]*Rack, error)
-	// My previous test code assumed List(ctx, limit, offset).
 	list, err := reg.List(ctx, "")
 	if err != nil {
 		t.Fatalf("List failed: %v", err)
@@ -72,36 +66,23 @@ func TestRegistry_Comprehensive(t *testing.T) {
 		t.Errorf("Expected 1 item, got %d", len(list))
 	}
 
-	// 6. Remove Non-Existent
-	err = reg.Remove(ctx, 9999)
+	err = reg.Remove(ctx, uuid.New())
 	if err == nil {
-		t.Error("Remove(9999) should fail")
+		t.Error("Remove should fail for non-existent ID")
 	}
 
-	// 7. Approve Name Conflict
-	// "dup-name" exists (from 4).
-	// Register another one
-	_, err = reg.Register(ctx, "victim", "rack", "victim", 9000, "1.2.3.4", map[string]any{"v": "v1"}, 502)
+	machineID2 := uuid.New()
+	victim, err := reg.Register(ctx, machineID2, "victim", "rack", "1.2.3.4", 9000, "v1", map[string]any{"v": "v1"}, mixerID)
 	if err != nil {
 		t.Fatalf("Failed to register victim: %v", err)
 	}
-	// Try renaming "victim" to "dup-name"
-	_, errApprove := reg.Approve(ctx, 300, "dup-name") // MachineID likely 101 or similar?
-	if errApprove == nil {
-		t.Log("Expected error (maybe) or just checking assignment")
-	}
-	// We need actual ID.
-	// But without list, we assume sequence.
-	// Let's get victim ID
-	victim, _ := reg.Get(ctx, 101) // 100 was dup-name, 101 is victim (Sequence 100 start?)
-	if victim != nil {
-		_, err = reg.Approve(ctx, victim.MachineID, "dup-name")
-		if err == nil {
-			t.Error("Approve rename to existing name should fail")
-		}
+
+	// Rename victim to duplicate name should fail
+	_, err = reg.Approve(ctx, victim.MachineID, "dup-name")
+	if err == nil {
+		t.Error("Approve rename to existing name should fail")
 	}
 
-	// 8. Query Wrappers (Coverage)
 	_, _ = reg.QueryLogs(ctx, registry.LogQuery{Limit: 1})
 	_, _ = reg.QueryMetrics(ctx, registry.MetricQuery{Limit: 1})
 }

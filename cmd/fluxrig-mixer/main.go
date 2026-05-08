@@ -1,9 +1,9 @@
 // Copyright (c) 2026 JAAB Tech SAS, Uruguay
 // SPDX-License-Identifier: Apache-2.0
 
-// @title FluxRig Mixer API
+// @title fluxrig Mixer API
 // @version 0.0.0-dev
-// @description Control Plane API for FluxRig Orchestration.
+// @description Control Plane API for fluxrig Orchestration. The Mixer acts as the brain of the fleet, managing Rack enrollment, Scenario deployment, and global Telemetry aggregation.
 
 // @contact.name JAAB Tech Support
 // @contact.url https://fluxrig.org
@@ -15,20 +15,26 @@
 // @host localhost:8090
 // @BasePath /api/v1
 // @schemes http
+
+// @externalDocs.description fluxrig Architecture Guide
+// @externalDocs.url https://fluxrig.org/docs/architecture
 package main
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
 
 	"github.com/jaab-tech/fluxrig/pkg/config"
+	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	loggerPkg "github.com/jaab-tech/fluxrig/pkg/logger"
 	"github.com/jaab-tech/fluxrig/pkg/mixer"
 	"github.com/jaab-tech/fluxrig/pkg/telemetry"
 )
 
 func main() {
+	// ... (omitting flag parsing for brevity)
 	// 1. Parse Flags
 	var configPath string
 	var scenarioRef string
@@ -92,6 +98,9 @@ func main() {
 		os.Exit(1)
 	}
 
+	// 2.5 Set Message Limits (Priority 1 Hardening)
+	fluxmsg.SetLimits(cfg.Mixer.MaxHops, cfg.Mixer.MaxPayloadSize)
+
 	if autoAdopt {
 		cfg.Enrollment.AutoAdopt = true
 		slog.Warn("AUTO-ADOPT ENABLED via CLI flag")
@@ -116,8 +125,8 @@ func main() {
 	}
 
 	// 4. Run Application
-	app := mixer.NewApp(cfg, scenarioRef)
-	if err := app.Run(); err != nil {
+	app := mixer.NewApp(cfg, scenarioRef, bufHandler)
+	if err := app.Run(context.Background()); err != nil {
 		slog.Error("Mixer exited with error", "error", err)
 		os.Exit(1)
 	}

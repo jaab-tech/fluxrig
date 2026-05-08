@@ -10,7 +10,7 @@ from robot.api.deco import keyword, library
 @library
 class TelemetryLibrary:
     """
-    FluxRig Telemetry Verification Library.
+    fluxrig Telemetry Verification Library.
     Uses DuckDB to query Parquet files produced by Mixer.
     """
     
@@ -37,7 +37,7 @@ class TelemetryLibrary:
             try:
                 # Query count of logs where attributes['host.name'] == rack_name
                 # Note: attributes is usually a MAP or STRUCT in Parquet depending on OTel schema.
-                # FluxRig writes strict OTel format.
+                # fluxrig writes strict OTel format.
                 # Assuming attributes is a MAP(STRING, STRING) or similar.
                 
                 # Check if file exists first to avoid DuckDB error on empty glob

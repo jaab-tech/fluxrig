@@ -19,8 +19,8 @@ func TestLoadRack_Defaults(t *testing.T) {
 	if cfg.Logging.Level != "info" {
 		t.Errorf("Default log level mismatch: got %s", cfg.Logging.Level)
 	}
-	if cfg.Rack.Bus.URL != "nats://localhost:4222" {
-		t.Errorf("Default bus URL mismatch: got %s", cfg.Rack.Bus.URL)
+	if cfg.Snake.URL != "nats://localhost:4222" {
+		t.Errorf("Default snake URL mismatch: got %s", cfg.Snake.URL)
 	}
 }
 
@@ -39,8 +39,8 @@ func TestLoadRack_EnvOverride(t *testing.T) {
 	if cfg.Logging.Level != "debug" {
 		t.Errorf("Env override failed: got %s, want debug", cfg.Logging.Level)
 	}
-	if cfg.Rack.Name != "env-rack" {
-		t.Errorf("Env override failed: got %s, want env-rack", cfg.Rack.Name)
+	if cfg.Base.Name != "env-rack" {
+		t.Errorf("Env override failed: got %s, want env-rack", cfg.Base.Name)
 	}
 }
 
@@ -53,7 +53,7 @@ level = "warn"
 [rack]
 name = "file-rack"
 `
-	tmpfile, err := os.CreateTemp("", "fluxrig.*.toml")
+	tmpfile, err := os.CreateTemp("", "flux.*.toml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +74,7 @@ name = "file-rack"
 	if cfg.Logging.Level != "warn" {
 		t.Errorf("File load failed: got %s, want warn", cfg.Logging.Level)
 	}
-	if cfg.Rack.Name != "file-rack" {
-		t.Errorf("File load failed: got %s, want file-rack", cfg.Rack.Name)
+	if cfg.Base.Name != "file-rack" {
+		t.Errorf("File load failed: got %s, want file-rack", cfg.Base.Name)
 	}
 }

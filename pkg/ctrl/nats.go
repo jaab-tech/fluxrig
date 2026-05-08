@@ -6,7 +6,7 @@ package ctrl
 import (
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 
 	"github.com/nats-io/nats.go"
 )
@@ -39,7 +39,10 @@ func (cp *NATSControlPlane) Subscribe(myGearID string) (<-chan Command, error) {
 	_, err := cp.nc.Subscribe(subject, func(msg *nats.Msg) {
 		var cmd Command
 		if err := json.Unmarshal(msg.Data, &cmd); err != nil {
-			log.Printf("ERROR: Failed to unmarshal control command on %s: %v", subject, err)
+			slog.Error("control plane unmarshal failed",
+				"flux.subject", subject,
+				"error", err,
+			)
 			return
 		}
 		ch <- cmd
