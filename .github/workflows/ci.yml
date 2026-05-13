@@ -71,7 +71,7 @@ jobs:
           go build -v -o bin/fluxrig ./cmd/fluxrig
           go build -v -o bin/fluxrig-mixer ./cmd/fluxrig-mixer
       - name: Archive binaries
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fluxrig-binaries
           path: bin/
