@@ -28,11 +28,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 | [v0.3.0](#v030) | 2026-01-21 | Delivered | Bento Integration & Load Testing |
 
 <a name="unreleased"></a>
-## [Unreleased] ({{VERS}}-dev)
+
+<a name="unreleased"></a>
+### [Unreleased] ({{VERS}}-dev)
+#### Added
+- 
+
+## [v0.5.0] - 2026-05-07
 #### Changed
 - **Sovereign Identity Plane (v0.5.0 Foundation)**: Migrated the entire platform identity system to **128-bit UUID v7 (RFC 9562)**. This enhances entropy, ensures global uniqueness without centralized coordination, and provides time-ordered sequence integrity for high-performance storage indexes.
 - **Deduplication Logic**: Updated NATS JetStream deduplication to utilize 128-bit identifiers, ensuring consistent exactly-once delivery across complex telemetry pipelines.
 - **Telemetry Hardening**: Standardized dotted naming schema (e.g., `fluxrig.gear.messages_in`) across OTel, Prometheus, and DuckDB.
+<a name="v050"></a>
 - **Directional Monitoring**: Split unified I/O counters into distinct Inbound and Outbound channels for precise protocol translation metrics.
 - **Resource Guardrails**: Implemented mandatory `MaxHops` (64) and `MaxPayloadSize` (2MB) validation in `fluxmsg` to prevent bus exhaustion and "poison pill" scenarios.
 - **Concurrency Resilience**: Integrated global `PanicMiddleware` to ensure Rack stability during individual Gear failures and hardened mutex locking for atomic hot-reloads.
