@@ -51,7 +51,7 @@ jobs:
           go test -race -coverprofile=coverage.out $(go list ./... | grep -v '/test/utils' | grep -v 'cmd/fluxrig$' | grep -v 'cmd/fluxrig-mixer$')
           go tool cover -func=coverage.out | grep total | awk '{print "Total Coverage: " $3}'
       - name: Upload coverage
-        uses: codecov/codecov-action@v6
+        uses: codecov/codecov-action@v7
         with:
           files: coverage.out
           fail_ci_if_error: false
