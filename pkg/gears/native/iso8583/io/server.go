@@ -121,12 +121,12 @@ func (s *Server) Start(ctx context.Context) error {
 	s.listener = l
 	s.log.Info("listening", "addr", s.config.Bind)
 
-	go s.acceptLoop()
+	go s.acceptLoop(ctx)
 	s.log.Info("starting tcp server", "addr", s.config.Bind, "max_conns", s.config.MaxConnections)
 	return nil
 }
 
-func (s *Server) acceptLoop() {
+func (s *Server) acceptLoop(ctx context.Context) {
 	defer func() { _ = s.listener.Close() }()
 	backoff := 5 * time.Millisecond
 
@@ -161,17 +161,16 @@ func (s *Server) acceptLoop() {
 		}
 
 		s.activeConns.Add(1)
-		go s.handleConn(conn)
+		go s.handleConn(ctx, conn)
 	}
 }
 
-func (s *Server) handleConn(conn net.Conn) {
+func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	defer s.activeConns.Add(-1)
 
 	id := s.idGen.NextEntityID(idgen.EntitySession)
 	connID := fmt.Sprintf("0x%x", id)
 
-	ctx := context.Background()
 	s.connsTotal.Add(ctx, 1)
 	s.connsActive.Add(ctx, 1)
 
@@ -223,7 +222,7 @@ func (s *Server) handleConn(conn net.Conn) {
 		// Build FluxMsg
 		msg := fluxmsg.New()
 		msg.FluxID, _ = s.idGen.NextFluxID()
-		msg.TsInit = time.Now().UnixNano()
+		msg.TSInit = time.Now().UnixNano()
 		msg.RawPayload = innerPayload
 
 		// Preserve Raw Header if requested (Stateless Loopback)
@@ -236,7 +235,7 @@ func (s *Server) handleConn(conn net.Conn) {
 		}
 
 		// Heuristic validation and telemetry (using raw payload for inspection logic)
-		frameInfo := s.inspect(payload, connID, headerMeta)
+		frameInfo := s.inspect(ctx, payload, connID, headerMeta)
 
 		// Fail Fast: Disconnect on invalid frames to preserve synchronization integrity
 		if !frameInfo.Valid {
@@ -258,7 +257,7 @@ func (s *Server) handleConn(conn net.Conn) {
 		msg.Metadata["iso8583.fields"] = formatFieldList(frameInfo.ActiveFields)
 
 		// TRACE logging
-		s.log.Log(context.Background(), logger.LevelTrace, "ISO8583 Server: Frame read from socket",
+		s.log.Log(ctx, logger.LevelTrace, "ISO8583 Server: Frame read from socket",
 			"conn_id", connID,
 			"mti", frameInfo.MTI,
 			"len", len(payload),
@@ -266,7 +265,7 @@ func (s *Server) handleConn(conn net.Conn) {
 
 		s.emit(msg)
 
-		s.latency.Record(context.Background(), float64(time.Since(time.Unix(0, msg.TsInit)).Milliseconds()), metric.WithAttributes(
+		s.latency.Record(ctx, float64(time.Since(time.Unix(0, msg.TSInit)).Milliseconds()), metric.WithAttributes(
 			attribute.String("direction", "inbound"),
 			attribute.String("mti", frameInfo.MTI),
 		))
@@ -528,7 +527,7 @@ func (s *Server) Drain(ctx context.Context) error {
 }
 
 // inspect performs heuristic validation (Layer 1.5) and returns frame info.
-func (s *Server) inspect(payload []byte, connID string, meta map[string]string) FrameInfo {
+func (s *Server) inspect(ctx context.Context, payload []byte, connID string, meta map[string]string) FrameInfo {
 	info := FrameInfo{Valid: !s.config.HeuristicValidation}
 
 	if len(payload) < 4 {
@@ -579,7 +578,6 @@ func (s *Server) inspect(payload []byte, connID string, meta map[string]string) 
 	if !info.Valid {
 		status = "error"
 	}
-	ctx := context.Background()
 	s.msgsIn.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("direction", "inbound"),
 		attribute.String("mti", info.MTI),

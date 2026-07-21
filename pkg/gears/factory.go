@@ -11,6 +11,7 @@ import (
 	"github.com/jaab-tech/fluxrig/pkg/gears/native/io_tcp"
 	iso8583codec "github.com/jaab-tech/fluxrig/pkg/gears/native/iso8583/codec"
 	iso8583io "github.com/jaab-tech/fluxrig/pkg/gears/native/iso8583/io"
+	"github.com/jaab-tech/fluxrig/pkg/gears/native/wasm"
 	"github.com/jaab-tech/fluxrig/pkg/sdk"
 )
 
@@ -29,6 +30,7 @@ func NewFactory() *Factory {
 	f.Register("io_iso8583", func() sdk.NativeGear { return &iso8583io.Gear{} })
 	f.Register("codec_iso8583", func() sdk.NativeGear { return &iso8583codec.Gear{} })
 	f.Register("coatcheck", func() sdk.NativeGear { return coatcheck.New() })
+	f.Register("wasm", func() sdk.NativeGear { return wasm.New() })
 
 	return f
 }

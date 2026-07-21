@@ -36,6 +36,7 @@ __pycache__/
 test/test_logs/
 test/e2e/**/work*/
 test/e2e/**/work
+test/e2e/**/results
 test/robot/**/work
 test/robot/**/results
 test/e2e/10_iso8583/prod/

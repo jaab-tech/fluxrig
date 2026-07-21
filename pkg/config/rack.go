@@ -126,7 +126,7 @@ func LoadRack(path string) (*RackConfig, error) {
 		if strings.HasPrefix(s, "store_") {
 			return strings.Replace(s, "store_", "store.", 1)
 		}
-		return strings.Replace(s, "_", ".", -1)
+		return strings.ReplaceAll(s, "_", ".")
 	}), nil)
 
 	if err != nil {

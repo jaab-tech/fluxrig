@@ -82,6 +82,10 @@ func TestMixer_AppCertification(t *testing.T) {
 				RetentionDays: 7,
 			},
 		},
+		Wasm: config.WasmConfig{
+			CatalogDir:     filepath.Join(tmpDir, "wasm"),
+			TrustedKeysDir: filepath.Join(tmpDir, "wasm", "keys"),
+		},
 	}
 
 	app := NewApp(cfg, "", nil)

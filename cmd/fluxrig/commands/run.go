@@ -224,8 +224,16 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 			logger.Info("Stopping existing Runtime Manager for Identity Rotation")
 			rtManager.Shutdown()
 		}
+
+		var pubKey []byte
+		if env, errEnv := pki.LoadStateEnvelope(statePath); errEnv == nil {
+			if s, errVer := env.Verify(); errVer == nil {
+				pubKey = s.MixerPublic
+			}
+		}
+
 		logger.Info("Initializing Runtime Manager", "id", nodeID, "name", nodeName)
-		rtManager = rt.NewManager(nodeID, nodeName, managedBus, nodeGen, specMgr, opTimeout, convTimeout, handshakeInterval, cfg.Logging.Trace, cfg.Logging.Debug)
+		rtManager = rt.NewManager(nodeID, nodeName, managedBus, nodeGen, specMgr, opTimeout, convTimeout, handshakeInterval, cfg.Logging.Trace, cfg.Logging.Debug, pubKey)
 	}
 
 	// Initial Init (might be 0/pending)
@@ -353,7 +361,13 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 						} else {
 							telShutdown = sDown
 							// 4. Initialize Data Plane
-							rtManager = rt.NewManager(cfg.Rack.MachineID, cfg.Base.Name, natsBus, gen, specMgr, opTimeout, convTimeout, handshakeInterval, cfg.Logging.Trace, cfg.Logging.Debug)
+							var pubKey []byte
+							if env, errEnv := pki.LoadStateEnvelope(statePath); errEnv == nil {
+								if s, errVer := env.Verify(); errVer == nil {
+									pubKey = s.MixerPublic
+								}
+							}
+							rtManager = rt.NewManager(cfg.Rack.MachineID, cfg.Base.Name, natsBus, gen, specMgr, opTimeout, convTimeout, handshakeInterval, cfg.Logging.Trace, cfg.Logging.Debug, pubKey)
 							if errStart := rtManager.Start(); errStart != nil {
 								logger.Error("Failed to start runtime (resume)", "error", errStart)
 							}

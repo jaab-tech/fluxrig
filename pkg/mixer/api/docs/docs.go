@@ -332,6 +332,74 @@ const docTemplate = `{
                     }
                 }
             }
+        },
+        "/wasm/catalog": {
+            "get": {
+                "description": "Returns the catalog of trusted and available Wasm modules",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "wasm"
+                ],
+                "summary": "List Wasm Catalog",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": true
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/wasm/import": {
+            "post": {
+                "description": "Securely imports, validates, and distributes a Wasm payload",
+                "consumes": [
+                    "application/octet-stream"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "wasm"
+                ],
+                "summary": "Import Wasm Module",
+                "parameters": [
+                    {
+                        "type": "boolean",
+                        "description": "Allow unsigned modules",
+                        "name": "allow_unsigned",
+                        "in": "query"
+                    },
+                    {
+                        "description": "Wasm binary payload",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "type": "integer"
+                            }
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
         }
     },
     "definitions": {
@@ -685,6 +753,9 @@ const docTemplate = `{
                 },
                 "telemetry": {
                     "$ref": "#/definitions/config.TelemetryConfig"
+                },
+                "wasm": {
+                    "$ref": "#/definitions/config.WasmConfig"
                 }
             }
         },
@@ -933,6 +1004,19 @@ const docTemplate = `{
                 }
             }
         },
+        "config.WasmConfig": {
+            "type": "object",
+            "properties": {
+                "catalogDir": {
+                    "type": "string",
+                    "example": "./data/wasm"
+                },
+                "trustedKeysDir": {
+                    "type": "string",
+                    "example": "./data/wasm/keys"
+                }
+            }
+        },
         "registry.GearSpec": {
             "type": "object",
             "properties": {
@@ -1077,7 +1161,7 @@ const docTemplate = `{
 
 // SwaggerInfo holds exported Swagger Info so clients can modify it
 var SwaggerInfo = &swag.Spec{
-	Version:          "v0.5.0-dev",
+	Version:          "v0.6.1",
 	Host:             "localhost:8090",
 	BasePath:         "/api/v1",
 	Schemes:          []string{"http"},

@@ -166,7 +166,7 @@ func (c *Client) handleConn(conn net.Conn) {
 		// Build FluxMsg
 		msg := fluxmsg.New()
 		msg.FluxID, _ = c.idGen.NextFluxID()
-		msg.TsInit = time.Now().UnixNano()
+		msg.TSInit = time.Now().UnixNano()
 		msg.RawPayload = innerPayload
 
 		for k, v := range headerMeta {
@@ -220,7 +220,7 @@ func (c *Client) handleConn(conn net.Conn) {
 		c.bytesIn.Add(context.Background(), int64(len(payload)), metric.WithAttributes(
 			attribute.String("direction", "inbound"),
 		))
-		c.latency.Record(context.Background(), float64(time.Since(time.Unix(0, msg.TsInit)).Milliseconds()), metric.WithAttributes(
+		c.latency.Record(context.Background(), float64(time.Since(time.Unix(0, msg.TSInit)).Milliseconds()), metric.WithAttributes(
 			attribute.String("direction", "inbound"),
 			attribute.String("mti", frameInfo.MTI),
 		))

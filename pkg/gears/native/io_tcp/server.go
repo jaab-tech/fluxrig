@@ -101,11 +101,11 @@ func (s *Server) Start(ctx context.Context) error {
 	s.log.Info("listening", "addr", s.config.Bind)
 	s.listener = listener
 
-	go s.acceptLoop()
+	go s.acceptLoop(ctx)
 	return nil
 }
 
-func (s *Server) acceptLoop() {
+func (s *Server) acceptLoop(ctx context.Context) {
 	backoff := 5 * time.Millisecond
 
 	for {
@@ -132,21 +132,21 @@ func (s *Server) acceptLoop() {
 		}
 
 		s.activeConns.Add(1)
-		s.connsActive.Add(context.Background(), 1, metric.WithAttributes(
+		s.connsActive.Add(ctx, 1, metric.WithAttributes(
 			attribute.String("gear_type", "io_tcp"),
 			attribute.String("mode", "server"),
 		))
-		s.connsTotal.Add(context.Background(), 1, metric.WithAttributes(
+		s.connsTotal.Add(ctx, 1, metric.WithAttributes(
 			attribute.String("gear_type", "io_tcp"),
 			attribute.String("mode", "server"),
 		))
-		go s.handleConn(conn)
+		go s.handleConn(ctx, conn)
 	}
 }
 
-func (s *Server) handleConn(conn net.Conn) {
+func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	defer s.activeConns.Add(-1)
-	defer s.connsActive.Add(context.Background(), -1, metric.WithAttributes(
+	defer s.connsActive.Add(ctx, -1, metric.WithAttributes(
 		attribute.String("gear_type", "io_tcp"),
 		attribute.String("mode", "server"),
 	))
@@ -173,7 +173,7 @@ func (s *Server) handleConn(conn net.Conn) {
 
 		msg := fluxmsg.New()
 		msg.FluxID, _ = s.idGen.NextFluxID()
-		msg.TsInit = time.Now().UnixNano()
+		msg.TSInit = time.Now().UnixNano()
 		msg.RawPayload = payload
 
 		msg.Metadata["conn.id"] = connID
@@ -193,11 +193,11 @@ func (s *Server) handleConn(conn net.Conn) {
 			"payload", string(payload),
 		)
 
-		s.msgsIn.Add(context.Background(), 1, metric.WithAttributes(
+		s.msgsIn.Add(ctx, 1, metric.WithAttributes(
 			attribute.String("gear_type", "io_tcp"),
 			attribute.String("mode", "server"),
 		))
-		s.bytesIn.Add(context.Background(), int64(len(payload)), metric.WithAttributes(
+		s.bytesIn.Add(ctx, int64(len(payload)), metric.WithAttributes(
 			attribute.String("gear_type", "io_tcp"),
 			attribute.String("mode", "server"),
 		))
@@ -235,7 +235,7 @@ func (s *Server) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.Fl
 					if i > 0 {
 						pathStr += ", "
 					}
-					pathStr += fmt.Sprintf("{g:0x%x p:0x%x t:%d}", h.GearID, h.PortID, h.TsNano)
+					pathStr += fmt.Sprintf("{g:0x%x p:0x%x t:%d}", h.GearID, h.PortID, h.TSNano)
 				}
 			}
 			pathStr += "]"

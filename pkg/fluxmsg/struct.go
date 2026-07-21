@@ -35,7 +35,7 @@ type FluxMsg struct {
 	// --- Fallback & Audit ---
 	RawPayload []byte `cbor:"raw"`  // Original wire bytes
 	Path       []*Hop `cbor:"path"` // Audit Trail
-	TsInit     int64  `cbor:"ts"`   // Timestamp of creation (Unix Nanos)
+	TSInit     int64  `cbor:"ts"`   // Timestamp of creation (Unix Nanos)
 }
 
 const (
@@ -62,7 +62,7 @@ func SetLimits(maxHops, maxPayloadSize int) {
 type Hop struct {
 	GearID uuid.UUID `cbor:"g"`
 	PortID uuid.UUID `cbor:"p"`
-	TsNano int64     `cbor:"t"`
+	TSNano int64     `cbor:"t"`
 }
 
 // SetMetadata sets a value in the metadata map, automatically hex-encoding

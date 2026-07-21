@@ -42,14 +42,22 @@ type Server struct {
 	mixerID       uuid.UUID
 	mixerEntityID uuid.UUID
 	cfg           *config.MixerConfig
+	wasmCatalog   WasmCatalog
+}
+
+// WasmCatalog defines the interface for the Wasm Catalog to avoid circular imports if needed.
+type WasmCatalog interface {
+	Import(ctx context.Context, payload []byte, allowUnsigned bool) (any, error)
+	List() (any, error)
 }
 
 func NewServer(reg registry.Registry, pub message.Publisher, signer *pki.ClusterKey,
 	sc controller.ScenarioManager, cache *telemetry.MetricsCache,
-	mixerID uuid.UUID, mixerEntityID uuid.UUID, cfg *config.MixerConfig) *Server {
+	mixerID uuid.UUID, mixerEntityID uuid.UUID, cfg *config.MixerConfig, wasmCat WasmCatalog) *Server {
 	return &Server{
 		reg: reg, pub: pub, signer: signer, scenarioCtrl: sc,
 		metricsCache: cache, mixerID: mixerID, mixerEntityID: mixerEntityID, cfg: cfg,
+		wasmCatalog: wasmCat,
 	}
 }
 
@@ -69,6 +77,8 @@ func (s *Server) Start(addr string) error {
 	mux.HandleFunc("GET /api/v1/scenario/active", s.handleScenarioActive)
 	mux.HandleFunc("GET /api/v1/topology/status", s.handleTopologyStatus)
 	mux.HandleFunc("GET /api/v1/topology/list", s.handleTopologyList)
+	mux.HandleFunc("POST /api/v1/wasm/import", s.handleWasmImport)
+	mux.HandleFunc("GET /api/v1/wasm/catalog", s.handleWasmCatalog)
 
 	// Swagger UI
 	mux.Handle("/swagger/", httpSwagger.WrapHandler)
@@ -104,7 +114,7 @@ func (s *Server) Start(addr string) error {
 	}
 
 	if err != nil {
-		return fmt.Errorf("Mixer API bind failed after %d attempts: %w", maxAttempts, err)
+		return fmt.Errorf("mixer API bind failed after %d attempts: %w", maxAttempts, err)
 	}
 
 	readTimeout, _ := time.ParseDuration(s.cfg.API.ReadHeaderTimeout)
@@ -703,4 +713,63 @@ func (s *Server) publishStatus(id uuid.UUID, status string, cmd string, passport
 	} else {
 		slog.Info("Notification Sent", "id", id.String(), "status", status)
 	}
+}
+
+// handleWasmImport godoc
+// @Summary Import Wasm Module
+// @Description Securely imports, validates, and distributes a Wasm payload
+// @Tags wasm
+// @Accept application/octet-stream
+// @Produce json
+// @Param allow_unsigned query boolean false "Allow unsigned modules"
+// @Param body body []byte true "Wasm binary payload"
+// @Success 200 {object} map[string]interface{}
+// @Router /wasm/import [post]
+func (s *Server) handleWasmImport(w http.ResponseWriter, r *http.Request) {
+	if s.wasmCatalog == nil {
+		http.Error(w, "Wasm Catalog is not initialized", http.StatusServiceUnavailable)
+		return
+	}
+
+	allowUnsignedVal := r.URL.Query().Get("allow_unsigned")
+	allowUnsigned := allowUnsignedVal == "true" || allowUnsignedVal == "1"
+
+	r.Body = http.MaxBytesReader(w, r.Body, 50*1024*1024) // 50MB limit for Wasm modules
+	data, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Failed to read Wasm payload", http.StatusBadRequest)
+		return
+	}
+
+	meta, err := s.wasmCatalog.Import(r.Context(), data, allowUnsigned)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Wasm validation failed: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(meta)
+}
+
+// handleWasmCatalog godoc
+// @Summary List Wasm Catalog
+// @Description Returns the catalog of trusted and available Wasm modules
+// @Tags wasm
+// @Produce json
+// @Success 200 {array} map[string]interface{}
+// @Router /wasm/catalog [get]
+func (s *Server) handleWasmCatalog(w http.ResponseWriter, r *http.Request) {
+	if s.wasmCatalog == nil {
+		http.Error(w, "Wasm Catalog is not initialized", http.StatusServiceUnavailable)
+		return
+	}
+
+	list, err := s.wasmCatalog.List()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to read Wasm catalog: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(list)
 }

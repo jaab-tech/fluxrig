@@ -186,11 +186,13 @@ if [[ "$RACK_ROW" != *"last_seen"* ]]; then # stats usually has last_seen?
     # stats JSON.
     :
 fi
-# Version check
-if [[ "$RACK_ROW" == *"v0.4"* ]] || [[ "$RACK_ROW" == *"v0.5"* ]]; then
-     echo "✅ Rack Version Verified"
+# Version check. Compare against the VERSION file rather than a hardcoded list of
+# accepted prefixes, which rejected every release from v0.6.0 onward.
+EXPECTED_VERSION="$(cat "${ROOT_DIR}/VERSION")"
+if [[ "$RACK_ROW" == *"$EXPECTED_VERSION"* ]]; then
+     echo "✅ Rack Version Verified ($EXPECTED_VERSION)"
 else
-     echo "❌ Rack Version Check Failed. Row: $RACK_ROW"
+     echo "❌ Rack Version Check Failed. Expected '$EXPECTED_VERSION'. Row: $RACK_ROW"
      exit 1
 fi
 

@@ -33,6 +33,7 @@ import (
 	"github.com/jaab-tech/fluxrig/pkg/store/duckdb"
 	"github.com/jaab-tech/fluxrig/pkg/telemetry"
 	"github.com/jaab-tech/fluxrig/pkg/version"
+	"github.com/jaab-tech/fluxrig/pkg/wasm/catalog"
 )
 
 // App is the main application entry point for the Mixer.
@@ -203,15 +204,15 @@ func (a *App) Run(ctx context.Context) error {
 	}
 
 	// 4. Discovery
-	jsUrl := a.cfg.Snake.URL
-	if jsUrl == "" || strings.HasSuffix(jsUrl, ":0") {
-		jsUrl = snakeSrv.ClientURL()
+	jsURL := a.cfg.Snake.URL
+	if jsURL == "" || strings.HasSuffix(jsURL, ":0") {
+		jsURL = snakeSrv.ClientURL()
 	}
 
 	// Internal Optimization: Mixer connects to its own Snake via plain protocol
-	if strings.HasPrefix(jsUrl, "tls://") && (strings.Contains(jsUrl, "localhost") || strings.Contains(jsUrl, "127.0.0.1") || strings.Contains(jsUrl, "0.0.0.0")) {
-		a.log.Info("Internal Bus connection detected, bypassing TLS for performance", "url", jsUrl)
-		jsUrl = strings.Replace(jsUrl, "tls://", "nats://", 1)
+	if strings.HasPrefix(jsURL, "tls://") && (strings.Contains(jsURL, "localhost") || strings.Contains(jsURL, "127.0.0.1") || strings.Contains(jsURL, "0.0.0.0")) {
+		a.log.Info("Internal Bus connection detected, bypassing TLS for performance", "url", jsURL)
+		jsURL = strings.Replace(jsURL, "tls://", "nats://", 1)
 	}
 
 	// 5. Bus Initialization (The Mesh)
@@ -230,7 +231,7 @@ func (a *App) Run(ctx context.Context) error {
 		inactiveThreshold = 30 * time.Second
 	}
 
-	if errConn := natsBus.Connect(jsUrl, bus.ConnectOptions{
+	if errConn := natsBus.Connect(jsURL, bus.ConnectOptions{
 		Name:               a.cfg.Base.Name,
 		Domain:             a.cfg.Snake.Domain,
 		ConnectTimeout:     connectTimeout,
@@ -282,7 +283,7 @@ func (a *App) Run(ctx context.Context) error {
 	}
 
 	if errCfg := r.ConfigureJetStream(
-		jsUrl,
+		jsURL,
 		a.cfg.Snake.Domain,
 		true,
 		a.cfg.Snake.RootCAFile,
@@ -316,7 +317,7 @@ func (a *App) Run(ctx context.Context) error {
 	// 7b. Telemetry Ingestion (Sink)
 	// IMPORTANT: The sink must listen on the telemetry stream, not the message stream.
 	telBusIngest := bus.NewNatsBus(a.cfg.Telemetry.StreamName)
-	if errTelConn := telBusIngest.Connect(jsUrl, bus.ConnectOptions{
+	if errTelConn := telBusIngest.Connect(jsURL, bus.ConnectOptions{
 		Name:               a.cfg.Base.Name + "-tel-ingest",
 		Domain:             a.cfg.Snake.Domain,
 		ConnectTimeout:     connectTimeout,
@@ -396,8 +397,19 @@ func (a *App) Run(ctx context.Context) error {
 		a.log.Warn("Failed to send initial heartbeat for Snake", "error", errHbSnk)
 	}
 
+	// 8b. Wasm Catalog Initialization
+	if errProv := snakeSrv.ProvisionKV(ctx, "wasm_catalog"); errProv != nil {
+		a.log.Warn("Failed to provision Wasm KV store", "error", errProv)
+	}
+
+	// We pass natsBus.KV() directly as the Store. It matches the Put() interface of catalog.Store
+	wasmCat, errCat := catalog.NewCatalogManager(a.log, a.cfg.Wasm.CatalogDir, a.cfg.Wasm.TrustedKeysDir, clusterKey, natsBus.KV())
+	if errCat != nil {
+		return fmt.Errorf("failed to init wasm catalog: %w", errCat)
+	}
+
 	// 9. API Server
-	apiSrv := api.NewServer(store, r.Pub, clusterKey, scenarioCtrl, mCache, mixerState.MachineID, mixerEntityID, a.cfg)
+	apiSrv := api.NewServer(store, r.Pub, clusterKey, scenarioCtrl, mCache, mixerState.MachineID, mixerEntityID, a.cfg, wasmCat)
 	go func() {
 		addr := fmt.Sprintf(":%d", a.cfg.API.Port)
 		if errSrv := apiSrv.Start(addr); errSrv != nil {
