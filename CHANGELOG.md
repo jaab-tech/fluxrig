@@ -18,7 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 | Version | Date | Status | Summary |
 | :--- | :--- | :--- | :--- |
-| [Unreleased](#unreleased) | | Active | Sovereign Identity & Telemetry Hardening |
+| [Unreleased](#unreleased) | | Active | Feature expansion ({{VERS}}-dev) |
+| [v0.6.1](#v061) | 2026-07-20 | Delivered | Wasm runtime, supply chain security, polyglot gears |
+| [v0.6.0](#v060) | 2026-06-06 | Delivered | Release metadata only, no code changes |
+| [v0.5.0](#v050) | 2026-05-07 | Delivered | Sovereign identity (UUID v7) & telemetry hardening |
 | [v0.4.5](#v045) | 2026-04-29 | Delivered | Documentation Hardening & Zero-Config |
 | [v0.4.4](#v044) | 2026-04-23 | Delivered | Logic Extensibility & Secure Enrollment |
 | [v0.4.3](#v043) | 2026-02-19 | Delivered | Operational Resilience & NATS V2 |
@@ -27,19 +30,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 | [v0.4.0](#v040) | 2026-02-01 | Delivered | ISO8583 Native Gear & Telemetry QoS |
 | [v0.3.0](#v030) | 2026-01-21 | Delivered | Bento Integration & Load Testing |
 
-<a name="unreleased"></a>
 
 <a name="unreleased"></a>
-### [Unreleased] ({{VERS}}-dev)
+## [Unreleased] ({{VERS}}-dev)
 #### Added
 - 
 
+<a name="v061"></a>
+## [v0.6.1] - 2026-07-20
+### Added
+- **Wazero Integration**: Implemented a secure, native Wasm execution environment using `wazero`.
+- **Wasm Supply Chain Security**: Embedded Ed25519 signatures within `.wasm` modules with Mixer-level trust roots and countersignature enforcement prior to Rack execution.
+- **Dynamic Catalog Distribution**: Added NATS Snake hot-loading for edge distribution of Wasm logic.
+- **PKI & Catalog CLI**: Introduced `fluxrig keys gen-cluster`, `fluxrig wasm sign`, and `fluxrig wasm import` commands.
+- **Path Sanitization**: Added `pkg/utils/path` to centralize traversal-safe path handling.
+
+### Changed
+- **Security & Linting Hardening**: Resolved remaining Gosec and Staticcheck warnings, achieving a zero-warning build state.
+- **Dependencies**: Upgraded the Go dependency group.
+
+<a name="v060"></a>
+## [v0.6.0] - 2026-06-06
+### Changed
+- Release metadata only. This tag contains no source changes relative to `v0.5.0`; the Wasm work intended for it was not merged and shipped in `v0.6.1` instead.
+
+<a name="v050"></a>
 ## [v0.5.0] - 2026-05-07
 #### Changed
 - **Sovereign Identity Plane (v0.5.0 Foundation)**: Migrated the entire platform identity system to **128-bit UUID v7 (RFC 9562)**. This enhances entropy, ensures global uniqueness without centralized coordination, and provides time-ordered sequence integrity for high-performance storage indexes.
 - **Deduplication Logic**: Updated NATS JetStream deduplication to utilize 128-bit identifiers, ensuring consistent exactly-once delivery across complex telemetry pipelines.
 - **Telemetry Hardening**: Standardized dotted naming schema (e.g., `fluxrig.gear.messages_in`) across OTel, Prometheus, and DuckDB.
-<a name="v050"></a>
 - **Directional Monitoring**: Split unified I/O counters into distinct Inbound and Outbound channels for precise protocol translation metrics.
 - **Resource Guardrails**: Implemented mandatory `MaxHops` (64) and `MaxPayloadSize` (2MB) validation in `fluxmsg` to prevent bus exhaustion and "poison pill" scenarios.
 - **Concurrency Resilience**: Integrated global `PanicMiddleware` to ensure Rack stability during individual Gear failures and hardened mutex locking for atomic hot-reloads.
@@ -124,7 +144,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Snake Protocol**: Secure tunneling implementation for Rack-to-Mixer connectivity.
 - **FluxMsg**: Canonical JSON schema for inter-gear communication.
 
-[Unreleased]: https://github.com/jaab-tech/fluxrig/compare/v0.4.5...HEAD
+[Unreleased]: https://github.com/jaab-tech/fluxrig/compare/v0.6.1...HEAD
+[v0.6.1]: https://github.com/jaab-tech/fluxrig/releases/tag/v0.6.1
+[v0.6.0]: https://github.com/jaab-tech/fluxrig/releases/tag/v0.6.0
+[v0.5.0]: https://github.com/jaab-tech/fluxrig/releases/tag/v0.5.0
 [v0.4.5]: https://github.com/jaab-tech/fluxrig/releases/tag/v0.4.5
 [v0.4.4]: https://github.com/jaab-tech/fluxrig/releases/tag/v0.4.4
 [v0.4.3]: https://github.com/jaab-tech/fluxrig/releases/tag/v0.4.3

@@ -24,6 +24,13 @@ type MixerConfig struct {
 	Enrollment    EnrollmentConfig    `koanf:"enrollment"`
 	Ingest        IngestConfig        `koanf:"ingest"`
 	Telemetry     TelemetryConfig     `koanf:"telemetry"`
+	Wasm          WasmConfig          `koanf:"wasm"`
+}
+
+// WasmConfig defines settings for the WebAssembly Supply Chain Security Catalog.
+type WasmConfig struct {
+	CatalogDir     string `koanf:"catalog_dir" example:"./data/wasm"`
+	TrustedKeysDir string `koanf:"trusted_keys_dir" example:"./data/wasm/keys"`
 }
 
 // IngestConfig controls telemetry ingestion buffering and flushing.
@@ -139,6 +146,9 @@ func LoadMixer(path string) (*MixerConfig, error) {
 	_ = k.Set("enrollment.auto_adopt", false)
 	_ = k.Set("enrollment.bootstrap_secret", "fluxrig")
 
+	_ = k.Set("wasm.catalog_dir", "./data/wasm")
+	_ = k.Set("wasm.trusted_keys_dir", "./data/wasm/keys")
+
 	// 2. File (if provided)
 	if path != "" {
 		if err := k.Load(file.Provider(path), toml.Parser()); err != nil {
@@ -162,7 +172,7 @@ func LoadMixer(path string) (*MixerConfig, error) {
 		}
 
 		// Map BUS to SNAKE for consistency if needed, but here we just use snake.
-		s = strings.Replace(s, "_", ".", -1)
+		s = strings.ReplaceAll(s, "_", ".")
 		return s
 	}), nil)
 

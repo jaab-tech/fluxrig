@@ -29,7 +29,7 @@ func TestFluxMsg_Scenarios(t *testing.T) {
 			setup: func() *FluxMsg {
 				msg := New()
 				msg.FluxID = uuid.New()
-				msg.TsInit = time.Now().UnixNano()
+				msg.TSInit = time.Now().UnixNano()
 				return msg
 			},
 		},

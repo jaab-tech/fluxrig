@@ -189,3 +189,59 @@ func TestLoadClusterKey_Errors(t *testing.T) {
 		t.Error("Expected error for invalid key length")
 	}
 }
+
+func TestClusterKey_SignBytes(t *testing.T) {
+	ck, _ := GenerateClusterKey()
+	msg := []byte("hello-fluxrig")
+
+	sig, err := ck.SignBytes(msg)
+	if err != nil {
+		t.Fatalf("SignBytes failed: %v", err)
+	}
+
+	if !ed25519.Verify(ck.Public, msg, sig) {
+		t.Error("Signature verification failed")
+	}
+}
+
+func TestClusterKey_MixerState(t *testing.T) {
+	ck, _ := GenerateClusterKey()
+
+	state := &MixerState{
+		MachineID: uuid.New(),
+		Name:      "mixer-1",
+		Version:   "v1.0",
+	}
+
+	env, err := ck.SignMixer(state)
+	if err != nil {
+		t.Fatalf("SignMixer failed: %v", err)
+	}
+
+	verified, err := env.VerifyMixer(ck.Public)
+	if err != nil {
+		t.Fatalf("VerifyMixer failed: %v", err)
+	}
+
+	if verified.Name != state.Name {
+		t.Errorf("VerifyMixer name mismatch")
+	}
+
+	// Test Persistence
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "mixer.state")
+
+	err = env.Save(path)
+	if err != nil {
+		t.Fatalf("Save MixerState failed: %v", err)
+	}
+
+	loaded, err := LoadMixerState(path, ck.Public)
+	if err != nil {
+		t.Fatalf("LoadMixerState failed: %v", err)
+	}
+
+	if loaded.MachineID != state.MachineID {
+		t.Errorf("LoadMixerState ID mismatch")
+	}
+}

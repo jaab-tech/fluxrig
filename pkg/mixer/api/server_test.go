@@ -116,7 +116,7 @@ func (m *MockRegistry) ClearScenarioEntities(ctx context.Context) error {
 }
 
 func TestHandleHealth(t *testing.T) {
-	s := NewServer(&MockRegistry{}, nil, nil, nil, nil, uuid.Nil, uuid.Nil, nil)
+	s := NewServer(&MockRegistry{}, nil, nil, nil, nil, uuid.Nil, uuid.Nil, nil, nil)
 	req := httptest.NewRequest("GET", "/api/v1/health", nil)
 	w := httptest.NewRecorder()
 
@@ -133,7 +133,7 @@ func TestHandleRacks_List(t *testing.T) {
 			return []*registry.Rack{{Name: "test-rack"}}, nil
 		},
 	}
-	s := NewServer(mockReg, nil, nil, nil, nil, uuid.Nil, uuid.Nil, nil)
+	s := NewServer(mockReg, nil, nil, nil, nil, uuid.Nil, uuid.Nil, nil, nil)
 
 	req := httptest.NewRequest("GET", "/api/v1/racks", nil)
 	w := httptest.NewRecorder()
@@ -154,7 +154,7 @@ func TestHandleRackAction(t *testing.T) {
 			return &registry.Rack{Name: name, Status: "active"}, nil
 		},
 	}
-	s := NewServer(mockReg, nil, nil, nil, nil, uuid.Nil, uuid.Nil, nil)
+	s := NewServer(mockReg, nil, nil, nil, nil, uuid.Nil, uuid.Nil, nil, nil)
 
 	// 1. Invalid Path (No ID)
 	req1 := httptest.NewRequest("POST", "/api/v1/racks/", nil)
@@ -213,7 +213,7 @@ func TestHandleRackAction_Extended(t *testing.T) {
 			return nil
 		},
 	}
-	s := NewServer(mockReg, nil, nil, nil, nil, uuid.Nil, uuid.Nil, nil)
+	s := NewServer(mockReg, nil, nil, nil, nil, uuid.Nil, uuid.Nil, nil, nil)
 
 	id1 := "00000000-0000-0000-0000-000000000001"
 	id99 := "00000000-0000-0000-0000-000000000099"
@@ -272,7 +272,7 @@ func TestHandleRackAction_WithSigner(t *testing.T) {
 			}, nil
 		},
 	}
-	s := NewServer(mockReg, nil, signer, nil, nil, uuid.Nil, uuid.Nil, nil)
+	s := NewServer(mockReg, nil, signer, nil, nil, uuid.Nil, uuid.Nil, nil, nil)
 
 	// Approve with Signer
 	body := `{"name": "signed-rack"}`
@@ -306,7 +306,7 @@ func (m *MockPublisher) Close() error { return nil }
 
 func TestHandleRacks_Post(t *testing.T) {
 	mockReg := &MockRegistry{}
-	s := NewServer(mockReg, nil, nil, nil, nil, uuid.Nil, uuid.Nil, nil)
+	s := NewServer(mockReg, nil, nil, nil, nil, uuid.Nil, uuid.Nil, nil, nil)
 
 	// POST (Method not allowed)
 	req := httptest.NewRequest("POST", "/api/v1/racks", nil)
@@ -322,7 +322,7 @@ func TestHandleRacks_ListError(t *testing.T) {
 			return nil, errors.New("db error")
 		},
 	}
-	s := NewServer(mockReg, nil, nil, nil, nil, uuid.Nil, uuid.Nil, nil)
+	s := NewServer(mockReg, nil, nil, nil, nil, uuid.Nil, uuid.Nil, nil, nil)
 
 	req := httptest.NewRequest("GET", "/api/v1/racks", nil)
 	w := httptest.NewRecorder()
@@ -347,7 +347,7 @@ func TestHandleRackAction_WithPublisher(t *testing.T) {
 			}, nil
 		},
 	}
-	s := NewServer(mockReg, mockPub, signer, nil, nil, uuid.Nil, uuid.Nil, nil)
+	s := NewServer(mockReg, mockPub, signer, nil, nil, uuid.Nil, uuid.Nil, nil, nil)
 
 	// Approve with Publisher
 	body := `{"name": "pub-test"}`
@@ -377,7 +377,7 @@ func TestHandleRackAction_SuspendWithPublisher(t *testing.T) {
 			return nil
 		},
 	}
-	s := NewServer(mockReg, mockPub, signer, nil, nil, uuid.Nil, uuid.Nil, nil)
+	s := NewServer(mockReg, mockPub, signer, nil, nil, uuid.Nil, uuid.Nil, nil, nil)
 
 	id1 := "00000000-0000-0000-0000-000000000001"
 	req := httptest.NewRequest("POST", "/api/v1/racks/"+id1+"/suspend", nil)
@@ -405,7 +405,7 @@ func TestHandleRackAction_ActivateWithPublisher(t *testing.T) {
 			return nil
 		},
 	}
-	s := NewServer(mockReg, mockPub, signer, nil, nil, uuid.Nil, uuid.Nil, nil)
+	s := NewServer(mockReg, mockPub, signer, nil, nil, uuid.Nil, uuid.Nil, nil, nil)
 
 	id1 := "00000000-0000-0000-0000-000000000001"
 	req := httptest.NewRequest("POST", "/api/v1/racks/"+id1+"/activate", nil)
@@ -425,7 +425,7 @@ func TestHandleConfig(t *testing.T) {
 	cfg := &config.MixerConfig{
 		API: config.ApiConfig{Port: 8090},
 	}
-	s := NewServer(&MockRegistry{}, nil, nil, nil, nil, uuid.Nil, uuid.Nil, cfg)
+	s := NewServer(&MockRegistry{}, nil, nil, nil, nil, uuid.Nil, uuid.Nil, cfg, nil)
 
 	req := httptest.NewRequest("GET", "/api/v1/config", nil)
 	w := httptest.NewRecorder()
@@ -443,7 +443,7 @@ func TestHandleTopology(t *testing.T) {
 			return []*registry.Rack{{MachineID: id1, Name: "rack-1"}}, nil
 		},
 	}
-	s := NewServer(mockReg, nil, nil, nil, nil, uuid.Nil, uuid.Nil, nil)
+	s := NewServer(mockReg, nil, nil, nil, nil, uuid.Nil, uuid.Nil, nil, nil)
 
 	// STATUS
 	reqStatus := httptest.NewRequest("GET", "/api/v1/topology/status", nil)
@@ -465,7 +465,7 @@ func TestHandleTopology(t *testing.T) {
 func TestHandleRackAction_Shutdown(t *testing.T) {
 	mockReg := &MockRegistry{}
 	signer := &pki.ClusterKey{} // Mock signer
-	s := NewServer(mockReg, nil, signer, nil, nil, uuid.Nil, uuid.Nil, nil)
+	s := NewServer(mockReg, nil, signer, nil, nil, uuid.Nil, uuid.Nil, nil, nil)
 
 	id1 := "00000000-0000-0000-0000-000000000001"
 	req := httptest.NewRequest("POST", "/api/v1/racks/"+id1+"/shutdown", nil)
@@ -483,7 +483,7 @@ func TestHandleRackAction_Shutdown(t *testing.T) {
 func TestHandleRackAction_LogLevel(t *testing.T) {
 	mockPub := &MockPublisher{}
 	mockReg := &MockRegistry{}
-	s := NewServer(mockReg, mockPub, nil, nil, nil, uuid.Nil, uuid.Nil, nil)
+	s := NewServer(mockReg, mockPub, nil, nil, nil, uuid.Nil, uuid.Nil, nil, nil)
 
 	body := `{"level": "debug"}`
 	id1 := "00000000-0000-0000-0000-000000000001"
@@ -500,7 +500,7 @@ func TestHandleRackAction_LogLevel(t *testing.T) {
 
 func TestHandleEntityStats(t *testing.T) {
 	cache := telemetry.NewMetricsCache()
-	s := NewServer(&MockRegistry{}, nil, nil, nil, cache, uuid.Nil, uuid.Nil, nil)
+	s := NewServer(&MockRegistry{}, nil, nil, nil, cache, uuid.Nil, uuid.Nil, nil, nil)
 
 	// 1. All Stats
 	reqAll := httptest.NewRequest("GET", "/api/v1/entities/stats", nil)
@@ -545,7 +545,7 @@ func (m *MockScenarioController) GetActiveScenario() *registry.Scenario {
 
 func TestHandleScenarioImport(t *testing.T) {
 	mockSC := &MockScenarioController{}
-	s := NewServer(&MockRegistry{}, nil, nil, mockSC, nil, uuid.Nil, uuid.Nil, nil)
+	s := NewServer(&MockRegistry{}, nil, nil, mockSC, nil, uuid.Nil, uuid.Nil, nil, nil)
 
 	// 1. GET (Method not allowed)
 	reqGet := httptest.NewRequest("GET", "/api/v1/scenario/import", nil)
@@ -574,7 +574,7 @@ func TestHandleScenarioImport(t *testing.T) {
 
 func TestHandleTopologyStatus(t *testing.T) {
 	mockSC := &MockScenarioController{}
-	s := NewServer(&MockRegistry{}, nil, nil, mockSC, nil, uuid.Nil, uuid.Nil, nil)
+	s := NewServer(&MockRegistry{}, nil, nil, mockSC, nil, uuid.Nil, uuid.Nil, nil, nil)
 
 	req := httptest.NewRequest("GET", "/api/v1/topology/status", nil)
 	w := httptest.NewRecorder()
@@ -587,7 +587,7 @@ func TestHandleTopologyStatus(t *testing.T) {
 
 func TestHandleTopologyList(t *testing.T) {
 	mockSC := &MockScenarioController{}
-	s := NewServer(&MockRegistry{}, nil, nil, mockSC, nil, uuid.Nil, uuid.Nil, nil)
+	s := NewServer(&MockRegistry{}, nil, nil, mockSC, nil, uuid.Nil, uuid.Nil, nil, nil)
 
 	req := httptest.NewRequest("GET", "/api/v1/topology/list", nil)
 	w := httptest.NewRecorder()
@@ -600,7 +600,7 @@ func TestHandleTopologyList(t *testing.T) {
 
 func TestHandleRackAction_Delete(t *testing.T) {
 	reg := &MockRegistry{}
-	s := NewServer(reg, nil, nil, nil, nil, uuid.Nil, uuid.Nil, nil)
+	s := NewServer(reg, nil, nil, nil, nil, uuid.Nil, uuid.Nil, nil, nil)
 
 	id123 := "00000000-0000-0000-0000-000000000123"
 	req := httptest.NewRequest("DELETE", "/api/v1/racks/"+id123, nil)
@@ -618,7 +618,7 @@ func TestServer_StartFailure(t *testing.T) {
 			Port: 8090,
 		},
 	}
-	s := NewServer(&MockRegistry{}, nil, nil, nil, nil, uuid.Nil, uuid.Nil, cfg)
+	s := NewServer(&MockRegistry{}, nil, nil, nil, nil, uuid.Nil, uuid.Nil, cfg, nil)
 
 	// Using an invalid address to trigger listener failure
 	err := s.Start("999.999.999.999:80")

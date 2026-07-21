@@ -50,6 +50,9 @@ type GearContext interface {
 
 	// ControlPlane returns the global signaling interface
 	ControlPlane() any
+
+	// ClusterPublicKey returns the public key of the Mixer that enrolled this Rack
+	ClusterPublicKey() []byte
 }
 
 // NativeGear defines the contract for Go-based components (Internal/Native Gears).

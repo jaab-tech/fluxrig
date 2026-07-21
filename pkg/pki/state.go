@@ -52,6 +52,11 @@ func (c *ClusterKey) Sign(state *RackState) (*StateEnvelope, error) {
 	}, nil
 }
 
+// SignBytes signs arbitrary raw bytes using the Cluster Key.
+func (c *ClusterKey) SignBytes(payload []byte) ([]byte, error) {
+	return ed25519.Sign(c.Private, payload), nil
+}
+
 // Save writes the ClusterKey to disk.
 func (c *ClusterKey) Save(path string) error {
 	// We save the private key as raw bytes (seed or private key bytes).

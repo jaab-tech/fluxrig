@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/jaab-tech/fluxrig/pkg/pki"
+	"github.com/jaab-tech/fluxrig/pkg/utils/path"
 )
 
 // keysCmd represents the keys command
@@ -57,6 +58,12 @@ var keysGenClusterCmd = &cobra.Command{
 		if err != nil {
 			absPath = finalPath // Fallback
 		}
+
+		safePath, errSan := path.Sanitize(finalPath)
+		if errSan != nil {
+			return fmt.Errorf("invalid path: %w", errSan)
+		}
+		finalPath = safePath
 
 		// If dir is specified, ensure it exists
 		if dir != "" {
@@ -103,13 +110,18 @@ var keysInspectCmd = &cobra.Command{
 	Short: "Inspect a State Envelope (state.flux)",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		path := args[0]
-		env, err := pki.LoadStateEnvelope(path)
+		p := args[0]
+		safePath, errSan := path.Sanitize(p)
+		if errSan != nil {
+			return fmt.Errorf("invalid path: %w", errSan)
+		}
+
+		env, err := pki.LoadStateEnvelope(safePath)
 		if err != nil {
 			return fmt.Errorf("failed to load state envelope: %w", err)
 		}
 
-		fmt.Printf("Envelope Loaded: %s\n", path)
+		fmt.Printf("Envelope Loaded: %s\n", safePath)
 
 		// 1. Try Rack Verification (Embedded Key)
 		state, err := env.Verify()
@@ -121,7 +133,7 @@ var keysInspectCmd = &cobra.Command{
 
 		// 2. Try Mixer Verification (Requires Authority Key)
 		// Try to find cluster.key in the same dir as the passport
-		dir := filepath.Dir(path)
+		dir := filepath.Dir(safePath)
 		clusterKeyPath := filepath.Join(dir, "cluster.key")
 		if _, errStat := os.Stat(clusterKeyPath); errStat != nil {
 			// Try current dir

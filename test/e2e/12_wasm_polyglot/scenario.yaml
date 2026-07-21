@@ -1,0 +1,40 @@
+meta:
+  name: "Wasm Polyglot Demo"
+  version: "1.0.0"
+
+gears:
+  - name: my-wasm-gear
+    type: wasm
+    config:
+      # Use absolute file path for testing since Rack runs in a /tmp workdir
+      source: "file:///Users/andresa/git/fluxrig/test/e2e/12_wasm_polyglot/build/polyglot.wasm"
+      entrypoint: "process"
+      memory_limit_pages: 16
+
+  - name: test-in
+    type: bento
+    config:
+      ports:
+        outputs: ["out"]
+      bento:
+        input:
+          generate:
+            mapping: |
+              root = {"hello": "wasm"}
+            count: 1
+
+  - name: test-out
+    type: bento
+    config:
+      ports:
+        inputs: ["in"]
+      bento:
+        output:
+          stdout: {}
+
+wires:
+  - from: "test-in.out"
+    to: "my-wasm-gear.in"
+  
+  - from: "my-wasm-gear.out"
+    to: "test-out.in"

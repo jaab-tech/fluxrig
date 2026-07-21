@@ -16,7 +16,7 @@ import (
 var PcapPayloads = struct {
 	// iso8583_ascii_sample.pcapng (Frame 4)
 	// Framing: 2-byte Length (110) + No Header + ASCII MTI "1200"
-	AsciiSMS string
+	ASCIISMS string
 
 	// iso8583_bin_sample.pcapng (Frame 4)
 	// Framing: 2-byte Length (72, Little Endian) + No Header + BCD MTI "1200"
@@ -26,7 +26,7 @@ var PcapPayloads = struct {
 	// We replicate the payload content starting AFTER length for ExtractHeader tests,
 	// or WITH length for full frame tests.
 	// Here we provide the full TCP payload from the dump.
-	AsciiSMS: "006c313230306430323030303030326330303030303030303030303030303030303030383136313233343536373839303132333435363030303030303030353639393030303233343030343132333435202020363738393031323334202020202020303039424c414820424c4148",
+	ASCIISMS: "006c313230306430323030303030326330303030303030303030303030303030303030383136313233343536373839303132333435363030303030303030353639393030303233343030343132333435202020363738393031323334202020202020303039424c414820424c4148",
 
 	// "1200" (BCD) + Bitmaps + Fields. Note Length is 48 00 (Little Endian 72).
 	// But our Gear expects Big Endian. This sample confirms some terminals use LE.
@@ -34,11 +34,11 @@ var PcapPayloads = struct {
 	BinarySMS: "48001200d020000002c000000000000000000008161234567890123456000000005699000234000431323334352020203637383930313233342020202020200009424c414820424c4148",
 }
 
-func TestRef_AsciiSMS(t *testing.T) {
+func TestRef_ASCIISMS(t *testing.T) {
 	// Reference: iso8583_ascii_sample.pcapng
 	// Expected: No Variant Header, ASCII Encoding.
 
-	raw, err := hex.DecodeString(PcapPayloads.AsciiSMS)
+	raw, err := hex.DecodeString(PcapPayloads.ASCIISMS)
 	assert.NoError(t, err)
 
 	// 1. Verify Length (Big Endian)

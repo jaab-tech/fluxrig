@@ -31,7 +31,7 @@ func (s *StoreLogic) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxms
 		// Partial Storage: Create a lightweight FluxMsg clone
 		partial := fluxmsg.New()
 		partial.FluxID = msg.FluxID // Keep ID for reference
-		partial.TsInit = msg.TsInit
+		partial.TSInit = msg.TSInit
 
 		for _, field := range s.gear.config.ValueFields {
 			extracted, found := sdk.GetValue(msg, field)
@@ -71,7 +71,7 @@ func (s *StoreLogic) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxms
 	// The specification says: "Daemon... Schedules timers...".
 	// So the Daemon needs to know the specific expiry time.
 	// We should probably check if we need to store "ExpireAt" in metadata?
-	// Or Daemon calculates it from "TsInit + TTL"? Yes.
+	// Or Daemon calculates it from "TSInit + TTL"? Yes.
 
 	bucket := s.gear.config.Bucket
 	_, err = s.gear.ctx.Bus().KV().Put(ctx, bucket, key, valBytes)

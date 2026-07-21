@@ -106,3 +106,4 @@ func (m *mockGearContext) IDGen() IDGenerator       { return m.idGen }
 func (m *mockGearContext) Bus() bus.Bus             { return nil } // Mock bus not needed for basic tests
 func (m *mockGearContext) Manager() manager.Manager { return nil }
 func (m *mockGearContext) ControlPlane() any        { return nil }
+func (m *mockGearContext) ClusterPublicKey() []byte { return nil }

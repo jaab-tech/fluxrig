@@ -20,6 +20,7 @@ import (
 
 	"github.com/jaab-tech/fluxrig/pkg/manager"
 	"github.com/jaab-tech/fluxrig/pkg/manager/cas"
+	"github.com/jaab-tech/fluxrig/pkg/utils/path"
 )
 
 var (
@@ -43,8 +44,13 @@ var scenarioImportCmd = &cobra.Command{
 		apiMode, _ := cmd.Flags().GetBool("api")
 		scenarioFile = args[0]
 
+		safePath, errSan := path.Sanitize(scenarioFile)
+		if errSan != nil {
+			return fmt.Errorf("invalid file path: %w", errSan)
+		}
+
 		// 1. Read File
-		content, err := os.ReadFile(filepath.Clean(scenarioFile))
+		content, err := os.ReadFile(safePath)
 		if err != nil {
 			return fmt.Errorf("failed to read file: %w", err)
 		}
@@ -173,8 +179,13 @@ var scenarioDiffCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		scenarioFile = args[0]
+		safePath, errSan := path.Sanitize(scenarioFile)
+		if errSan != nil {
+			return fmt.Errorf("invalid file path: %w", errSan)
+		}
+
 		// 1. Read Local File
-		localContent, err := os.ReadFile(filepath.Clean(scenarioFile))
+		localContent, err := os.ReadFile(safePath)
 		if err != nil {
 			return fmt.Errorf("failed to read local file: %w", err)
 		}

@@ -51,7 +51,7 @@ type RackResponse struct {
 // RackStats represents the transient statistics of a Rack.
 type RackStats struct {
 	// CPU usage percentage.
-	CpuUsage float64 `json:"cpu_usage" example:"12.5"`
+	CPUUsage float64 `json:"cpu_usage" example:"12.5"`
 	// Memory usage percentage.
 	MemUsage float64 `json:"mem_usage" example:"45.2"`
 	// Uptime in seconds.

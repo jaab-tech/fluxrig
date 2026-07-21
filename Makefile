@@ -124,7 +124,9 @@ clean: ## Remove local build artifacts (Fast)
 	rm -f fluxrig_test.toml
 	rm -f cluster.key
 	rm -f cluster.key.pub
-	-@if [ -n "$(LOG_CATALOG)" ]; then rm -f $(LOG_CATALOG); fi
+	@# LOG_CATALOG is deliberately not removed here. It resolves to a path inside
+	@# the ops repository where the catalog is a tracked file, so deleting it makes
+	@# `make clean` stage a deletion in a sibling repo. `make catalog` regenerates it.
 	rm -f pkg/mixer/api/docs/.generated
 
 distclean: clean ## Full cleanup including caches (Slow)
@@ -200,7 +202,7 @@ clean-robot: ## Clean Robot Framework artifacts
 .PHONY: openapi
 openapi: pkg/mixer/api/docs/.generated ## Generate OpenAPI specification and sync to ops
 
-pkg/mixer/api/docs/.generated: cmd/fluxrig-mixer/main.go pkg/mixer/api/server.go pkg/mixer/api/types.go
+pkg/mixer/api/docs/.generated: cmd/fluxrig-mixer/main.go pkg/mixer/api/server.go pkg/mixer/api/types.go VERSION
 	@echo "Generating OpenAPI spec for version $(VERSION) (Clean Source Strategy)..."
 	@cp cmd/fluxrig-mixer/main.go cmd/fluxrig-mixer/main_gen.go
 	@sed -i '' 's/@version 0.0.0-dev/@version $(VERSION)/' cmd/fluxrig-mixer/main_gen.go

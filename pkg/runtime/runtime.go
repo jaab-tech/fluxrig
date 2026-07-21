@@ -42,17 +42,18 @@ type Manager struct {
 	convergenceTimeout time.Duration
 	handshakeInterval  time.Duration
 
-	activeGears map[string]sdk.NativeGear
-	gearPorts   map[string]map[string]uuid.UUID // gear -> port -> entityID
-	gearIDs     map[string]uuid.UUID            // gear -> entityID
-	activeSubs  []bus.Subscription
-	hotSubjects map[string]chan struct{}
-	trace       bool
-	debug       bool
-	mu          sync.Mutex
+	activeGears   map[string]sdk.NativeGear
+	gearPorts     map[string]map[string]uuid.UUID // gear -> port -> entityID
+	gearIDs       map[string]uuid.UUID            // gear -> entityID
+	activeSubs    []bus.Subscription
+	hotSubjects   map[string]chan struct{}
+	trace         bool
+	debug         bool
+	clusterPubKey []byte
+	mu            sync.Mutex
 }
 
-func NewManager(machineID uuid.UUID, name string, b bus.Bus, ig *idgen.IDGenerator, specMgr manager.Manager, opTimeout, convTimeout, handshakeInterval time.Duration, trace, debug bool) *Manager {
+func NewManager(machineID uuid.UUID, name string, b bus.Bus, ig *idgen.IDGenerator, specMgr manager.Manager, opTimeout, convTimeout, handshakeInterval time.Duration, trace, debug bool, clusterPubKey []byte) *Manager {
 	return &Manager{
 		bus:                b,
 		idGen:              ig,
@@ -65,6 +66,7 @@ func NewManager(machineID uuid.UUID, name string, b bus.Bus, ig *idgen.IDGenerat
 		handshakeInterval:  handshakeInterval,
 		trace:              trace,
 		debug:              debug,
+		clusterPubKey:      clusterPubKey,
 		activeGears:        make(map[string]sdk.NativeGear),
 		gearPorts:          make(map[string]map[string]uuid.UUID),
 		gearIDs:            make(map[string]uuid.UUID),
@@ -90,15 +92,16 @@ func (m *Manager) logger() *slog.Logger {
 
 // GearContextImpl implements sdk.GearContext
 type GearContextImpl struct {
-	ctx       context.Context
-	cfg       map[string]any
-	name      string
-	machineID uuid.UUID
-	logger    *slog.Logger
-	idGen     sdk.IDGenerator
-	bus       bus.Bus
-	mgr       manager.Manager
-	ctrl      ctrl.ControlPlane
+	ctx           context.Context
+	cfg           map[string]any
+	name          string
+	machineID     uuid.UUID
+	logger        *slog.Logger
+	idGen         sdk.IDGenerator
+	bus           bus.Bus
+	mgr           manager.Manager
+	ctrl          ctrl.ControlPlane
+	clusterPubKey []byte
 }
 
 func (g *GearContextImpl) Context() context.Context { return g.ctx }
@@ -110,6 +113,7 @@ func (g *GearContextImpl) IDGen() sdk.IDGenerator   { return g.idGen }
 func (g *GearContextImpl) Bus() bus.Bus             { return g.bus }
 func (g *GearContextImpl) Manager() manager.Manager { return g.mgr }
 func (g *GearContextImpl) ControlPlane() any        { return g.ctrl }
+func (g *GearContextImpl) ClusterPublicKey() []byte { return g.clusterPubKey }
 
 // ApplyScenario diffs and applies the scenario.
 func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err error) {
@@ -205,15 +209,15 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err
 
 		// 4. Init Gear
 		gCtx := &GearContextImpl{
-			ctx:       ctx,
-			cfg:       gSpec.Config,
-			name:      gSpec.Name,
-			machineID: m.machineID,
-			// Override component to GEAR and name to gear name
-			logger: logger.WithComponent(m.logger(), logger.TypeGear, gSpec.Name),
-			idGen:  m.idGen,
-			bus:    m.bus,
-			mgr:    m.mgr,
+			ctx:           ctx,
+			cfg:           gSpec.Config,
+			name:          gSpec.Name,
+			machineID:     m.machineID,
+			logger:        logger.WithComponent(m.logger(), logger.TypeGear, gSpec.Name),
+			idGen:         m.idGen,
+			bus:           m.bus,
+			mgr:           m.mgr,
+			clusterPubKey: m.clusterPubKey,
 		}
 
 		// MANDATORY: Check for NATS core before initializing Control Plane
@@ -286,7 +290,7 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err
 			msg.Path = append(msg.Path, &fluxmsg.Hop{
 				GearID: m.gearIDs[toGear],
 				PortID: portID,
-				TsNano: time.Now().UnixNano(),
+				TSNano: time.Now().UnixNano(),
 			})
 
 			// TRACE Logging: Bus Receive (Port In)
@@ -379,7 +383,7 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err
 				resp.Path = append(resp.Path, &fluxmsg.Hop{
 					GearID: m.gearIDs[toGear],
 					PortID: outPortID,
-					TsNano: time.Now().UnixNano(),
+					TSNano: time.Now().UnixNano(),
 				})
 
 				// INSTRUMENTATION: Gear Output
@@ -443,7 +447,7 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err
 			msg.Path = append(msg.Path, &fluxmsg.Hop{
 				GearID: m.gearIDs[name],
 				PortID: portID,
-				TsNano: time.Now().UnixNano(),
+				TSNano: time.Now().UnixNano(),
 			})
 
 			// TRACE Logging: Bus Emit (Port Out)

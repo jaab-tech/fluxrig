@@ -67,7 +67,7 @@ func TestCLI_RunCertification(t *testing.T) {
 			MachineID:   machineID,
 			Name:        "signed-rack",
 			Status:      "active",
-			Secret:      "deadbeef-certification-secret",
+			Secret:      uuid.New().String(),
 			MixerPublic: pub,
 		}
 		env, _ := signer.Sign(state)

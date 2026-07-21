@@ -224,6 +224,59 @@ func (s *Server) ProvisionStream(ctx context.Context, name string, subjects []st
 	return nil
 }
 
+// ProvisionKV checks if a KeyValue bucket exists and creates it if not.
+func (s *Server) ProvisionKV(ctx context.Context, bucket string) error {
+	var nc *nats.Conn
+	var err error
+	slog.Info("Snake connecting in-process for KV provisioning")
+	for i := 1; i <= 3; i++ {
+		nc, err = s.InProcessConn(nats.InProcessServer(s.ns))
+		if err == nil {
+			break
+		}
+		if i < 3 {
+			slog.Info("Snake KV provisioning connect failed, retrying...", "attempt", i, "error", err)
+			time.Sleep(250 * time.Millisecond)
+		}
+	}
+
+	if err != nil {
+		return fmt.Errorf("snake: failed to connect for KV provisioning after 3 attempts: %w", err)
+	}
+	defer nc.Close()
+
+	var js jetstream.JetStream
+	var jsErr error
+	js, jsErr = jetstream.New(nc)
+	if jsErr != nil {
+		return fmt.Errorf("snake: failed to initialize jetstream: %w", jsErr)
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	// Check if exists
+	_, err = js.KeyValue(ctx, bucket)
+	if err == nil {
+		slog.Info("KV bucket exists", "bucket", bucket)
+		return nil
+	}
+
+	// Create
+	slog.Info("Provisioning JetStream KV bucket", "bucket", bucket)
+	_, err = js.CreateKeyValue(ctx, jetstream.KeyValueConfig{
+		Bucket:   bucket,
+		Storage:  jetstream.FileStorage,
+		Replicas: 1,
+	})
+
+	if err != nil {
+		return fmt.Errorf("snake: failed to create KV bucket %s: %w", bucket, err)
+	}
+
+	return nil
+}
+
 // Shutdown stops the embedded NATS server.
 func (s *Server) Shutdown() {
 	if s.ns != nil {

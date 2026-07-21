@@ -138,7 +138,7 @@ func (c *Client) handleConn(conn net.Conn) {
 
 		msg := fluxmsg.New()
 		msg.FluxID, _ = c.idGen.NextFluxID()
-		msg.TsInit = time.Now().UnixNano()
+		msg.TSInit = time.Now().UnixNano()
 		msg.RawPayload = payload
 
 		host, port, _ := net.SplitHostPort(conn.RemoteAddr().String())
@@ -199,7 +199,7 @@ func (c *Client) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.Fl
 					if i > 0 {
 						pathStr += ", "
 					}
-					pathStr += fmt.Sprintf("{g:0x%x p:0x%x t:%d}", h.GearID, h.PortID, h.TsNano)
+					pathStr += fmt.Sprintf("{g:0x%x p:0x%x t:%d}", h.GearID, h.PortID, h.TSNano)
 				}
 			}
 			pathStr += "]"

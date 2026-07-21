@@ -121,7 +121,7 @@ func TestManager_Lifecycle(t *testing.T) {
 	mid := uuid.New()
 	gen, _ := idgen.New(mid)
 
-	mgr := NewManager(mid, "test-rack", mockBus, gen, mockSpecMgr, 5*time.Second, 5*time.Second, 500*time.Millisecond, false, false)
+	mgr := NewManager(mid, "test-rack", mockBus, gen, mockSpecMgr, 5*time.Second, 5*time.Second, 500*time.Millisecond, false, false, nil)
 
 	// 2. Apply Scenario
 	sc := &registry.Scenario{
@@ -153,7 +153,7 @@ func TestManager_Errors(t *testing.T) {
 	mockSpecMgr := &MockManager{}
 	mid := uuid.New()
 	gen, _ := idgen.New(mid)
-	mgr := NewManager(mid, "test-rack", mockBus, gen, mockSpecMgr, 5*time.Second, 5*time.Second, 500*time.Millisecond, false, false)
+	mgr := NewManager(mid, "test-rack", mockBus, gen, mockSpecMgr, 5*time.Second, 5*time.Second, 500*time.Millisecond, false, false, nil)
 
 	// 1. Unknown Gear Type
 	sc := &registry.Scenario{
@@ -192,7 +192,7 @@ func TestManager_Errors(t *testing.T) {
 
 	// 4. Subscribe Failure
 	failBus := &MockBus{FailSubscribe: true}
-	mgr2 := NewManager(mid, "test-rack", failBus, gen, mockSpecMgr, 5*time.Second, 5*time.Second, 500*time.Millisecond, false, false)
+	mgr2 := NewManager(mid, "test-rack", failBus, gen, mockSpecMgr, 5*time.Second, 5*time.Second, 500*time.Millisecond, false, false, nil)
 	// Use good gear, but bad bus
 	sc2 := &registry.Scenario{
 		Meta: registry.ScenarioMeta{Name: "test", Version: "1.0"},
@@ -220,7 +220,7 @@ func TestManager_Drain(t *testing.T) {
 	mockSpecMgr := &MockManager{}
 	mid := uuid.New()
 	gen, _ := idgen.New(mid)
-	mgr := NewManager(mid, "test-rack", mockBus, gen, mockSpecMgr, 1*time.Second, 1*time.Second, 100*time.Millisecond, false, false)
+	mgr := NewManager(mid, "test-rack", mockBus, gen, mockSpecMgr, 1*time.Second, 1*time.Second, 100*time.Millisecond, false, false, nil)
 
 	// Use MockGear for deterministic drain
 	mgr.factory.Register("mock_drain", func() sdk.NativeGear {
@@ -251,7 +251,7 @@ func TestManager_ConvergenceTimeout(t *testing.T) {
 	mid := uuid.New()
 	gen, _ := idgen.New(mid)
 	// Short timeouts for fast test
-	mgr := NewManager(mid, "test-rack", mockBus, gen, mockSpecMgr, 100*time.Millisecond, 200*time.Millisecond, 50*time.Millisecond, false, false)
+	mgr := NewManager(mid, "test-rack", mockBus, gen, mockSpecMgr, 100*time.Millisecond, 200*time.Millisecond, 50*time.Millisecond, false, false, nil)
 
 	sc := &registry.Scenario{
 		Meta: registry.ScenarioMeta{Name: "test", Version: "1.0"},

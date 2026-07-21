@@ -259,6 +259,8 @@ definitions:
         $ref: '#/definitions/config.StoreConfig'
       telemetry:
         $ref: '#/definitions/config.TelemetryConfig'
+      wasm:
+        $ref: '#/definitions/config.WasmConfig'
     type: object
   config.MixerSettings:
     properties:
@@ -430,6 +432,15 @@ definitions:
         example: 500
         type: number
     type: object
+  config.WasmConfig:
+    properties:
+      catalogDir:
+        example: ./data/wasm
+        type: string
+      trustedKeysDir:
+        example: ./data/wasm/keys
+        type: string
+    type: object
   registry.GearSpec:
     properties:
       config:
@@ -539,7 +550,7 @@ info:
     name: Apache 2.0
     url: http://www.apache.org/licenses/LICENSE-2.0.html
   title: fluxrig Mixer API
-  version: v0.5.0-dev
+  version: v0.6.1
 paths:
   /config:
     get:
@@ -746,6 +757,51 @@ paths:
       summary: Topology Status
       tags:
       - topology
+  /wasm/catalog:
+    get:
+      description: Returns the catalog of trusted and available Wasm modules
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              additionalProperties: true
+              type: object
+            type: array
+      summary: List Wasm Catalog
+      tags:
+      - wasm
+  /wasm/import:
+    post:
+      consumes:
+      - application/octet-stream
+      description: Securely imports, validates, and distributes a Wasm payload
+      parameters:
+      - description: Allow unsigned modules
+        in: query
+        name: allow_unsigned
+        type: boolean
+      - description: Wasm binary payload
+        in: body
+        name: body
+        required: true
+        schema:
+          items:
+            type: integer
+          type: array
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Import Wasm Module
+      tags:
+      - wasm
 schemes:
 - http
 swagger: "2.0"
