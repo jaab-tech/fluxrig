@@ -5,6 +5,7 @@ package io
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -32,6 +33,12 @@ type Client struct {
 	idGen   sdk.IDGenerator
 	connPtr atomic.Pointer[Connection]
 	done    chan struct{}
+	tlsConf *tls.Config
+
+	// linkState, when set, observes the client's connection lifecycle
+	// (true on connect, false on disconnect). A client owns exactly one
+	// connection, so this is the gear's link state.
+	linkState func(up bool, connID string)
 
 	// Metrics
 	meter       metric.Meter
@@ -75,9 +82,20 @@ func NewClient(cfg *Config, log *slog.Logger, emit func(*fluxmsg.FluxMsg), idGen
 	}
 }
 
+// OnLinkState registers an observer for the client's connection lifecycle.
+// Must be called before Start.
+func (c *Client) OnLinkState(fn func(up bool, connID string)) { c.linkState = fn }
+
 // Start initiates the connection loop.
 func (c *Client) Start(_ context.Context) error {
-	c.log.Info("starting client", "target", c.config.Connect)
+	if c.config.TLS.Enabled {
+		conf, err := c.config.TLS.buildClient(c.config.Connect)
+		if err != nil {
+			return fmt.Errorf("iso8583 client: %w", err)
+		}
+		c.tlsConf = conf
+	}
+	c.log.Info("starting client", "target", c.config.Connect, "tls", c.config.TLS.Enabled)
 	go c.runLoop()
 	return nil
 }
@@ -89,7 +107,13 @@ func (c *Client) runLoop() {
 		}
 
 		d := net.Dialer{Timeout: time.Duration(c.config.ConnectTimeout)}
-		conn, err := d.Dial("tcp", c.config.Connect)
+		var conn net.Conn
+		var err error
+		if c.tlsConf != nil {
+			conn, err = tls.DialWithDialer(&d, "tcp", c.config.Connect, c.tlsConf)
+		} else {
+			conn, err = d.Dial("tcp", c.config.Connect)
+		}
 		if err != nil {
 			c.log.Warn("dial failed", "error", err, "retry_in", time.Duration(c.config.ReconnectWait))
 			select {
@@ -122,11 +146,17 @@ func (c *Client) handleConn(conn net.Conn) {
 	ctx := context.Background()
 	c.connsTotal.Add(ctx, 1)
 	c.connsActive.Add(ctx, 1)
+	if c.linkState != nil {
+		c.linkState(true, connID)
+	}
 
 	defer func() {
 		c.connsActive.Add(ctx, -1)
 		c.connPtr.Store(nil)
 		_ = conn.Close()
+		if c.linkState != nil {
+			c.linkState(false, connID)
+		}
 	}()
 
 	c.log.Info("connected", "target", c.config.Connect, "conn_id", connID)
@@ -136,8 +166,11 @@ func (c *Client) handleConn(conn net.Conn) {
 			return
 		}
 
-		// Set read deadline
-		if err := conn.SetReadDeadline(time.Now().Add(time.Duration(c.config.ReadTimeout))); err != nil {
+		// Idle wait for the next reply's first bytes. An upstream may take up to
+		// its own processing time to answer, so this is IdleTimeout: a single
+		// slow reply must not tear down a connection carrying other in-flight
+		// requests. readFrame then bounds the body read by ReadTimeout.
+		if err := setReadDeadline(conn, time.Duration(c.config.IdleTimeout)); err != nil {
 			c.log.Warn("failed to set read deadline", "error", err)
 			return
 		}
@@ -194,15 +227,18 @@ func (c *Client) handleConn(conn net.Conn) {
 
 		// TRACE logging
 		if c.log.Enabled(ctx, loggerPkg.LevelTrace) {
-			c.log.Log(ctx, loggerPkg.LevelTrace, "FluxMsg received",
+			args := []any{
 				"flux_id", fmt.Sprintf("0x%x", msg.FluxID),
 				"conn_id", connID,
 				"mti", frameInfo.MTI,
 				"variant", c.config.Variant,
 				"src_id", msg.Metadata["iso8583.src_id"],
 				"dst_id", msg.Metadata["iso8583.dst_id"],
-				"payload_hex", fmt.Sprintf("0x%x", payload),
-			)
+			}
+			if c.config.UnsafeRawFrameLog {
+				args = append(args, "payload_hex", fmt.Sprintf("0x%x", payload))
+			}
+			c.log.Log(ctx, loggerPkg.LevelTrace, "FluxMsg received", args...)
 		}
 
 		c.emit(msg)
@@ -253,6 +289,11 @@ func (c *Client) readFrame(conn net.Conn) ([]byte, error) {
 		return nil, fmt.Errorf("invalid frame length: %d", length)
 	}
 
+	// Frame in progress: bound the body read by ReadTimeout (not the longer
+	// idle wait the caller set for the reply's first bytes).
+	if err := setReadDeadline(conn, time.Duration(c.config.ReadTimeout)); err != nil {
+		return nil, err
+	}
 	payload := make([]byte, length)
 	if _, err := io.ReadFull(conn, payload); err != nil {
 		return nil, err
@@ -277,7 +318,7 @@ func (c *Client) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.Fl
 	var header []byte
 	if c.config.PreserveHeaders {
 		if raw, ok := msg.Metadata["iso8583.raw_header"]; ok {
-			header = []byte(raw)
+			header = decodeRawHeader(raw)
 		}
 	}
 
@@ -305,15 +346,18 @@ func (c *Client) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.Fl
 	if c.log.Enabled(ctx, loggerPkg.LevelTrace) {
 		// Layer 1.5 inspection to provide MTI/Fields in trace even on egress
 		info := c.inspect(msg.RawPayload, msg.Metadata)
-		c.log.Log(ctx, loggerPkg.LevelTrace, "sending message",
+		args := []any{
 			"flux_id", fmt.Sprintf("0x%x", msg.FluxID),
 			"target", c.config.Connect,
 			"variant", c.config.Variant,
 			"mti", info.MTI,
 			"fields", formatFieldList(info.ActiveFields),
 			"size", len(msg.RawPayload),
-			"hex", fmt.Sprintf("%x", msg.RawPayload),
-		)
+		}
+		if c.config.UnsafeRawFrameLog {
+			args = append(args, "hex", fmt.Sprintf("%x", msg.RawPayload))
+		}
+		c.log.Log(ctx, loggerPkg.LevelTrace, "sending message", args...)
 	}
 
 	// TRACE logging
@@ -326,10 +370,11 @@ func (c *Client) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.Fl
 		return nil, fmt.Errorf("write error: %w", err)
 	}
 
-	// Telemetry - Frame Sent (DEBUG)
+	// Telemetry - Frame Sent (DEBUG). No frame bytes: the first 64 bytes span
+	// the PAN (PCI DSS Req. 3.4). Raw bytes only at TRACE with UnsafeRawFrameLog.
 	c.log.Debug("Frame Sent",
 		"len", len(fullPayload),
-		"hex", fmt.Sprintf("0x%x", fullPayload[:min(64, len(fullPayload))]),
+		"mti", msg.Metadata["iso8583.mti"],
 	)
 
 	// Metric: Outbound

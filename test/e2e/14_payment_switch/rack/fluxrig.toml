@@ -1,0 +1,19 @@
+[logging]
+level = "trace"
+filename = "logs/rack.log"
+
+[store]
+dir = "./data"
+wal_max_size_mb = 500
+state_file = "state.flux"
+
+[rack]
+name = "rack-switch"
+machine_id = 100
+
+[rack.bus]
+url = "nats://127.0.0.1:4233"
+stream_name = "flux-msg"
+
+[rack.telemetry]
+enabled = true

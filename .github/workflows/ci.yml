@@ -16,19 +16,19 @@ name: CI
 
 on:
   push:
-    branches: [main, feat/*]
+    branches: [main, main-internal, feat/*]
   pull_request:
-    branches: [main]
+    branches: [main, main-internal]
 
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
-          go-version: "1.25"
+          go-version: "1.26"
           cache: true
       - name: Run Linter
         uses: golangci/golangci-lint-action@v9
@@ -40,18 +40,18 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
-          go-version: "1.25"
+          go-version: "1.26"
           cache: true
       - name: Run tests
         run: |
           go test -race -coverprofile=coverage.out $(go list ./... | grep -v '/test/utils' | grep -v 'cmd/fluxrig$' | grep -v 'cmd/fluxrig-mixer$')
           go tool cover -func=coverage.out | grep total | awk '{print "Total Coverage: " $3}'
       - name: Upload coverage
-        uses: codecov/codecov-action@v6
+        uses: codecov/codecov-action@v7
         with:
           files: coverage.out
           fail_ci_if_error: false
@@ -59,11 +59,11 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
-          go-version: "1.25"
+          go-version: "1.26"
           cache: true
       - name: Build binaries
         run: |
@@ -71,7 +71,7 @@ jobs:
           go build -v -o bin/fluxrig ./cmd/fluxrig
           go build -v -o bin/fluxrig-mixer ./cmd/fluxrig-mixer
       - name: Archive binaries
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fluxrig-binaries
           path: bin/

@@ -42,6 +42,26 @@ import (
 // ErrReconnect indicates the agent needs to restart its session (e.g. identity change)
 var ErrReconnect = fmt.Errorf("reconnect needed")
 
+// gracefulDrain drains all gears within a bounded deadline before the deferred
+// Shutdown() closes them. Both the shutdown-command path and the SIGTERM/SIGINT
+// path use it, so an ordinary stop never drops in-flight work silently. The
+// deadline is config-driven (rack.drain_timeout) and must exceed the largest
+// gear ticket TTL; when drain is abandoned the still-open work is surfaced in
+// the error, not dropped quietly.
+func gracefulDrain(rtManager *rt.Manager, timeout time.Duration, logger *slog.Logger) {
+	if rtManager == nil {
+		return
+	}
+	drainCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if err := rtManager.Drain(drainCtx); err != nil {
+		logger.Error("Graceful drain incomplete; in-flight work may be interrupted",
+			"timeout", timeout, "error", err)
+	} else {
+		logger.Info("All Gears Drained Successfully")
+	}
+}
+
 // RunAgent implements the main loop of the fluxrig Rack Agent.
 func RunAgent(cfg *config.RackConfig, logger *slog.Logger, logBuffer *telemetry.BufferHandler) error {
 	logger.Debug("Starting Rack Agent", "config", cfg)
@@ -118,6 +138,11 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 	cleanupTimeout, errParse := time.ParseDuration(cfg.Rack.CleanupTimeout)
 	if errParse != nil {
 		return fmt.Errorf("invalid rack.cleanup_timeout: %w", errParse)
+	}
+
+	drainTimeout, errParse := time.ParseDuration(cfg.Rack.DrainTimeout)
+	if errParse != nil {
+		return fmt.Errorf("invalid rack.drain_timeout: %w", errParse)
 	}
 
 	convTimeout, errParse := time.ParseDuration(cfg.Rack.ConvergenceTimeout)
@@ -514,16 +539,9 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 					}
 					if hbResp.Command == "agent:shutdown" {
 						logger.Info("Received Shutdown Command via Heartbeat - Initiating Graceful Drain")
-						// 1. Drain Gears (Stop accepting new work, finish pending)
-						drainCtx, drainCancel := context.WithTimeout(context.Background(), 5*time.Second)
-						defer drainCancel()
-						if errDrain := rtManager.Drain(drainCtx); errDrain != nil {
-							logger.Error("Drain Error", "error", errDrain)
-						} else {
-							logger.Info("All Gears Drained Successfully")
-						}
+						gracefulDrain(rtManager, drainTimeout, logger)
 
-						// 2. Signal Main Loop to Exit (triggers defer cleanup)
+						// Signal Main Loop to Exit (triggers defer cleanup)
 						select {
 						case shutdownCh <- struct{}{}:
 						default:
@@ -679,6 +697,9 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 		select {
 		case <-ctx.Done():
 			logger.Info("Signal Received. Shutting down Agent...", "signal", "SIGTERM/SIGINT")
+			// Drain in-flight work before the deferred Shutdown() closes gears;
+			// otherwise a plain kill/container stop drops every open ticket.
+			gracefulDrain(rtManager, drainTimeout, logger)
 			return nil
 		case <-shutdownCh:
 			logger.Info("Shutdown Command Received. Exiting Main Loop.")

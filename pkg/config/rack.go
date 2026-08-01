@@ -32,10 +32,14 @@ type RackSettings struct {
 	HandshakeInterval  string    `koanf:"handshake_interval"`
 	HeartbeatInterval  string    `koanf:"heartbeat_interval"`
 	CleanupTimeout     string    `koanf:"cleanup_timeout"`
-	EnrollmentTimeout  string    `koanf:"enrollment_timeout"`
-	EnrollmentInterval string    `koanf:"enrollment_interval"`
-	MaxHops            int       `koanf:"max_hops"`
-	MaxPayloadSize     int       `koanf:"max_payload_size"`
+	// DrainTimeout bounds a graceful stop (SIGTERM or shutdown command). It
+	// must exceed the largest gear ticket TTL so in-flight work can complete
+	// or time out before the process exits. Default 35s (> a 30s switch TTL).
+	DrainTimeout       string `koanf:"drain_timeout"`
+	EnrollmentTimeout  string `koanf:"enrollment_timeout"`
+	EnrollmentInterval string `koanf:"enrollment_interval"`
+	MaxHops            int    `koanf:"max_hops"`
+	MaxPayloadSize     int    `koanf:"max_payload_size"`
 }
 
 // LoadRack reads configuration from a TOML file and Environment Variables.
@@ -67,6 +71,7 @@ func LoadRack(path string) (*RackConfig, error) {
 
 	_ = k.Set("rack.name_prefix", "node-")
 	_ = k.Set("rack.cleanup_timeout", "2s")
+	_ = k.Set("rack.drain_timeout", "35s")
 	_ = k.Set("rack.convergence_timeout", "5s")
 	_ = k.Set("rack.handshake_interval", "500ms")
 	_ = k.Set("rack.heartbeat_interval", "30s")

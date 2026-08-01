@@ -51,6 +51,7 @@ type Manager struct {
 	debug         bool
 	clusterPubKey []byte
 	mu            sync.Mutex
+	portsMu       sync.RWMutex // guards lazy port-ID assignment in gearPorts (emit hot path)
 }
 
 func NewManager(machineID uuid.UUID, name string, b bus.Bus, ig *idgen.IDGenerator, specMgr manager.Manager, opTimeout, convTimeout, handshakeInterval time.Duration, trace, debug bool, clusterPubKey []byte) *Manager {
@@ -90,6 +91,127 @@ func (m *Manager) logger() *slog.Logger {
 	return slog.Default().With("component", "RACK")
 }
 
+// portEmitter is the per-gear sdk.PortEmitter handed to a gear via GearContext.
+// It binds a gear name to the manager's single emit path.
+type portEmitter struct {
+	m    *Manager
+	gear string
+}
+
+// Emit sends msg out of the named port and surfaces a publish failure to the
+// caller (per the sdk.PortEmitter contract), while never surfacing a panic:
+// the emit path is recover-guarded in publishPort.
+func (e *portEmitter) Emit(port string, msg *fluxmsg.FluxMsg) error {
+	if port == "" {
+		return fmt.Errorf("emit: empty port for gear %s", e.gear)
+	}
+	return e.m.publishPort(context.Background(), e.gear, port, msg)
+}
+
+// gearID returns a gear's entity ID under portsMu. The emit path and the
+// subscribe handler call this concurrently with ApplyScenario/stopAll, which
+// reassign gearIDs; portsMu (not m.mu) is the single guard for gearIDs and
+// gearPorts, so all readers and writers must go through it.
+func (m *Manager) gearID(gearName string) uuid.UUID {
+	m.portsMu.RLock()
+	defer m.portsMu.RUnlock()
+	return m.gearIDs[gearName]
+}
+
+// portID returns the entity ID for a gear's port, lazily assigning one for
+// named ports the Mixer did not pre-register (only in/out come pre-assigned).
+// Guarded by portsMu because gears emit concurrently.
+func (m *Manager) portID(gearName, port string) uuid.UUID {
+	m.portsMu.RLock()
+	if ports, ok := m.gearPorts[gearName]; ok {
+		if id, ok := ports[port]; ok {
+			m.portsMu.RUnlock()
+			return id
+		}
+	}
+	m.portsMu.RUnlock()
+
+	m.portsMu.Lock()
+	defer m.portsMu.Unlock()
+	ports, ok := m.gearPorts[gearName]
+	if !ok {
+		ports = make(map[string]uuid.UUID)
+		m.gearPorts[gearName] = ports
+	}
+	if id, ok := ports[port]; ok { // re-check after upgrading the lock
+		return id
+	}
+	etype := idgen.EntityPortOutput
+	if port == "in" || strings.HasPrefix(port, "in_") {
+		etype = idgen.EntityPortInput
+	}
+	id := m.idGen.NextEntityID(etype)
+	ports[port] = id
+	return id
+}
+
+// publishPort is the single emit path for a gear's named output port. It is
+// recover-guarded, nil-safe, hop-stamped and instrumented, and builds the
+// subject flux.msg.<rack>.<gear>.<port>. `port` is a full port name such as
+// "out", "out_scheme_a" or "error".
+func (m *Manager) publishPort(ctx context.Context, gearName, port string, msg *fluxmsg.FluxMsg) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			m.logger().Error("gear emit panic recovered", "gear", gearName, "port", port, "panic", r)
+			if tm := telemetry.GetMetrics(); tm != nil {
+				tm.GearErrors.Add(context.Background(), 1,
+					metric.WithAttributes(attribute.String("gear", gearName)))
+			}
+			err = fmt.Errorf("emit panic on %s.%s: %v", gearName, port, r)
+		}
+	}()
+
+	if msg == nil {
+		m.logger().Error("gear emitted a nil message; dropping", "gear", gearName, "port", port)
+		return fmt.Errorf("emit: nil message on %s.%s", gearName, port)
+	}
+	if msg.FluxID == uuid.Nil {
+		if id, e := m.idGen.NextFluxID(); e == nil {
+			msg.FluxID = id
+		}
+	}
+
+	subject := fmt.Sprintf("flux.msg.%s.%s.%s", m.rackName, gearName, port)
+	msg.Path = append(msg.Path, &fluxmsg.Hop{
+		GearID: m.gearID(gearName),
+		PortID: m.portID(gearName, port),
+		TSNano: time.Now().UnixNano(),
+	})
+
+	if tm := telemetry.GetMetrics(); tm != nil {
+		tm.GearMessagesOut.Add(ctx, 1, metric.WithAttributes(
+			attribute.String("gear", gearName),
+			attribute.String("flux.name", gearName),
+		))
+	}
+
+	tracer := otel.GetTracerProvider().Tracer("fluxrig/runtime")
+	emitCtx, span := tracer.Start(ctx, fmt.Sprintf("gear_output %s", gearName),
+		trace.WithSpanKind(trace.SpanKindProducer),
+		trace.WithAttributes(
+			attribute.String("gear.name", gearName),
+			attribute.String("messaging.system", "nats"),
+			attribute.String("messaging.destination", subject),
+		),
+	)
+	defer span.End()
+
+	if perr := m.bus.Publish(emitCtx, subject, msg); perr != nil {
+		m.logger().Error("emit failed", "gear", gearName, "port", port, "error", perr)
+		if tm := telemetry.GetMetrics(); tm != nil {
+			tm.GearErrors.Add(context.Background(), 1,
+				metric.WithAttributes(attribute.String("gear", gearName)))
+		}
+		return fmt.Errorf("emit %s.%s: %w", gearName, port, perr)
+	}
+	return nil
+}
+
 // GearContextImpl implements sdk.GearContext
 type GearContextImpl struct {
 	ctx           context.Context
@@ -102,18 +224,25 @@ type GearContextImpl struct {
 	mgr           manager.Manager
 	ctrl          ctrl.ControlPlane
 	clusterPubKey []byte
+	emitter       sdk.PortEmitter
+	bindings      map[string]sdk.PortBinding
 }
 
 func (g *GearContextImpl) Context() context.Context { return g.ctx }
-func (g *GearContextImpl) Config() map[string]any   { return g.cfg }
-func (g *GearContextImpl) GearName() string         { return g.name }
-func (g *GearContextImpl) MachineID() uuid.UUID     { return g.machineID }
-func (g *GearContextImpl) Logger() *slog.Logger     { return g.logger }
-func (g *GearContextImpl) IDGen() sdk.IDGenerator   { return g.idGen }
-func (g *GearContextImpl) Bus() bus.Bus             { return g.bus }
-func (g *GearContextImpl) Manager() manager.Manager { return g.mgr }
-func (g *GearContextImpl) ControlPlane() any        { return g.ctrl }
-func (g *GearContextImpl) ClusterPublicKey() []byte { return g.clusterPubKey }
+func (g *GearContextImpl) Emitter() sdk.PortEmitter { return g.emitter }
+
+// Bindings implements sdk.BindingsProvider: the resolved terminus of each of
+// this gear's output ports, from the activation-time wire-graph walk.
+func (g *GearContextImpl) Bindings() map[string]sdk.PortBinding { return g.bindings }
+func (g *GearContextImpl) Config() map[string]any               { return g.cfg }
+func (g *GearContextImpl) GearName() string                     { return g.name }
+func (g *GearContextImpl) MachineID() uuid.UUID                 { return g.machineID }
+func (g *GearContextImpl) Logger() *slog.Logger                 { return g.logger }
+func (g *GearContextImpl) IDGen() sdk.IDGenerator               { return g.idGen }
+func (g *GearContextImpl) Bus() bus.Bus                         { return g.bus }
+func (g *GearContextImpl) Manager() manager.Manager             { return g.mgr }
+func (g *GearContextImpl) ControlPlane() any                    { return g.ctrl }
+func (g *GearContextImpl) ClusterPublicKey() []byte             { return g.clusterPubKey }
 
 // ApplyScenario diffs and applies the scenario.
 func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err error) {
@@ -158,6 +287,13 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err
 		}
 	}
 
+	// 1c. Resolve port termini (static walk over the wire graph) so gears can
+	// bind availability sensing to the right signal source via their context.
+	portBindings := computeBindings(sc, m.rackName, gearDeploy, func(gearType string) sdk.TerminusKind {
+		man, _ := m.factory.Manifest(gearType)
+		return man.Terminus
+	})
+
 	// 2. Identify Gears for this Rack
 	for _, gSpec := range sc.Gears {
 		target, _ := gSpec.Deploy.(string)
@@ -170,6 +306,13 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err
 		gear, err = m.factory.Create(gSpec.Type)
 		if err != nil {
 			return fmt.Errorf("create gear %s error: %w", gSpec.Name, err)
+		}
+
+		// Validate the gear config against its manifest schema (ADR 0045), so
+		// a bad value or a missing required field fails activation here rather
+		// than misbehaving at runtime.
+		if err = m.factory.ValidateConfig(gSpec.Type, gSpec.Config); err != nil {
+			return fmt.Errorf("gear %s: %w", gSpec.Name, err)
 		}
 
 		// 3b. Generate Port IDs (Implicit In/Out for Phase 3)
@@ -193,11 +336,6 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err
 			outID = m.idGen.NextEntityID(idgen.EntityPortOutput)
 		}
 
-		m.gearPorts[gSpec.Name] = map[string]uuid.UUID{
-			"in":  inID,
-			"out": outID,
-		}
-
 		// 3c. Generate or Use Gear ID (Prefer Spec ID if from Mixer)
 		var gearID uuid.UUID
 		if gSpec.ID != uuid.Nil {
@@ -205,7 +343,16 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err
 		} else {
 			gearID = m.idGen.NextEntityID(idgen.EntityGear)
 		}
+
+		// gearPorts/gearIDs are read on the emit path and the subscribe
+		// handler without m.mu, so mutate them under portsMu (their sole guard).
+		m.portsMu.Lock()
+		m.gearPorts[gSpec.Name] = map[string]uuid.UUID{
+			"in":  inID,
+			"out": outID,
+		}
 		m.gearIDs[gSpec.Name] = gearID
+		m.portsMu.Unlock()
 
 		// 4. Init Gear
 		gCtx := &GearContextImpl{
@@ -218,6 +365,8 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err
 			bus:           m.bus,
 			mgr:           m.mgr,
 			clusterPubKey: m.clusterPubKey,
+			emitter:       &portEmitter{m: m, gear: gSpec.Name},
+			bindings:      portBindings[gSpec.Name],
 		}
 
 		// MANDATORY: Check for NATS core before initializing Control Plane
@@ -236,31 +385,48 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err
 
 	// 5. Wire Up (Subscriptions)
 	for _, wire := range sc.Wires {
-		toGear, toPort := parsePortRef(wire.To)
+		toRack, toGear, toPort := parsePortRef(wire.To)
 
+		// An explicit destination rack (rack.gear.port) that is not this rack
+		// belongs to another rack's activation.
+		if toRack != "" && toRack != m.rackName {
+			continue
+		}
 		targetGear, check := m.activeGears[toGear]
 		if !check {
 			continue
 		}
 
-		// Get Port ID for "in" (assuming toPort maps to "in" for simple gears, or verify)
-		// For io_tcp, "in" is implicit listener or Process target.
-		// If wire.To is "gateway.in", we use "in" ID.
-		portID := m.gearPorts[toGear]["in"]
-		// If explicit port logic exists, lookup by toPort.
-		if id, ok := m.gearPorts[toGear][toPort]; ok {
-			portID = id
+		// Resolve the input port. Default to "in" when the wire omits it.
+		// A PortedGear accepts any named input port and is told the
+		// arrival port. A plain gear cannot distinguish inputs, so wiring a
+		// role-bearing named input (in_<role>, e.g. in_reply) to one is an
+		// ACTIVATION ERROR rather than a silent reroute to "in", which used to
+		// mask mis-wired scenarios. Plain "in"/"out" endpoints are unchanged.
+		inPort := toPort
+		if inPort == "" {
+			inPort = "in"
 		}
+		ported, isPorted := targetGear.(sdk.PortedGear)
+		if !isPorted && strings.HasPrefix(inPort, "in_") {
+			return fmt.Errorf("wire %s -> %s: gear %q (%T) is not a multi-port gear and cannot receive on named input port %q",
+				wire.From, wire.To, toGear, targetGear, inPort)
+		}
+		portID := m.portID(toGear, inPort)
 
-		// Resolve Source Rack for the 'From' endpoint
-		fromGear, _ := parsePortRef(wire.From)
-		sourceRack := gearDeploy[fromGear]
+		// Resolve the 'From' endpoint. An explicit rack (rack.gear.port) wins;
+		// otherwise the gear's deploy target; otherwise the local rack. The
+		// subject is always the three-level flux.msg.<rack>.<gear>.<port>.
+		fromRack, fromGear, fromPort := parsePortRef(wire.From)
+		sourceRack := fromRack
 		if sourceRack == "" {
-			// Gear without explicit deploy target runs on the local rack.
+			sourceRack = gearDeploy[fromGear]
+		}
+		if sourceRack == "" {
 			sourceRack = m.rackName
 		}
 
-		subject := fmt.Sprintf("flux.msg.%s.%s", sourceRack, wire.From)
+		subject := fmt.Sprintf("flux.msg.%s.%s.%s", sourceRack, fromGear, fromPort)
 
 		// Determine Wire Label (ID vs Name)
 		wireLabel := fmt.Sprintf("%s -> %s", wire.From, wire.To)
@@ -288,7 +454,7 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err
 
 			// Append Hop (Arrival at Target Port)
 			msg.Path = append(msg.Path, &fluxmsg.Hop{
-				GearID: m.gearIDs[toGear],
+				GearID: m.gearID(toGear),
 				PortID: portID,
 				TSNano: time.Now().UnixNano(),
 			})
@@ -328,7 +494,10 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err
 			defer span.End()
 
 			start := time.Now()
-			// Panic Recovery Middleware (Technical Audit May 2026)
+			// Panic Recovery Middleware (Technical Audit May 2026).
+			// A PortedGear is driven via ProcessPort with the arrival
+			// port and emits through its PortEmitter, so it produces no return
+			// value here (resp stays nil). A plain gear uses Process.
 			var resp *fluxmsg.FluxMsg
 			var pErr error
 			func() {
@@ -342,7 +511,11 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err
 						pErr = fmt.Errorf("gear panic: %v", r)
 					}
 				}()
-				resp, pErr = targetGear.Process(processCtx, msg)
+				if isPorted {
+					pErr = ported.ProcessPort(processCtx, inPort, msg)
+				} else {
+					resp, pErr = targetGear.Process(processCtx, msg)
+				}
 			}()
 			duration := float64(time.Since(start).Microseconds()) / 1000.0 // Record in ms for consistency with metric name
 
@@ -351,7 +524,7 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err
 				metricCtx := ctx
 				attrs := metric.WithAttributes(
 					attribute.String("gear", toGear),
-					attribute.String("flux.id", m.gearIDs[toGear].String()),
+					attribute.String("flux.id", m.gearID(toGear).String()),
 					attribute.String("flux.name", toGear),
 				)
 
@@ -368,39 +541,14 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err
 				return
 			}
 
+			// A plain gear's Process return goes out the default "out" port.
+			// PortedGears emit their own results via the PortEmitter, so resp
+			// is nil for them.
 			if resp != nil {
 				if m.debug {
 					m.logger().Debug("FluxMsg processed", "flux_id", resp.FluxID.String())
 				}
-
-				// Resolve Out Subject for this gear
-				outSubject := fmt.Sprintf("flux.msg.%s.%s.out", m.rackName, toGear)
-
-				// Resolve Out Port ID
-				outPortID := m.gearPorts[toGear]["out"]
-
-				// Append Hop (Departure from Out Port)
-				resp.Path = append(resp.Path, &fluxmsg.Hop{
-					GearID: m.gearIDs[toGear],
-					PortID: outPortID,
-					TSNano: time.Now().UnixNano(),
-				})
-
-				// INSTRUMENTATION: Gear Output
-				if tm := telemetry.GetMetrics(); tm != nil {
-					metricCtx := timeoutCtx
-					attrs := metric.WithAttributes(
-						attribute.String("gear", toGear),
-						attribute.String("flux.id", m.gearIDs[toGear].String()),
-						attribute.String("flux.name", toGear),
-					)
-					tm.GearMessagesOut.Add(metricCtx, 1, attrs)
-				}
-
-				// Publish Response (Continues Trace)
-				if pubErr := m.bus.Publish(processCtx, outSubject, resp); pubErr != nil {
-					m.logger().Error("emit failed for response", "gear", toGear, "error", pubErr)
-				}
+				_ = m.publishPort(processCtx, toGear, "out", resp)
 			}
 		})
 		if err != nil {
@@ -424,95 +572,13 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err
 	// 6. Start Gears
 	for name, g := range m.activeGears {
 		name, g := name, g // Shadow variables for closure safety
-		outSubject := fmt.Sprintf("flux.msg.%s.%s.out", m.rackName, name)
 
-		// Port ID for implicit out
-		portID := m.gearPorts[name]["out"]
-
-		// Gear EntityID? We don't have it explicitly stored/assigned here yet,
-		// but we can generate one or assume one.
-		// For Hop, we need GearID.
-		// Let's generate a GearID too? Or retrieve?
-		// User requirement: "fluxEntityIDs assigned".
-		// I'll add Gear ID generation too.
-
+		// The source-gear emit callback is sugar for emitting on the default
+		// "out" port. All emit paths (this, Process returns, and the named-port
+		// PortEmitter) funnel through publishPort, which is recover-guarded,
+		// nil-safe, hop-stamped and instrumented.
 		emitFunc := func(msg *fluxmsg.FluxMsg) {
-			// Ensure FluxID exists
-			if msg.FluxID == uuid.Nil {
-				id, _ := m.idGen.NextFluxID()
-				msg.FluxID = id
-			}
-
-			// Append Hop
-			msg.Path = append(msg.Path, &fluxmsg.Hop{
-				GearID: m.gearIDs[name],
-				PortID: portID,
-				TSNano: time.Now().UnixNano(),
-			})
-
-			// TRACE Logging: Bus Emit (Port Out)
-			if m.logger().Enabled(context.Background(), logger.LevelTrace) {
-				m.logger().Log(context.Background(), logger.LevelTrace, "Bus Emit",
-					"flux_id", msg.FluxID.String(),
-					"gear", name,
-					"port_id", portID.String(),
-					"subject", outSubject,
-					"payload_hex", fmt.Sprintf("0x%x", msg.RawPayload),
-					"meta", fmt.Sprintf("%v", msg.Metadata),
-					"path", formatHops(msg.Path),
-				)
-			}
-
-			// INSTRUMENTATION: Gear Output
-			if tm := telemetry.GetMetrics(); tm != nil {
-				metricCtx := context.Background()
-				attrs := metric.WithAttributes(
-					attribute.String("gear", name),
-					attribute.String("flux.id", m.gearIDs[name].String()),
-					attribute.String("flux.name", name),
-				)
-				tm.GearMessagesOut.Add(metricCtx, 1, attrs)
-			}
-
-			// Publish needs context. Where do we get it?
-			// EmitFunc is usually called from internal goroutines.
-			// We should probably encourage using context in EmitFunc or assume Background?
-			// Actually the Start(..., emit) signature does not provide ctx to emit.
-			// Ideally, emit should take context. But keeping SDK stable:
-			// We validly assume that a Source emit starts a NEW Trace (Root Span) or continues if the goroutine has one.
-			// Since we don't pass ctx to emit, we use Background().
-			// LIMITATION: Source Gears that are "Processors" calling emit() asynchronously lose context unless they capture it.
-			// BUT: NativeGear.Process returns *FluxMsg, so that path is synchronous/handled by runtime above.
-			// So Emit() is mostly for "Source" gears (Active I/O).
-			// Active Sources create ROOT spans. So Background is correct starting point.
-			// We can wrap it in a "Source Span" here.
-			// Start a Root Span for this emission (Source Gear)
-			// Since SDK emit signature doesn't support context, we start a new trace here.
-			// This handles Source Gears correctly. For processing gears using emit asynchronously,
-			// this will restart the trace (limitation of current SDK).
-			tracer := otel.GetTracerProvider().Tracer("fluxrig/runtime")
-			spanName := fmt.Sprintf("gear_output %s", name)
-
-			emitCtx, span := tracer.Start(context.Background(), spanName,
-				trace.WithSpanKind(trace.SpanKindProducer),
-				trace.WithAttributes(
-					attribute.String("gear.name", name),
-					attribute.String("messaging.system", "nats"),
-					attribute.String("messaging.destination", outSubject),
-				),
-			)
-			defer span.End()
-
-			if pubErr := m.bus.Publish(emitCtx, outSubject, msg); pubErr != nil {
-				if tm := telemetry.GetMetrics(); tm != nil {
-					metricCtx := context.Background()
-					attrs := metric.WithAttributes(attribute.String("gear", name))
-					tm.GearErrors.Add(metricCtx, 1, attrs) // Count emit errors as gear errors? or just log?
-					// Usually emit error is platform error, not gear logic error.
-					// But impact is gear failed to processing.
-				}
-				m.logger().Error("emit failed", "gear", name, "error", pubErr)
-			}
+			_ = m.publishPort(context.Background(), name, "out", msg)
 		}
 
 		if err = g.Start(ctx, emitFunc); err != nil {
@@ -592,16 +658,34 @@ func (m *Manager) stopAll() {
 		m.logger().Debug("gear stopped", "name", name)
 	}
 	m.activeGears = make(map[string]sdk.NativeGear)
+	// gearPorts/gearIDs are read without m.mu on the emit path; reset under
+	// portsMu (their sole guard) so a concurrent emit cannot race the reload.
+	m.portsMu.Lock()
 	m.gearPorts = make(map[string]map[string]uuid.UUID)
 	m.gearIDs = make(map[string]uuid.UUID)
+	m.portsMu.Unlock()
 	m.hotSubjects = make(map[string]chan struct{})
 }
 
-func parsePortRef(ref string) (string, string) {
-	if idx := strings.LastIndex(ref, "."); idx != -1 {
-		return ref[:idx], ref[idx+1:]
+// parsePortRef splits a wire endpoint into (rack, gear, port). Every segment is
+// dot-free (port names may not contain dots), so the level is unambiguous by
+// segment count:
+//
+//	"gear.port"       -> ("",   gear, port)  rack implied by the gear's deploy
+//	"rack.gear.port"  -> (rack, gear, port)  explicit rack / replica instance
+//
+// A bare "gear" yields empty rack and port.
+func parsePortRef(ref string) (rack, gear, port string) {
+	parts := strings.Split(ref, ".")
+	switch len(parts) {
+	case 2:
+		return "", parts[0], parts[1]
+	case 3:
+		return parts[0], parts[1], parts[2]
+	default:
+		// Malformed (1 or >3 segments); validation rejects these upstream.
+		return "", parts[0], strings.Join(parts[1:], ".")
 	}
-	return ref, ""
 }
 
 func (m *Manager) waitForConvergence(ctx context.Context) error {

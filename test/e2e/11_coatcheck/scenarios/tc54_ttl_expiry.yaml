@@ -28,8 +28,8 @@ gears:
     deploy: "proxy-rack"
     config:
       ports:
-        inputs: ["bento_ttl.in"]
-        outputs: ["bento_ttl.out"]
+        inputs: ["in"]
+        outputs: ["out"]
       bento:
         pipeline:
           processors:

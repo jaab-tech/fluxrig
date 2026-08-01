@@ -6,7 +6,21 @@ package io
 import (
 	"encoding/hex"
 	"fmt"
+	"net"
+	"strings"
+	"time"
 )
+
+// setReadDeadline arms a read deadline of d from now, treating a non-positive d
+// as "no deadline" (a zero time). This distinguishes the idle wait for the next
+// frame (IdleTimeout) from the bounded read of a frame already in progress
+// (ReadTimeout): a naive time.Now().Add(0) would fire immediately.
+func setReadDeadline(conn net.Conn, d time.Duration) error {
+	if d <= 0 {
+		return conn.SetReadDeadline(time.Time{})
+	}
+	return conn.SetReadDeadline(time.Now().Add(d))
+}
 
 // FrameInfo holds metadata extracted during heuristic validation.
 type FrameInfo struct {
@@ -376,6 +390,22 @@ func buildVisaHeader(cfg *Config, dynSrc, dynDst string, payloadLen int) []byte 
 	// h[21] = User Information
 
 	return h
+}
+
+// decodeRawHeader returns the protocol-header bytes to prepend on egress from
+// its metadata form. The server stores a preserved header hex-encoded
+// ("hex:<hex>", via SetMetadataBytes); some paths store the raw string. Without
+// decoding the hex form, egress would prepend the literal ASCII "hex:..."
+// instead of the original bytes, so a caller (e.g. a load tool measuring RTT
+// from its own header) could not read it back.
+func decodeRawHeader(v string) []byte {
+	if s, ok := strings.CutPrefix(v, "hex:"); ok {
+		if b, err := hex.DecodeString(s); err == nil {
+			return b
+		}
+		return nil
+	}
+	return []byte(v)
 }
 
 // hexToBytesFixed decodes hex string to N bytes. Pads/Truncates if needed.

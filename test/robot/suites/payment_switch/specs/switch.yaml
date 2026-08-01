@@ -1,0 +1,53 @@
+# Copyright (c) 2026 JAAB Tech SAS, Uruguay
+# SPDX-License-Identifier: Apache-2.0
+#
+# Payment-switch validation SDL spec. It byte-matches the wire format the
+# fluxrig ISO 8583 load tool speaks (cmd/iso8583-tool getEchoSpec, ASCII mode):
+# MTI + primary bitmap + fields 7, 11, 70, all ASCII, numeric fields left-
+# padded with '0'. Response-side fields 39 (response code) and 41 (terminal id)
+# are added so the processor simulator can author a reply.
+meta:
+  name: "payment_switch"
+  version: "1.0.0"
+spec:
+fields:
+  0:
+    label: "MTI"
+    type: "numeric"
+    length: 4
+    enc: "ascii"
+  1:
+    label: "Bitmap"
+    type: "binary"
+    length: 8
+    enc: "binary"
+  7:
+    label: "Transmission Date & Time"
+    type: "numeric"
+    length: 10
+    alias: "trans_datetime"
+    enc: "ascii"
+  11:
+    label: "STAN"
+    type: "numeric"
+    length: 6
+    alias: "stan"
+    enc: "ascii"
+  39:
+    label: "Response Code"
+    type: "alpha"
+    length: 2
+    alias: "response_code"
+    enc: "ascii"
+  41:
+    label: "Terminal ID"
+    type: "alpha"
+    length: 8
+    alias: "terminal_id"
+    enc: "ascii"
+  70:
+    label: "Network Management Information Code"
+    type: "numeric"
+    length: 3
+    alias: "network_code"
+    enc: "ascii"

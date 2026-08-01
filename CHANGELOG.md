@@ -14,11 +14,46 @@ All notable changes to the **fluxrig** project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Phase 4: scale & hardening
+
+| Version | Date | Status | Summary |
+| :--- | :--- | :--- | :--- |
+| [Unreleased](#unreleased) | | Active | (next release) |
+| [v0.7.0](#v070) | 2026-08-01 | Delivered | Payment switch: Conductor gear, gear manifests, ISO 8583 TLS |
+
+
+## [Unreleased] {#unreleased}
+### Added
+- 
+
+## [v0.7.0] - 2026-08-01 {#v070}
+
+The payment-switch release: the **Conductor** transaction switch, a manifest system that makes every gear self-describing, and native TLS on the ISO 8583 I/O path.
+
+### Added
+- **Conductor gear (transaction switch)**: routes each request across a destination tree of strategy nodes (`failover`, `round_robin`, `least_loaded`) whose leaves are output ports, correlates the reply under a ticket, and surfaces timeouts on a dedicated `error` port. Availability sensing binds each local destination to its uplink link-state. Validated end-to-end by the `payment_switch` e2e and the Conductor stress and chaos Robot suites.
+- **Valet correlation engine**: the local-by-default ticket store behind the Conductor's reply matching, with per-ticket TTLs and idempotent redemption.
+- **Cross-Conductor handoff**: a request can exit one Conductor and its reply return through another, routed by an in-band origin stamp, so active/active multi-region topologies need no shared session state.
+- **Named multi-port gear I/O**: gears declare multiple named input/output ports; the Bento gear honors every declared output port and fails loudly on an ambiguous multi-output config.
+- **Gear manifests**: every gear publishes a manifest (identity, ports, config JSON Schema, terminus). The runtime validates a gear's config against its schema at activation, the Mixer API serves the manifest catalog, and `fluxrig gears doc` generates the gear reference documentation from it.
+- **Native TLS / mTLS on `io_iso8583`**, plus connection link-state signals (`conn.up` / `conn.down`) on the control plane that drive Conductor availability sensing.
+- **`fluxrig scenario viz`**: generates an interactive LikeC4 topology model (zones, racks, gears, sockets, the Snake) from a scenario file.
+- **Lean Rack build**: `-tags nobento` compiles a Rack without the Bento gear for minimal-footprint deployments.
+
+### Changed
+- **Port addressing**: port names are dot-free and wires address the fully-qualified `rack.gear.port`, so a wire endpoint is unambiguous across a multi-rack topology.
+
+### Fixed
+- **Reply-correlation timeout under load**: JetStream deduplication is now keyed per subject, fixing a Conductor timeout where distinct requests collided on the dedup key.
+- **Rack stability**: panics on the gear `emit` path are recovered and nil emits dropped, so a misbehaving source gear can no longer crash the Rack.
+- **Conductor field resolution**: correlation, match, and park fields resolve as dotted paths (e.g. `iso8583.field.11`) consistently.
+- **Loud topology validation**: scenario topology inconsistencies now fail at load instead of surfacing later as runtime errors.
+- **Gear schema completeness**: the `io_tcp` and `bento` config schemas now declare every field the gears actually accept (previously undocumented options such as `io_tcp` delimiter framing and `bento` `log_level`).
+
 ## Phase 3: open & flexible logic
 
 | Version | Date | Status | Summary |
 | :--- | :--- | :--- | :--- |
-| [Unreleased](#unreleased) | | Active | Feature expansion ({{VERS}}-dev) |
 | [v0.6.1](#v061) | 2026-07-20 | Delivered | Wasm runtime, supply chain security, polyglot gears |
 | [v0.6.0](#v060) | 2026-06-06 | Delivered | Release metadata only, no code changes |
 | [v0.5.0](#v050) | 2026-05-07 | Delivered | Sovereign identity (UUID v7) & telemetry hardening |
@@ -28,16 +63,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 | [v0.4.2](#v042) | 2026-02-15 | Delivered | Spec Management & E2E Automation |
 | [v0.4.1](#v041) | 2026-02-09 | Delivered | Stateless Context & I/O Decoupling |
 | [v0.4.0](#v040) | 2026-02-01 | Delivered | ISO8583 Native Gear & Telemetry QoS |
-| [v0.3.0](#v030) | 2026-01-21 | Delivered | Bento Integration & Load Testing |
+| [v0.3.0](#v030) | 2026-01-08 | Delivered | Bento Integration & Load Testing |
 
-
-<a name="unreleased"></a>
-## [Unreleased] ({{VERS}}-dev)
-#### Added
-- 
-
-<a name="v061"></a>
-## [v0.6.1] - 2026-07-20
+## [v0.6.1] - 2026-07-20 {#v061}
 ### Added
 - **Wazero Integration**: Implemented a secure, native Wasm execution environment using `wazero`.
 - **Wasm Supply Chain Security**: Embedded Ed25519 signatures within `.wasm` modules with Mixer-level trust roots and countersignature enforcement prior to Rack execution.
@@ -45,31 +73,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **PKI & Catalog CLI**: Introduced `fluxrig keys gen-cluster`, `fluxrig wasm sign`, and `fluxrig wasm import` commands.
 - **Path Sanitization**: Added `pkg/utils/path` to centralize traversal-safe path handling.
 
-### Changed
-- **Security & Linting Hardening**: Resolved remaining Gosec and Staticcheck warnings, achieving a zero-warning build state.
-- **Dependencies**: Upgraded the Go dependency group.
-
-<a name="v060"></a>
-## [v0.6.0] - 2026-06-06
+## [v0.6.0] - 2026-06-06 {#v060}
 ### Changed
 - Release metadata only. This tag contains no source changes relative to `v0.5.0`; the Wasm work intended for it was not merged and shipped in `v0.6.1` instead.
 
-<a name="v050"></a>
-## [v0.5.0] - 2026-05-07
-#### Changed
+## [v0.5.0] - 2026-05-07 {#v050}
+### Changed
 - **Sovereign Identity Plane (v0.5.0 Foundation)**: Migrated the entire platform identity system to **128-bit UUID v7 (RFC 9562)**. This enhances entropy, ensures global uniqueness without centralized coordination, and provides time-ordered sequence integrity for high-performance storage indexes.
 - **Deduplication Logic**: Updated NATS JetStream deduplication to utilize 128-bit identifiers, ensuring consistent exactly-once delivery across complex telemetry pipelines.
-- **Telemetry Hardening**: Standardized dotted naming schema (e.g., `fluxrig.gear.messages_in`) across OTel, Prometheus, and DuckDB.
+- **Telemetry Hardening**: Standardized the dotted metric naming schema (e.g., `flux.gear.messages_in`) across OTel, Prometheus, and DuckDB.
 - **Directional Monitoring**: Split unified I/O counters into distinct Inbound and Outbound channels for precise protocol translation metrics.
 - **Resource Guardrails**: Implemented mandatory `MaxHops` (64) and `MaxPayloadSize` (2MB) validation in `fluxmsg` to prevent bus exhaustion and "poison pill" scenarios.
 - **Concurrency Resilience**: Integrated global `PanicMiddleware` to ensure Rack stability during individual Gear failures and hardened mutex locking for atomic hot-reloads.
-- **Mixer Reliability**: Replaced fragile telemetry discovery with a robust recursive traversal engine, ensuring 100% visibility of historical Parquet data via the API.
-- **Certification & Core Test Hardening**: Achieved 100% pass rate in critical certification shards (Mixer, PKI, ISO8583 IO).
-- **Certified Coverage**: Consolidated core code coverage reached 60.1%.
-- **Enrollment Architecture**: Implemented configuration-driven rack adoption with secure nonce-based passports.
-- **CBOR Migration**: Transitioned internal wire-format to deterministic CBOR for 100% binary stability.
-- **Data-Plane Integrity**: Enforced technical UTF-8 validation and hex-encoded binary metadata handling.
-- **IO Stabilization**: Implemented robust connection polling and rate-limited background WAL replay.
+- **Mixer Reliability**: Replaced fragile telemetry discovery with a robust recursive traversal engine, ensuring full visibility of historical Parquet data via the API.
 - **Security Hardening (CodeQL Certification)**:
     - Fixed high-severity path traversal in scenario management by implementing robust name sanitization.
     - Hardened TLS configuration in the `snake` server with CA-based client verification support.
@@ -81,51 +97,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > - **Storage**: Existing DuckDB databases (V3 and below) and cached `.flux` state files are incompatible with this version.
 > - **API**: REST handlers and NATS topics have transitioned from decimal integer IDs to standard UUID string representations.
 
-<a name="v043"></a>
-## [v0.4.3] - 2026-02-19
-### Changed
-- **License Headers**: Standardized all source files to SPDX format.
+## [v0.4.5] - 2026-04-29 {#v045}
+### Added
+- **Zero-Config Getting Started**: Global Gears (a gear with no `deploy` target runs on every connected Rack), enabling scenarios that work without knowing Rack names in advance.
 
-<a name="v042"></a>
-## [v0.4.2] - 2026-02-12
+## [v0.4.4] - 2026-04-23 {#v044}
+### Added
+- **Enrollment Architecture**: Implemented configuration-driven rack adoption with secure nonce-based passports.
+- **CBOR Migration**: Transitioned internal wire-format to deterministic CBOR for binary stability.
+- **Data-Plane Integrity**: Enforced technical UTF-8 validation and hex-encoded binary metadata handling.
+- **IO Stabilization**: Implemented robust connection polling and rate-limited background WAL replay.
+
+## [v0.4.3] - 2026-02-19 {#v043}
+### Added
+- **Documentation Website**: Docusaurus-based documentation site with diagram support and full-text search.
+
+## [v0.4.2] - 2026-02-15 {#v042}
 ### Added
 - **Spec & Scenario Manager**: CAS-backed spec/scenario management with CLI (`fluxrig spec`, `fluxrig scenario`) and API integration.
 - **E2E Test Suite**: Comprehensive test runner for spec lifecycle, API scenarios, and concurrent access.
 
-### Changed
-- **E2E Tests**: Renamed from flat naming to numbered convention (`01_simple/`, `09_io_tcp/`, etc.).
-- **Gear Rename**: `io_tcp` → `simple_tcp`.
-
-### Removed
-- **Coat Check Gear**: Removed in favor of Spec Manager pattern.
-- **Bus KV**: Removed (~3,084 lines deleted across 63 files).
-
-<a name="v041"></a>
-## [v0.4.1] - 2026-02-09
+## [v0.4.1] - 2026-02-09 {#v041}
 ### Added
 - **Coat Check Pattern**: Implemented architectural pattern to handle "Detached State" during connection handovers.
-- **IO Refactor**: Decoupled TCP connection management from protocol logic.
+- **Bus KV**: Implemented the `Bus.KV()` key-value interface with a NATS backend, backing the Coat Check ticket store.
 
-<a name="v040"></a>
-## [v0.4.0] - 2026-02-01
+### Changed
+- **IO Refactor**: Decoupled TCP connection management from protocol logic.
+- **Gear Rename**: `simple_tcp` → `io_tcp` (renamed as part of the IO refactor above).
+
+## [v0.4.0] - 2026-02-01 {#v040}
 ### Added
 - **ISO8583 Native Gear (Alpha)**: First release of the high-performance payment switch gear.
 - **Telemetry Governor**: Introduced QoS constraints for telemetry ingress to protect business traffic.
 
-<a name="v030"></a>
-## [v0.3.0] - 2026-01-05
+## [v0.3.0] - 2026-01-08 {#v030}
 ### Added
-- **Bento Integration**: Native support for the `warpstreamlabs/bento` ecosystem, enabling 100+ I/O connectors (AWS, SQL, Kafka, File).
+- **Bento Integration**: Native support for the `warpstreamlabs/bento` ecosystem, enabling the Bento connector ecosystem. The standard binary ships the Pure Logic and Local I/O sets; institutional connectors (Kafka, SQL, AWS) require a custom build.
 - **Load Testing Suite**: Integrated `e2e_load` capabilities for stress testing.
 
 ## Phase 2: core runtime
 
 | Version | Date | Status | Summary |
 | :--- | :--- | :--- | :--- |
-| [v0.2.0](#v020) | 2025-12-28 | Delivered | Observability Stack & TLS Foundations |
+| [v0.2.0](#v020) | 2026-01-05 | Delivered | Observability Stack & TLS Foundations |
 
-<a name="v020"></a>
-## [v0.2.0] - 2026-01-08
+## [v0.2.0] - 2026-01-05 {#v020}
 ### Added
 - **Observability Stack**: Full OTel integration (Metrics, Traces) with DuckDB backend.
 - **Configuration V2**: Unified TOML-based configuration schema.
@@ -135,16 +152,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 | Version | Date | Status | Summary |
 | :--- | :--- | :--- | :--- |
-| [v0.1.0](#v010) | 2025-12-12 | Delivered | Initial engine architecture and Snake Protocol |
+| [v0.1.0](#v010) | 2025-12-27 | Delivered | Initial engine architecture and Snake Protocol |
 
-<a name="v010"></a>
-## [v0.1.0] - 2025-12-28
+## [v0.1.0] - 2025-12-27 {#v010}
 ### Added
 - **Foundation**: Initial release of the 4-Repo Architecture.
 - **Snake Protocol**: Secure tunneling implementation for Rack-to-Mixer connectivity.
 - **FluxMsg**: Canonical JSON schema for inter-gear communication.
 
-[Unreleased]: https://github.com/jaab-tech/fluxrig/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/jaab-tech/fluxrig/compare/v0.7.0...HEAD
+[v0.7.0]: https://github.com/jaab-tech/fluxrig/releases/tag/v0.7.0
 [v0.6.1]: https://github.com/jaab-tech/fluxrig/releases/tag/v0.6.1
 [v0.6.0]: https://github.com/jaab-tech/fluxrig/releases/tag/v0.6.0
 [v0.5.0]: https://github.com/jaab-tech/fluxrig/releases/tag/v0.5.0

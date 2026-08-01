@@ -53,6 +53,23 @@ type GearContext interface {
 
 	// ClusterPublicKey returns the public key of the Mixer that enrolled this Rack
 	ClusterPublicKey() []byte
+
+	// Emitter returns this gear's port emitter, for gears that route to named
+	// output ports or emit asynchronously (see PortEmitter). Filter gears that
+	// only return a single message from Process do not need it.
+	Emitter() PortEmitter
+}
+
+// PortEmitter emits messages out of a gear's named output ports.
+// It is safe to call from Process/ProcessPort and from a gear's own goroutines
+// (e.g. a correlation gear's timeout daemon). The runtime recovers panics on
+// the emit path, so a bad emission cannot crash the Rack.
+type PortEmitter interface {
+	// Emit sends msg out of the named port. Port names are hierarchical and
+	// dot-separated, with a reserved first segment: "out" (default), "out.<name>"
+	// for a specific destination, and "error" for abnormal outcomes.
+	// An unknown or unroutable port returns an error rather than misrouting.
+	Emit(port string, msg *fluxmsg.FluxMsg) error
 }
 
 // NativeGear defines the contract for Go-based components (Internal/Native Gears).
@@ -86,4 +103,25 @@ type NativeGear interface {
 	// Called when the Rack is shutting down or the Scenario is disabled.
 	// Should close listener sockets, file handles, etc.
 	Stop() error
+}
+
+// PortedGear is an optional interface a NativeGear may implement to receive the
+// arrival port of each message and route to named output ports.
+//
+// When a gear implements PortedGear, the runtime delivers each message via
+// ProcessPort (carrying the port it arrived on, e.g. "in" vs "in.reply") and
+// the gear emits results through GearContext.Emitter() rather than returning
+// them. This lets a gear distinguish message roles by arrival port without
+// inspecting the payload, and fan results out to several named output ports.
+//
+// Gears that do not implement PortedGear keep the single-input Process path
+// unchanged.
+type PortedGear interface {
+	NativeGear
+
+	// ProcessPort handles a message that arrived on the named input port.
+	// Results are emitted via GearContext.Emitter(); the return is only an
+	// error (nil on success). Returning an error is logged and counted, it
+	// does not emit anything.
+	ProcessPort(ctx context.Context, port string, msg *fluxmsg.FluxMsg) error
 }

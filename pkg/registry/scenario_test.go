@@ -66,6 +66,70 @@ func TestScenario_Validate(t *testing.T) {
 			},
 			wantErr: "invalid wire source",
 		},
+		{
+			name: "Wire To Undefined Gear",
+			s: Scenario{
+				Meta:  ScenarioMeta{Version: "1.0"},
+				Gears: []GearSpec{{Name: "a", Type: "t"}},
+				Wires: []WireSpec{
+					{From: "a.out", To: "ghost.in"},
+				},
+			},
+			wantErr: `target gear "ghost" is not defined`,
+		},
+		{
+			name: "Wire From Undeclared Output Port",
+			s: Scenario{
+				Meta: ScenarioMeta{Version: "1.0"},
+				Gears: []GearSpec{
+					// Declares its output as the fully-qualified "bt.out" (the
+					// bug class): the wire's resolved port is "out", which the
+					// gear never publishes.
+					{Name: "bt", Type: "bento", Config: map[string]any{
+						"ports": map[string]any{"outputs": []any{"bt.out"}},
+					}},
+					{Name: "st", Type: "t"},
+				},
+				Wires: []WireSpec{
+					{From: "bt.out", To: "st.in"},
+				},
+			},
+			wantErr: `no declared output port "out"`,
+		},
+		{
+			name: "Wire To Undeclared Input Port",
+			s: Scenario{
+				Meta: ScenarioMeta{Version: "1.0"},
+				Gears: []GearSpec{
+					{Name: "a", Type: "t"},
+					{Name: "sink", Type: "bento", Config: map[string]any{
+						"ports": map[string]any{"inputs": []any{"in"}},
+					}},
+				},
+				Wires: []WireSpec{
+					{From: "a.out", To: "sink.ingress"}, // "ingress" not declared
+				},
+			},
+			wantErr: `no declared input port "ingress"`,
+		},
+		{
+			name: "Valid Declared Ports (bare names)",
+			s: Scenario{
+				Meta: ScenarioMeta{Version: "1.0"},
+				Gears: []GearSpec{
+					{Name: "gen", Type: "bento", Config: map[string]any{
+						"ports": map[string]any{"outputs": []any{"out"}},
+					}},
+					{Name: "sink", Type: "bento", Config: map[string]any{
+						"ports": map[string]any{"inputs": []any{"in"}},
+					}},
+				},
+				Wires: []WireSpec{
+					{From: "gen.out", To: "sink.in"},
+				},
+			},
+			wantErr: "",
+		},
 	}
 
 	for _, tt := range tests {

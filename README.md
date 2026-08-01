@@ -41,7 +41,7 @@ fluxrig uses a modular architecture inspired by the precision of a **Recording S
 > Want to see it in action immediately? Check out the **[5-Minute Quickstart](https://fluxrig.org/docs/tutorials/quickstart)** guide!
 
 ### Prerequisites
-*   **Go 1.25+**
+*   **Go 1.26+**
 *   **Make**
 *   **GCC/Clang** (Required for Mixer/DuckDB)
 *   **golangci-lint** (For contributors)

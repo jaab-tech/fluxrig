@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -624,5 +625,49 @@ func TestServer_StartFailure(t *testing.T) {
 	err := s.Start("999.999.999.999:80")
 	if err == nil {
 		t.Error("Expected error for invalid bind address, got nil")
+	}
+}
+
+func TestHandleGears(t *testing.T) {
+	s := NewServer(&MockRegistry{}, nil, nil, nil, nil, uuid.Nil, uuid.Nil, nil, nil)
+
+	// Catalog: every gear type with a manifest.
+	req := httptest.NewRequest("GET", "/api/v1/gears", nil)
+	w := httptest.NewRecorder()
+	s.handleGears(w, req)
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("gears catalog: status %d", w.Result().StatusCode)
+	}
+	var catalog []map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &catalog); err != nil {
+		t.Fatalf("decode catalog: %v", err)
+	}
+	if len(catalog) < 5 {
+		t.Fatalf("catalog too small: %d gears", len(catalog))
+	}
+
+	// One manifest by type.
+	req = httptest.NewRequest("GET", "/api/v1/gears/io_iso8583", nil)
+	req.SetPathValue("type", "io_iso8583")
+	w = httptest.NewRecorder()
+	s.handleGearManifest(w, req)
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("io_iso8583 manifest: status %d", w.Result().StatusCode)
+	}
+	var man map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &man); err != nil {
+		t.Fatalf("decode manifest: %v", err)
+	}
+	if man["type"] != "io_iso8583" || man["terminus"] != "io" {
+		t.Fatalf("unexpected manifest: %+v", man)
+	}
+
+	// Unknown type -> 404.
+	req = httptest.NewRequest("GET", "/api/v1/gears/nope", nil)
+	req.SetPathValue("type", "nope")
+	w = httptest.NewRecorder()
+	s.handleGearManifest(w, req)
+	if w.Result().StatusCode != http.StatusNotFound {
+		t.Fatalf("unknown gear: status %d, want 404", w.Result().StatusCode)
 	}
 }

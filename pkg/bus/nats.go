@@ -151,8 +151,17 @@ func (n *NatsBus) Publish(ctx context.Context, subject string, msg *fluxmsg.Flux
 		)
 	}
 
-	// 2. Send Bytes (Persistent) with Deduplication ID
-	msgID := fmt.Sprintf("%s-%d", msg.FluxID.String(), len(msg.Path))
+	// 2. Send Bytes (Persistent) with Deduplication ID.
+	// The dedup key must be unique per logical emission, not just per message:
+	// a fan-out gear (e.g. the Conductor) emits the SAME FluxID at the SAME hop
+	// count to more than one destination, and a parked-then-replayed request
+	// (a timeout re-emission of the original) shares FluxID and Path length with
+	// the outbound copy it was cloned from. Keying on FluxID+pathlen alone made
+	// those collide, so the second publish fell inside JetStream's dedup window
+	// and was silently dropped. Scoping by subject (as PublishRaw already does)
+	// keeps genuine same-message-same-destination idempotency while letting the
+	// same message reach distinct ports.
+	msgID := fmt.Sprintf("%s-%d-%s", msg.FluxID.String(), len(msg.Path), subject)
 
 	// 3. Inject Traces (OTel)
 	if ctx != nil {

@@ -45,6 +45,30 @@ bin/iso8583-tool: cmd/iso8583-tool/main.go
 	@mkdir -p bin
 	go build -o bin/iso8583-tool ./cmd/iso8583-tool
 
+# ── Lean variant (-tags nobento) ─────────────────────────────────────────────
+# The Bento gear is ~18MB of the ~32MB stripped Rack binary (~57%) and pulls
+# protobuf, cue, avro and gojq transitively. Deployments that do not use the
+# `bento` gear can ship these instead. A scenario declaring `type: bento` fails
+# loudly ("unknown gear type: bento") on a lean binary rather than misbehaving.
+bin/fluxrig-lite: catalog $(shell find cmd/fluxrig -name "*.go")
+	@echo "Building fluxrig-lite (no bento)..."
+	@mkdir -p bin
+	go build $(GO_FLAGS) -tags nobento -ldflags "$(LDFLAGS)" -o bin/fluxrig-lite ./cmd/fluxrig
+
+# Only the Rack needs a lean variant: the Mixer is the control plane and never
+# links pkg/gears (and therefore never links Bento), so a `nobento` Mixer is
+# byte-identical to the normal one.
+build-lite: bin/fluxrig-lite ## Build the lean Rack without the Bento gear
+	@echo "--------------------------------------------------"
+	@echo "Lean Build Complete (-tags nobento)"
+	@ls -lh bin/fluxrig-lite | awk '{printf "  %-28s %s\n", $$9, $$5}'
+	@echo "--------------------------------------------------"
+
+build-all-variants: build-bin build-lite ## Build both the full and lean Rack binaries
+	@echo "--------------------------------------------------"
+	@ls -lh bin/fluxrig bin/fluxrig-lite bin/fluxrig-mixer 2>/dev/null | awk '{printf "  %-28s %s\n", $$9, $$5}'
+	@echo "--------------------------------------------------"
+
 build: lint bin/fluxrig bin/fluxrig-mixer bin/iso8583-tool ## Build all binaries
 	@echo "--------------------------------------------------"
 	@echo "Build Complete (v$(VERSION))"
@@ -62,13 +86,26 @@ build-bin: bin/fluxrig bin/fluxrig-mixer bin/iso8583-tool ## Build all binaries 
 LOG_CATALOG   ?=
 OPENAPI_DEST  ?=
 STATIC_SYNC_DIR ?=
+GEAR_DOCS_DIR ?=
+
+gear-docs: build-bin ## Refresh AUTOGEN manifest sections in the gear reference docs
+	@if [ -z "$(GEAR_DOCS_DIR)" ]; then \
+		echo "Skipping gear docs (GEAR_DOCS_DIR not set — configure .env.local)"; \
+	else \
+		echo "Refreshing gear manifest docs in $(GEAR_DOCS_DIR)..."; \
+		./bin/fluxrig gears doc --write "$(GEAR_DOCS_DIR)"; \
+	fi
 
 catalog: ## Generate log message catalog
+	@# The redirect target MUST stay quoted. The shell parses this whole if/else
+	@# before running it, so an unquoted empty $(LOG_CATALOG) becomes `> ` — a
+	@# syntax error that kills the recipe even when the skip branch would be taken
+	@# (i.e. `make build` failed on any checkout without .env.local, such as CI).
 	@if [ -z "$(LOG_CATALOG)" ]; then \
 		echo "Skipping log catalog (LOG_CATALOG not set — configure .env.local)"; \
 	else \
 		echo "Generating log catalog..."; \
-		go run scripts/catalog_logs.go > $(LOG_CATALOG) || true; \
+		go run scripts/catalog_logs.go > "$(LOG_CATALOG)" || true; \
 	fi
 
 test: ## Run unit tests with race detection and coverage
@@ -234,11 +271,11 @@ iso8583-tool: ## Build iso8583-tool (Load Gen & Echo Server)
 	@echo "Building iso8583-tool..."
 	@go build -o bin/iso8583-tool ./cmd/iso8583-tool
 
-test-robot-perf: iso8583-tool ## Run Robot Performance Suite
+test-robot-perf: build-bin iso8583-tool ## Run Robot Performance Suite
 	@echo "Running Robot Performance Suite (Staged Load)..."
 	@./test/robot/run.sh test/robot/suites/iso8583/server_staged_load.robot
 
-test-robot-iso: iso8583-tool ## Run Robot ISO8583 Suite
+test-robot-iso: build-bin iso8583-tool ## Run Robot ISO8583 Suite
 	@echo "Running Robot ISO8583 Suite (Validation)..."
 	@./test/robot/run.sh test/robot/suites/iso8583/server_validation.robot
 
@@ -253,6 +290,10 @@ test-robot-topology: robot-prep build-bin ## Run Robot Topology Suite
 test-robot-telemetry: robot-prep build-bin ## Run Robot Telemetry Suite
 	@echo "Running Telemetry Coverage Test..."
 	@cd test/robot && ./run.sh suites/telemetry/force_log_coverage.robot
+
+test-robot-conductor: robot-prep build-bin iso8583-tool ## Run Robot Conductor Suite (payment switch: stress + chaos)
+	@echo "Running Conductor Stress + Chaos Suite (chaos needs toxiproxy-server on PATH)..."
+	@cd test/robot && ./run.sh suites/conductor
 
 test-robot: test-robot-iso test-robot-coatcheck test-robot-topology test-robot-telemetry ## Run all Robot Framework suites
 

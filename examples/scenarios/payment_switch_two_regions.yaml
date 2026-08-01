@@ -1,0 +1,430 @@
+meta:
+  name: "payment_switch_two_regions"
+  version: "1.0.0"
+  # East is the main region: it hosts the Mixer, so the diagram nests it there.
+  mixer_region: "east"
+
+racks:
+  - name: "rack-east"
+    labels:
+      region: "east"
+  - name: "rack-west"
+    labels:
+      region: "west"
+
+gears:
+  # ───────────────────────── Region east ─────────────────────────
+  - name: "terminals-east"
+    type: "io_iso8583"
+    deploy: "rack-east"
+    config:
+      mode: "server"
+      bind: ":8583"
+      frame_length_size: 2
+      frame_length_endian: "big"
+      encoding: "ascii"
+
+  - name: "decode-east"
+    type: "codec_iso8583"
+    deploy: "rack-east"
+    config:
+      spec_path: "specs/switch_v87.yaml"
+      direction: "decode"
+      on_error: "reject"
+
+  - name: "conductor-east"
+    type: "conductor"          # [Roadmap]
+    deploy: "rack-east"
+    config:
+      # This Conductor's name in the mesh. Stamped in-band (conductor.origin)
+      # on every routed request so a peer knows to return the finished
+      # response on out_response_east.
+      origin: "east"
+      # Correlation engine (valet). One store per Conductor.
+      valet:
+        store: "memory"          # memory | local_durable [Roadmap] | shared
+        default_ttl: "30s"       # open-ticket timeout (transaction deadline)
+        retain_after_close: "5s" # replay window for a lost-response retransmission
+      # The tuple that identifies one transaction (never a bare STAN, which wraps
+      # within a day): STAN + transmission date/time + acquirer + terminal.
+      correlation_key: ["iso8583.field.11", "iso8583.field.7", "iso8583.field.32", "iso8583.field.41"]
+      # Optional field parking: keep specific fields OFF a chosen leg and restore
+      # them on the reply. Demonstrated with an internal routing hint, NOT the
+      # PAN (a switch must send the PAN to the scheme to authorize). Parking is
+      # not tokenization (surrogate substitution is a separate, future gear).
+      park_fields: ["iso8583.field.62"]        # internal acquirer routing hint (private field)
+      # A destination is just an output port: local uplink legs and remote
+      # Conductors are addressed identically (there is no "peer" port kind). Each
+      # route picks its destination with a TREE: failover | round_robin |
+      # least_loaded compose freely; leaves are output ports. `out_west` is wired
+      # (below) to conductor-west.in, so "cross-region" is a wiring fact, not a
+      # config flag.
+      routes:
+        - name: "scheme-a"
+          match: { field: "iso8583.field.2", prefix: "4" }    # PAN range handled by scheme A
+          destination:
+            failover:
+              - least_loaded: ["out_scheme_a", "out_scheme_a2"]  # local pool
+              - "out_west"                                       # cross-region
+        - name: "scheme-b"
+          match: { field: "iso8583.field.2", prefix: "5" }    # PAN range handled by scheme B
+          destination:
+            failover:
+              - "out_scheme_b"
+              - "out_west"
+
+  - name: "encode-scheme-a-east"
+    type: "codec_iso8583"
+    deploy: "rack-east"
+    config: { spec_path: "specs/switch_v87.yaml", direction: "encode", on_error: "reject" }
+
+  - name: "uplink-scheme-a-east"
+    type: "io_iso8583"
+    deploy: "rack-east"
+    config:
+      mode: "client"
+      connect: "scheme-a.east.example:9001"
+      frame_length_size: 2
+      frame_length_endian: "big"
+      encoding: "ascii"
+      reconnect_wait: "2s"
+      tls:                                   # native ISO 8583 TLS/mTLS (implemented)
+        enabled: true
+        cert_file: "/etc/fluxrig/tls/scheme-a-east.crt"
+        key_file: "/etc/fluxrig/tls/scheme-a-east.key"
+        ca_file: "/etc/fluxrig/tls/scheme-a-ca.pem"
+
+  # Second scheme A connection (same scheme, second access point): its own
+  # encode+io leg, same client identity, same dialect.
+  - name: "encode-scheme-a2-east"
+    type: "codec_iso8583"
+    deploy: "rack-east"
+    config: { spec_path: "specs/switch_v87.yaml", direction: "encode", on_error: "reject" }
+
+  - name: "uplink-scheme-a2-east"
+    type: "io_iso8583"
+    deploy: "rack-east"
+    config:
+      mode: "client"
+      connect: "scheme-a-2.east.example:9001"
+      frame_length_size: 2
+      frame_length_endian: "big"
+      encoding: "ascii"
+      reconnect_wait: "2s"
+      tls:
+        enabled: true
+        cert_file: "/etc/fluxrig/tls/scheme-a-east.crt"
+        key_file: "/etc/fluxrig/tls/scheme-a-east.key"
+        ca_file: "/etc/fluxrig/tls/scheme-a-ca.pem"
+
+  - name: "encode-scheme-b-east"
+    type: "codec_iso8583"
+    deploy: "rack-east"
+    config: { spec_path: "specs/switch_v87.yaml", direction: "encode", on_error: "reject" }
+
+  - name: "uplink-scheme-b-east"
+    type: "io_iso8583"
+    deploy: "rack-east"
+    config:
+      mode: "client"
+      connect: "scheme-b.east.example:9002"
+      tpdu_enabled: true                     # scheme B frames with a TPDU header
+      frame_length_size: 2
+      frame_length_endian: "big"
+      encoding: "bcd"                        # and BCD encoding
+      reconnect_wait: "2s"
+      tls:
+        enabled: true
+        cert_file: "/etc/fluxrig/tls/scheme-b-east.crt"
+        key_file: "/etc/fluxrig/tls/scheme-b-east.key"
+        ca_file: "/etc/fluxrig/tls/scheme-b-ca.pem"
+
+  # Reply-path codecs, one per leg: each scheme speaks its own dialect, so each
+  # leg owns its decoder (this tutorial reuses one spec for simplicity; in
+  # production each leg loads its scheme's spec). Responses to the terminals
+  # share one encoder: there is only one terminal dialect.
+  - name: "decode-scheme-a-east"
+    type: "codec_iso8583"
+    deploy: "rack-east"
+    config: { spec_path: "specs/switch_v87.yaml", direction: "decode", on_error: "reject" }
+
+  - name: "decode-scheme-b-east"
+    type: "codec_iso8583"
+    deploy: "rack-east"
+    config: { spec_path: "specs/switch_v87.yaml", direction: "decode", on_error: "reject" }
+
+  - name: "encode-replies-east"
+    type: "codec_iso8583"
+    deploy: "rack-east"
+    config: { spec_path: "specs/switch_v87.yaml", direction: "encode", on_error: "reject" }
+
+  # Exception path: the Conductor emits the ORIGINAL structured message on its
+  # `error` port (never an authored message), with the reason in metadata
+  # (error.reason). This bento gear is where the decline is authored: an inline
+  # Bloblang mapping echoes the request, flips the MTI to its response value,
+  # and sets DE39, then hands the result to the same reply encoder as the happy
+  # path. (Bento mappings are inline; there is no external mapping file.)
+  - name: "decline-builder-east"
+    type: "bento"
+    deploy: "rack-east"
+    ports:
+      inputs: ["in"]
+      outputs: ["out"]
+    config:
+      bento:
+        pipeline:
+          processors:
+            - mapping: |
+                # `this` is the original structured request the Conductor parked;
+                # meta("error.reason") is timeout|no_destination|no_route|no_key|
+                # unmatched_reply; unlisted reasons fall to the default branch below.
+                root = this
+                # Response MTI = request MTI with the message-class bit set.
+                root.mti = match this.mti {
+                  "0100" => "0110"    # authorization
+                  "0200" => "0210"    # financial
+                  "0800" => "0810"    # network management
+                  _      => this.mti
+                }
+                # DE39 (response code) chosen from why the switch could not complete.
+                root."39" = match meta("error.reason") {
+                  "timeout"        => "68"   # response received too late
+                  "no_destination" => "91"   # issuer / switch inoperative
+                  "no_route"       => "30"   # format error (no route)
+                  _                => "96"   # system malfunction
+                }
+
+  # ───────────────────────── Region west ─────────────────────────
+  - name: "terminals-west"
+    type: "io_iso8583"
+    deploy: "rack-west"
+    config:
+      mode: "server"
+      bind: ":8583"
+      frame_length_size: 2
+      frame_length_endian: "big"
+      encoding: "ascii"
+
+  - name: "decode-west"
+    type: "codec_iso8583"
+    deploy: "rack-west"
+    config:
+      spec_path: "specs/switch_v87.yaml"
+      direction: "decode"
+      on_error: "reject"
+
+  - name: "conductor-west"
+    type: "conductor"          # [Roadmap]
+    deploy: "rack-west"
+    config:
+      origin: "west"
+      valet:
+        store: "memory"          # independent local store; NOT a shared bucket
+        default_ttl: "30s"
+        retain_after_close: "5s"
+      correlation_key: ["iso8583.field.11", "iso8583.field.7", "iso8583.field.32", "iso8583.field.41"]
+      park_fields: ["iso8583.field.62"]        # same internal routing hint, non-PAN
+      routes:
+        - name: "scheme-a"
+          match: { field: "iso8583.field.2", prefix: "4" }
+          destination:
+            failover:
+              - "out_scheme_a"
+              - "out_east"
+        - name: "scheme-b"
+          match: { field: "iso8583.field.2", prefix: "5" }
+          destination:
+            failover:
+              - "out_scheme_b"
+              - "out_east"
+
+  - name: "encode-scheme-a-west"
+    type: "codec_iso8583"
+    deploy: "rack-west"
+    config: { spec_path: "specs/switch_v87.yaml", direction: "encode", on_error: "reject" }
+
+  - name: "uplink-scheme-a-west"
+    type: "io_iso8583"
+    deploy: "rack-west"
+    config:
+      mode: "client"
+      connect: "scheme-a.west.example:9001"
+      frame_length_size: 2
+      frame_length_endian: "big"
+      encoding: "ascii"
+      reconnect_wait: "2s"
+      tls:
+        enabled: true
+        cert_file: "/etc/fluxrig/tls/scheme-a-west.crt"
+        key_file: "/etc/fluxrig/tls/scheme-a-west.key"
+        ca_file: "/etc/fluxrig/tls/scheme-a-ca.pem"
+
+  - name: "encode-scheme-b-west"
+    type: "codec_iso8583"
+    deploy: "rack-west"
+    config: { spec_path: "specs/switch_v87.yaml", direction: "encode", on_error: "reject" }
+
+  - name: "uplink-scheme-b-west"
+    type: "io_iso8583"
+    deploy: "rack-west"
+    config:
+      mode: "client"
+      connect: "scheme-b.west.example:9002"
+      tpdu_enabled: true
+      frame_length_size: 2
+      frame_length_endian: "big"
+      encoding: "bcd"
+      reconnect_wait: "2s"
+      tls:
+        enabled: true
+        cert_file: "/etc/fluxrig/tls/scheme-b-west.crt"
+        key_file: "/etc/fluxrig/tls/scheme-b-west.key"
+        ca_file: "/etc/fluxrig/tls/scheme-b-ca.pem"
+
+  - name: "decode-scheme-a-west"
+    type: "codec_iso8583"
+    deploy: "rack-west"
+    config: { spec_path: "specs/switch_v87.yaml", direction: "decode", on_error: "reject" }
+
+  - name: "decode-scheme-b-west"
+    type: "codec_iso8583"
+    deploy: "rack-west"
+    config: { spec_path: "specs/switch_v87.yaml", direction: "decode", on_error: "reject" }
+
+  - name: "encode-replies-west"
+    type: "codec_iso8583"
+    deploy: "rack-west"
+    config: { spec_path: "specs/switch_v87.yaml", direction: "encode", on_error: "reject" }
+
+  - name: "decline-builder-west"
+    type: "bento"
+    deploy: "rack-west"
+    ports:
+      inputs: ["in"]
+      outputs: ["out"]
+    config:
+      bento:
+        pipeline:
+          processors:
+            - mapping: |
+                # Identical decline mapping to decline-builder-east.
+                root = this
+                root.mti = match this.mti {
+                  "0100" => "0110"
+                  "0200" => "0210"
+                  "0800" => "0810"
+                  _      => this.mti
+                }
+                root."39" = match meta("error.reason") {
+                  "timeout"        => "68"
+                  "no_destination" => "91"
+                  "no_route"       => "30"
+                  _                => "96"
+                }
+
+wires:
+  # ── Region east: ingress → decode → conductor ──
+  - from: "terminals-east.out"
+    to: "decode-east.in"
+  - from: "decode-east.out"
+    to: "conductor-east.in"
+
+  # ── Region east: conductor → local uplinks (encode → io) ──
+  - from: "conductor-east.out_scheme_a"
+    to: "encode-scheme-a-east.in"
+  - from: "encode-scheme-a-east.out"
+    to: "uplink-scheme-a-east.in"
+
+  - from: "conductor-east.out_scheme_a2"
+    to: "encode-scheme-a2-east.in"
+  - from: "encode-scheme-a2-east.out"
+    to: "uplink-scheme-a2-east.in"
+
+  - from: "conductor-east.out_scheme_b"
+    to: "encode-scheme-b-east.in"
+  - from: "encode-scheme-b-east.out"
+    to: "uplink-scheme-b-east.in"
+
+  # ── Region east: scheme replies → per-leg decode → conductor ──
+  # (both decoders deliver into the same reply port: fan-in merges safely)
+  - from: "uplink-scheme-a-east.out"
+    to: "decode-scheme-a-east.in"
+  - from: "uplink-scheme-a2-east.out"
+    to: "decode-scheme-a-east.in"    # same dialect: both A-legs share the decoder
+  - from: "decode-scheme-a-east.out"
+    to: "conductor-east.in_reply"
+  - from: "uplink-scheme-b-east.out"
+    to: "decode-scheme-b-east.in"
+  - from: "decode-scheme-b-east.out"
+    to: "conductor-east.in_reply"
+
+  # ── Region east: matched responses → encode → back to terminals ──
+  - from: "conductor-east.out_response"
+    to: "encode-replies-east.in"
+  - from: "encode-replies-east.out"
+    to: "terminals-east.in"
+
+  # ── Region east: exceptions → decline builder → same reply encoder ──
+  # The Conductor emits the original request on `error`; the builder authors
+  # the decline, which merges into encode-replies-east (fan-in) alongside
+  # the happy-path responses.
+  - from: "conductor-east.error"
+    to: "decline-builder-east.in"
+  - from: "decline-builder-east.out"
+    to: "encode-replies-east.in"
+
+  # ── Region west: symmetric ──
+  - from: "terminals-west.out"
+    to: "decode-west.in"
+  - from: "decode-west.out"
+    to: "conductor-west.in"
+
+  - from: "conductor-west.out_scheme_a"
+    to: "encode-scheme-a-west.in"
+  - from: "encode-scheme-a-west.out"
+    to: "uplink-scheme-a-west.in"
+
+  - from: "conductor-west.out_scheme_b"
+    to: "encode-scheme-b-west.in"
+  - from: "encode-scheme-b-west.out"
+    to: "uplink-scheme-b-west.in"
+
+  - from: "uplink-scheme-a-west.out"
+    to: "decode-scheme-a-west.in"
+  - from: "decode-scheme-a-west.out"
+    to: "conductor-west.in_reply"
+  - from: "uplink-scheme-b-west.out"
+    to: "decode-scheme-b-west.in"
+  - from: "decode-scheme-b-west.out"
+    to: "conductor-west.in_reply"
+
+  - from: "conductor-west.out_response"
+    to: "encode-replies-west.in"
+  - from: "encode-replies-west.out"
+    to: "terminals-west.in"
+
+  - from: "conductor-west.error"
+    to: "decline-builder-west.in"
+  - from: "decline-builder-west.out"
+    to: "encode-replies-west.in"
+
+  # ── Cross-region mesh (4 wires = 2 directions x request+response) ──
+  # A peer is just a wired destination. Each direction needs a PAIR of wires,
+  # because a fluxrig wire is one-way and a request/response exchange is two
+  # flows: `out_<peer>` carries the request to the peer's `in`, and the peer
+  # returns the finished response on `out_response_<origin>` to the origin's
+  # `in_reply` (where the origin redeems the ticket it parked when it
+  # forwarded). The response returns on `in_reply`, NOT `in`, so the Conductor
+  # redeems it instead of re-routing it, and never has to parse the message to
+  # tell a request from a reply. Two directions (east originates, west
+  # originates) => 4 wires. They cross Racks, so they ride the Snake
+  # automatically; no shared ticket store, each Conductor correlates locally.
+  - from: "conductor-east.out_west"          # east forwards a request to west
+    to: "conductor-west.in"
+  - from: "conductor-west.out_response_east" # west returns the response to east
+    to: "conductor-east.in_reply"
+
+  - from: "conductor-west.out_east"          # west forwards a request to east
+    to: "conductor-east.in"
+  - from: "conductor-east.out_response_west" # east returns the response to west
+    to: "conductor-west.in_reply"

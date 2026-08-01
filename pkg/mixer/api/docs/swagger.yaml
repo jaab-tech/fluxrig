@@ -314,6 +314,12 @@ definitions:
         type: string
       convergenceTimeout:
         type: string
+      drainTimeout:
+        description: |-
+          DrainTimeout bounds a graceful stop (SIGTERM or shutdown command). It
+          must exceed the largest gear ticket TTL so in-flight work can complete
+          or time out before the process exits. Default 35s (> a 30s switch TTL).
+        type: string
       enrollmentInterval:
         type: string
       enrollmentTimeout:
@@ -534,6 +540,114 @@ definitions:
         example: router.in
         type: string
     type: object
+  sdk.GearCategory:
+    enum:
+    - io
+    - codec
+    - logic
+    - observability
+    type: string
+    x-enum-varnames:
+    - CategoryIO
+    - CategoryCodec
+    - CategoryLogic
+    - CategoryObservability
+  sdk.GearStatus:
+    enum:
+    - stable
+    - roadmap
+    type: string
+    x-enum-varnames:
+    - StatusStable
+    - StatusRoadmap
+  sdk.Manifest:
+    properties:
+      category:
+        allOf:
+        - $ref: '#/definitions/sdk.GearCategory'
+        description: Category groups the gear for classification and styling.
+      config_schema:
+        description: |-
+          ConfigSchema is the gear's configuration contract as a JSON Schema
+          (draft-07) document. Empty means the gear takes no configuration.
+        type: string
+      doc_slug:
+        description: |-
+          DocSlug is the reference-page slug on the public docs site; the full
+          URL is derived. Empty means no dedicated page.
+        type: string
+      ports:
+        description: Ports are the input/output ports the gear declares.
+        items:
+          $ref: '#/definitions/sdk.Port'
+        type: array
+      status:
+        allOf:
+        - $ref: '#/definitions/sdk.GearStatus'
+        description: Status is the maturity of the gear type.
+      summary:
+        description: Summary is a one-line description.
+        type: string
+      terminus:
+        allOf:
+        - $ref: '#/definitions/sdk.TerminusKind'
+        description: |-
+          Terminus tells the runtime binding walk how to treat this gear when it
+          is the endpoint of a wire path. The zero value (TerminusTransparent)
+          means a single-path pass-through, e.g. a codec.
+      type:
+        description: |-
+          Type is the gear type string, matching factory registration
+          (e.g. "io_iso8583").
+        type: string
+    type: object
+  sdk.Port:
+    properties:
+      dir:
+        allOf:
+        - $ref: '#/definitions/sdk.PortDir'
+        description: Dir is the port direction.
+      dynamic:
+        description: |-
+          Dynamic is true when instances are user-named and Name is a pattern
+          (e.g. "out_<name>", "out_response_<origin>").
+        type: boolean
+      name:
+        description: |-
+          Name is the port name. It may be a concrete name ("in", "out",
+          "error") or a pattern for user-named ports ("out_<name>") when Dynamic
+          is true. Port names never contain dots (dots separate rack/gear/port in a
+          wire endpoint); roles use underscores.
+        type: string
+      role:
+        description: |-
+          Role is a free-form role tag for tooling and documentation:
+          "request"/"reply"/"response"/"error" on a switch, "ingress"/"egress"
+          on an I/O gear (relative to the mesh), or "message" on a plain
+          transform/logic data port.
+        type: string
+      summary:
+        description: Summary is a one-line description of the port.
+        type: string
+    type: object
+  sdk.PortDir:
+    enum:
+    - input
+    - output
+    type: string
+    x-enum-varnames:
+    - PortIn
+    - PortOut
+  sdk.TerminusKind:
+    enum:
+    - transparent
+    - io
+    - opaque
+    type: string
+    x-enum-varnames:
+    - TerminusTransparent
+    - TerminusIO
+    - TerminusOpaque
 externalDocs:
   description: fluxrig Architecture Guide
   url: https://fluxrig.org/docs/architecture
@@ -550,7 +664,7 @@ info:
     name: Apache 2.0
     url: http://www.apache.org/licenses/LICENSE-2.0.html
   title: fluxrig Mixer API
-  version: v0.6.1
+  version: v0.7.0
 paths:
   /config:
     get:
@@ -584,6 +698,47 @@ paths:
       summary: Get Entity Stats
       tags:
       - telemetry
+  /gears:
+    get:
+      description: 'Returns the manifest catalog: every gear type this build can run,
+        with identity, ports, and config schema'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/sdk.Manifest'
+            type: array
+      summary: List gear manifests
+      tags:
+      - gears
+  /gears/{type}:
+    get:
+      description: Returns the manifest for a single gear type
+      parameters:
+      - description: Gear type (e.g. io_iso8583)
+        in: path
+        name: type
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/sdk.Manifest'
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Get one gear manifest
+      tags:
+      - gears
   /health:
     get:
       description: Returns the operational status of the Mixer
