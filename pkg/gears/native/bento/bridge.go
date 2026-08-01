@@ -5,12 +5,56 @@ package bento
 
 import (
 	"encoding/json"
+	"fmt"
 
 	"github.com/google/uuid"
 	"github.com/warpstreamlabs/bento/public/service"
 
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 )
+
+// normalizeMap recursively converts map[any]any (from a CBOR round trip) into
+// map[string]any so Bento's structured handling recognizes nested objects.
+// Non-string keys are rendered with a plain string form; scalars pass through.
+func normalizeMap(m map[string]any) map[string]any {
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		out[k] = normalizeValue(v)
+	}
+	return out
+}
+
+func normalizeValue(v any) any {
+	switch t := v.(type) {
+	case map[string]any:
+		return normalizeMap(t)
+	case map[any]any:
+		out := make(map[string]any, len(t))
+		for k, val := range t {
+			ks, ok := k.(string)
+			if !ok {
+				ks = fmtKey(k)
+			}
+			out[ks] = normalizeValue(val)
+		}
+		return out
+	case []any:
+		out := make([]any, len(t))
+		for i, val := range t {
+			out[i] = normalizeValue(val)
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+func fmtKey(k any) string {
+	if s, ok := k.(string); ok {
+		return s
+	}
+	return fmt.Sprintf("%v", k)
+}
 
 // ToBentoMessage converts a FluxMsg to a Bento Service Message.
 func ToBentoMessage(fm *fluxmsg.FluxMsg) *service.Message {
@@ -19,7 +63,10 @@ func ToBentoMessage(fm *fluxmsg.FluxMsg) *service.Message {
 	var m *service.Message
 	if len(fm.Data) > 0 {
 		m = service.NewMessage(nil)
-		m.SetStructured(fm.Data)
+		// Normalize map[any]any (produced by a CBOR round trip over the bus)
+		// to map[string]any so Bento treats nested fields as objects; without
+		// this, a Bloblang mapping sees `this.iso8583` as a non-object.
+		m.SetStructured(normalizeMap(fm.Data))
 	} else {
 		m = service.NewMessage(fm.RawPayload)
 	}

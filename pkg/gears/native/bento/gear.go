@@ -26,13 +26,14 @@ type Gear struct {
 	params map[string]any
 
 	// Runtime
-	stream *service.Stream
-	env    *service.Environment
-	inChan chan *fluxmsg.FluxMsg
-	emitFn func(*fluxmsg.FluxMsg)
-	ctx    context.Context
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	stream  *service.Stream
+	env     *service.Environment
+	inChan  chan *fluxmsg.FluxMsg
+	emitFn  func(*fluxmsg.FluxMsg)
+	emitter sdk.PortEmitter // named-port output
+	ctx     context.Context
+	cancel  context.CancelFunc
+	wg      sync.WaitGroup
 
 	// Config
 	config Config
@@ -53,6 +54,7 @@ func New() *Gear {
 func (g *Gear) Init(ctx sdk.GearContext) error {
 	g.logger = ctx.Logger().With("type", "bento")
 	g.params = ctx.Config()
+	g.emitter = ctx.Emitter()
 
 	// Use the Gear Name to uniquify the plugins in the Global Scope
 	// Use the Gear Name to uniquify the plugins in the Global Scope
@@ -113,7 +115,11 @@ func (g *Gear) Init(ctx sdk.GearContext) error {
 
 	err = g.env.RegisterOutput(g.outputType, specOut,
 		func(conf *service.ParsedConfig, mgr *service.Resources) (service.Output, int, error) {
-			return &fluxOutput{g: g}, 1, nil
+			name, _ := conf.FieldString("name")
+			if name == "" {
+				name = "out"
+			}
+			return &fluxOutput{g: g, port: name}, 1, nil
 		})
 	if err != nil {
 		return err
@@ -129,8 +135,18 @@ func (g *Gear) Init(ctx sdk.GearContext) error {
 	}
 	if len(outputs) > 0 {
 		if _, hasOutput := cfg.Bento["output"]; !hasOutput {
-			cfg.Bento["output"] = map[string]any{
-				g.outputType: map[string]any{"name": outputs[0]},
+			// A single declared output is auto-wired to the default sink. With
+			// more than one, routing is the user's decision and cannot be
+			// inferred, so require an explicit output rather than silently
+			// picking outputs[0]. Each case targets `g.outputType`
+			// with a `name` matching a declared port.
+			if len(outputs) == 1 {
+				cfg.Bento["output"] = map[string]any{
+					g.outputType: map[string]any{"name": outputs[0]},
+				}
+			} else {
+				return fmt.Errorf("bento gear %q declares %d output ports %v but has no explicit 'output' block: multi-output routing cannot be auto-wired; configure a bento output (e.g. 'switch' to route, or 'broker' to fan out) whose cases target %q with the desired port name",
+					ctx.GearName(), len(outputs), outputs, g.outputType)
 			}
 		}
 	}
@@ -272,7 +288,8 @@ func (i *fluxInput) Read(ctx context.Context) (*service.Message, service.AckFunc
 func (i *fluxInput) Close(ctx context.Context) error { return nil }
 
 type fluxOutput struct {
-	g *Gear
+	g    *Gear
+	port string // the fluxrig output port this sink emits to (e.g. "out", "out.high")
 }
 
 func (o *fluxOutput) Connect(ctx context.Context) error { return nil }
@@ -282,10 +299,24 @@ func (o *fluxOutput) Write(ctx context.Context, msg *service.Message) error {
 		return err
 	}
 
-	if o.g.emitFn != nil {
-		o.g.emitFn(fm)
-		o.g.logger.Info("Bento Output Emitted", "id", fm.FluxID)
+	port := o.port
+	if port == "" {
+		port = "out"
 	}
+	// The default "out" port uses the Start emit callback, which in the runtime
+	// is exactly Emit("out"), so single-output gears behave identically. Named
+	// ports require the PortEmitter.
+	switch {
+	case port == "out" && o.g.emitFn != nil:
+		o.g.emitFn(fm)
+	case o.g.emitter != nil:
+		if e := o.g.emitter.Emit(port, fm); e != nil {
+			return e
+		}
+	case o.g.emitFn != nil:
+		o.g.emitFn(fm)
+	}
+	o.g.logger.Info("Bento Output Emitted", "id", fm.FluxID, "port", port)
 	return nil
 }
 func (o *fluxOutput) Close(ctx context.Context) error { return nil }

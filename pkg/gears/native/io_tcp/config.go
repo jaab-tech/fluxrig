@@ -112,12 +112,16 @@ func SchemaJSON() string {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
   "properties": {
-    "mode": { "type": "string", "enum": ["server", "client"] },
-    "bind": { "type": "string" },
-    "connect": { "type": "string" },
-    "reconnect_wait": { "type": "string", "pattern": "^[0-9]+(s|ms|m|h)$" },
-    "delimiter": { "type": "string" },
-    "idle_timeout": { "type": "string", "pattern": "^[0-9]+(s|ms|m|h)$" }
+    "mode": { "type": "string", "enum": ["server", "client"], "description": "server (listen for connections) or client (dial an upstream)." },
+    "bind": { "type": "string", "default": ":8080", "description": "server mode: address to listen on, e.g. ':9000'." },
+    "connect": { "type": "string", "description": "client mode: upstream address to dial, host:port." },
+    "reconnect_wait": { "type": "string", "pattern": "^[0-9]+(s|ms|m|h)$", "default": "5s", "description": "client mode: delay before redialing a dropped connection, e.g. '1s'." },
+    "max_connections": { "type": "integer", "default": 4096, "description": "server mode: maximum concurrent connections (0 = unlimited)." },
+    "delimiter": { "type": "string", "description": "message delimiter for framing (e.g. a newline, 0x03); if empty, frames on newline (ScanLines)." },
+    "delimiter_position": { "type": "string", "enum": ["suffix", "prefix"], "default": "suffix", "description": "where the delimiter sits relative to the message: suffix or prefix." },
+    "delimiter_include": { "type": "boolean", "default": false, "description": "ingress: keep the delimiter in the emitted payload." },
+    "delimiter_append": { "type": "boolean", "default": false, "description": "egress: append the delimiter to outgoing payloads." },
+    "idle_timeout": { "type": "string", "pattern": "^[0-9]+(s|ms|m|h)$", "default": "60s", "description": "max time a connection may sit idle before it is closed." }
   },
   "required": ["mode"]
 }`

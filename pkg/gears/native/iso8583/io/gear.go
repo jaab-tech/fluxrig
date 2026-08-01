@@ -69,6 +69,31 @@ func (g *Gear) Start(ctx context.Context, emit func(*fluxmsg.FluxMsg)) error {
 		}
 	case ModeClient:
 		g.client = NewClient(g.config, g.log, emit, g.ctx.IDGen())
+		// Publish link-state transitions on the control plane so routing gears
+		// bound to this uplink can sense its availability. A client owns
+		// exactly one connection, so gear-level state IS connection state.
+		// Subject: flux.ctrl.link.<gearName>, commands conn.up / conn.down.
+		if cp, ok := g.ctx.ControlPlane().(ctrl.ControlPlane); ok && cp != nil {
+			gearName := g.ctx.GearName()
+			target := "link." + gearName
+			g.client.OnLinkState(func(up bool, connID string) {
+				cmd := ctrl.Command{
+					Cmd: "conn.down",
+					Args: map[string]string{
+						"conn_id":  connID,
+						"gear":     gearName,
+						"endpoint": g.config.Connect,
+					},
+					Src: gearName,
+				}
+				if up {
+					cmd.Cmd = "conn.up"
+				}
+				if err := cp.Publish(target, cmd); err != nil {
+					g.log.Warn("link-state publish failed", "cmd", cmd.Cmd, "error", err)
+				}
+			})
+		}
 		if err := g.client.Start(ctx); err != nil {
 			return err
 		}

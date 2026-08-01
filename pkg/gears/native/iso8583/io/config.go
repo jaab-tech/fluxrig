@@ -50,6 +50,10 @@ type Config struct {
 	// MaxConnections: Limit concurrent connections. Default: 4096.
 	MaxConnections int `json:"max_connections" mapstructure:"max_connections"`
 
+	// TLS secures the external socket (dial in client mode, listener in
+	// server mode). Off by default.
+	TLS TLSConfig `json:"tls" mapstructure:"tls"`
+
 	// Client Mode Settings
 	// Connect: Remote address to dial (e.g. "localhost:9000").
 	Connect string `json:"connect" mapstructure:"connect"`
@@ -93,6 +97,13 @@ type Config struct {
 	PreserveHeaders bool `json:"preserve_headers" mapstructure:"preserve_headers"`
 	// StrictConnectionRouting: strictly matches conn.id. Default: true.
 	StrictConnectionRouting bool `json:"strict_connection_routing" mapstructure:"strict_connection_routing"`
+
+	// UnsafeRawFrameLog dumps raw frame/payload bytes (hex) at TRACE. This
+	// exposes cardholder data (PAN) and Sensitive Authentication Data (track
+	// data, PIN block, CVV) and MUST NOT be enabled inside a Cardholder Data
+	// Environment (PCI DSS Req. 3.2/3.4). Default: false. For protocol
+	// debugging in non-CDE test environments only.
+	UnsafeRawFrameLog bool `json:"unsafe_raw_frame_log" mapstructure:"unsafe_raw_frame_log"`
 
 	// Timeouts
 	// ReadTimeout: Max time to wait for a frame. Default: 5s.
@@ -213,6 +224,10 @@ func (c *Config) ApplyDefaults() {
 	if c.FrameLengthEndian == "" {
 		c.FrameLengthEndian = DefaultEndian
 	}
+	// The documented default (2) applies to every variant, not only Visa.
+	if c.FrameLengthSize == 0 {
+		c.FrameLengthSize = DefaultFrameLengthSize
+	}
 }
 
 // Validate ensures the config is consistent.
@@ -249,24 +264,42 @@ func SchemaJSON() string {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
   "properties": {
-    "mode": { "type": "string", "enum": ["server", "client"] },
-    "bind": { "type": "string" },
-    "connect": { "type": "string" },
-    "reconnect_wait": { "type": "string", "pattern": "^[0-9]+(s|ms|m|h)$" },
-    "frame_length_size": { "type": "integer", "enum": [2, 4] },
-    "frame_includes_header": { "type": "boolean" },
-    "frame_length_endian": { "type": "string", "enum": ["big", "little"] },
-    "variant": { "type": "string", "enum": ["generic", "visa", "mastercard"] },
-    "encoding": { "type": "string", "enum": ["ascii", "ebcdic", "bcd"] },
-    "protocol_header_size": { "type": "integer" },
-    "tpdu_enabled": { "type": "boolean" },
-    "tpdu_length": { "type": "integer" },
-    "tpdu_swap": { "type": "boolean" },
-    "heuristic_validation": { "type": "boolean" },
-    "read_timeout": { "type": "string", "pattern": "^[0-9]+(s|ms|m|h)$" },
-    "write_timeout": { "type": "string", "pattern": "^[0-9]+(s|ms|m|h)$" },
-    "connect_timeout": { "type": "string", "pattern": "^[0-9]+(s|ms|m|h)$" },
-    "idle_timeout": { "type": "string", "pattern": "^[0-9]+(s|ms|m|h)$" }
+    "mode": { "type": "string", "enum": ["server", "client"], "description": "server (listen for terminal/peer connections) or client (dial an upstream)." },
+    "bind": { "type": "string", "description": "server mode: address to listen on, e.g. ':8583'." },
+    "connect": { "type": "string", "description": "client mode: upstream address to dial, host:port." },
+    "reconnect_wait": { "type": "string", "pattern": "^[0-9]+(s|ms|m|h)$", "default": "5s", "description": "client mode: delay before redialing a dropped connection, e.g. '5s'." },
+    "frame_length_size": { "type": "integer", "enum": [2, 4], "default": 2, "description": "bytes in the length prefix that frames each message (2 or 4)." },
+    "frame_includes_header": { "type": "boolean", "default": false, "description": "whether the length prefix counts its own bytes." },
+    "frame_length_endian": { "type": "string", "enum": ["big", "little"], "default": "big", "description": "byte order of the length prefix." },
+    "variant": { "type": "string", "enum": ["generic", "visa", "mastercard"], "default": "generic", "description": "framing profile: generic, visa (VAP header) or mastercard." },
+    "encoding": { "type": "string", "enum": ["ascii", "ebcdic", "bcd"], "default": "ascii", "description": "field encoding used for heuristic inspection: ascii, ebcdic or bcd." },
+    "protocol_header_size": { "type": "integer", "description": "fixed protocol-header length (bytes) carried before the ISO message; 0 = none." },
+    "tpdu_enabled": { "type": "boolean", "default": false, "description": "whether a 5-byte TPDU precedes the message." },
+    "tpdu_length": { "type": "integer", "default": 5, "description": "TPDU length in bytes when enabled." },
+    "tpdu_swap": { "type": "boolean", "default": true, "description": "swap the TPDU source/destination addresses on the reply." },
+    "heuristic_validation": { "type": "boolean", "default": true, "description": "run lightweight MTI/bitmap sanity checks on each frame read." },
+    "preserve_headers": { "type": "boolean", "description": "carry the raw protocol header through so the reply can mirror it." },
+    "strict_connection_routing": { "type": "boolean", "default": true, "description": "return each reply on the exact connection (conn.id) its request arrived on." },
+    "max_connections": { "type": "integer", "default": 4096, "description": "server mode: maximum concurrent connections (0 = unlimited)." },
+    "visa_src_id": { "type": "string", "description": "visa variant: source station id in the VAP header." },
+    "visa_dst_id": { "type": "string", "description": "visa variant: destination station id in the VAP header." },
+    "unsafe_raw_frame_log": { "type": "boolean", "default": false, "description": "log raw frame bytes (hex) at TRACE. Off by default; raw frames carry PAN/SAD, so never enable inside a CDE." },
+    "tls": {
+      "type": "object",
+      "description": "native TLS/mTLS for this socket.",
+      "properties": {
+        "enabled": { "type": "boolean", "description": "enable TLS on the socket." },
+        "cert_file": { "type": "string", "description": "PEM certificate presented by this gear." },
+        "key_file": { "type": "string", "description": "PEM private key for cert_file." },
+        "ca_file": { "type": "string", "description": "PEM CA bundle used to verify the peer." },
+        "server_name": { "type": "string", "description": "expected server name (SNI / verification)." },
+        "client_auth": { "type": "boolean", "description": "require and verify a client certificate (mTLS)." }
+      }
+    },
+    "read_timeout": { "type": "string", "pattern": "^[0-9]+(s|ms|m|h)$", "default": "5s", "description": "max time to read the body of a frame already in progress, e.g. '5s'." },
+    "write_timeout": { "type": "string", "pattern": "^[0-9]+(s|ms|m|h)$", "default": "2s", "description": "max time for a single socket write." },
+    "connect_timeout": { "type": "string", "pattern": "^[0-9]+(s|ms|m|h)$", "default": "5s", "description": "client mode: max time for the TCP dial." },
+    "idle_timeout": { "type": "string", "pattern": "^[0-9]+(s|ms|m|h)$", "default": "15s", "description": "max time a connection may sit idle between frames before it is closed." }
   },
   "required": ["mode"]
 }`

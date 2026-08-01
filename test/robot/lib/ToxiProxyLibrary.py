@@ -5,7 +5,7 @@ from toxiproxy import Toxiproxy
 from robot.api import logger
 from robot.api.deco import keyword, library
 
-@library
+@library(scope="GLOBAL")
 class ToxiProxyLibrary:
     """
     Toxiproxy Helper for Network Chaos.
@@ -19,8 +19,12 @@ class ToxiProxyLibrary:
 
     @keyword
     def connect_to_toxiproxy(self, host: str = "localhost:8474"):
-        """Connects to the Toxiproxy server API."""
-        self.server = Toxiproxy(host)
+        """Connects to the Toxiproxy server API (host is "host:port")."""
+        self.server = Toxiproxy()
+        h, _, p = host.partition(":")
+        self.server.update_api_consumer(h or "127.0.0.1", int(p or 8474))
+        if not self.server.running():
+            raise RuntimeError(f"Toxiproxy server not reachable at {host}")
         logger.info(f"Connected to Toxiproxy at {host}")
 
     @keyword
@@ -61,8 +65,9 @@ class ToxiProxyLibrary:
     def reset_toxics(self, name: str):
         """Removes all toxics from a proxy."""
         proxy = self._get_proxy(name)
-        for toxic in proxy.toxics():
-            toxic.destroy()
+        # toxics() returns a {name: Toxic} dict; destroy each by name.
+        for toxic_name in list(proxy.toxics().keys()):
+            proxy.destroy_toxic(toxic_name)
         logger.info(f"Reset Toxics on {name}")
 
     @keyword

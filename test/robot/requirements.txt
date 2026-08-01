@@ -8,3 +8,4 @@ requests
 robotframework-requests
 nats-py
 cbor2
+toxiproxy-python

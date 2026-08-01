@@ -36,6 +36,7 @@ func (m *MockGearContext) Bus() bus.Bus             { return nil }
 func (m *MockGearContext) Manager() manager.Manager { return nil }
 func (m *MockGearContext) ControlPlane() any        { return nil }
 func (m *MockGearContext) ClusterPublicKey() []byte { return nil }
+func (m *MockGearContext) Emitter() sdk.PortEmitter { return sdk.NewNoopEmitter() }
 
 func TestGear_Lifecycle(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))

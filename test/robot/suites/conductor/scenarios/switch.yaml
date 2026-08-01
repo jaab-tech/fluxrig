@@ -1,0 +1,181 @@
+# Copyright (c) 2026 JAAB Tech SAS, Uruguay
+# SPDX-License-Identifier: Apache-2.0
+#
+# The payment switch under test: a Conductor routes each 0200 authorization by
+# the PAN's BIN (DE2 prefix) to one of several scheme uplinks, correlates the
+# reply, and returns it to the terminal. Exercises all four Conductor outcomes:
+#   BIN 4xxx -> scheme A  -> approve   (0210, DE39=00)
+#   BIN 5xxx -> scheme B  -> decline   (0210, DE39 from the scheme)
+#   BIN 6xxx -> scheme C  -> timeout   (scheme sinks; TTL expiry -> error port)
+#   BIN 9xxx -> no route  -> decline   (no match -> error port)
+# The error port feeds a bento decline builder that authors the terminal reply.
+meta:
+  name: "payment_switch"
+  version: "1.0.0"
+
+racks:
+  - name: "rack-switch"
+    labels:
+      role: "switch"
+
+gears:
+  # --- Terminal-facing ingress ---
+  - name: "terminals"
+    type: "io_iso8583"
+    deploy: "rack-switch"
+    config:
+      mode: "server"
+      bind: ":8583"
+      frame_length_size: 2
+      frame_length_endian: "big"
+      encoding: "ascii"
+      # The POS terminal sends plain framed ISO (no protocol header); the
+      # response returns on the same connection (conn.id).
+      strict_connection_routing: true
+
+  - name: "decode-request"
+    type: "codec_iso8583"
+    deploy: "rack-switch"
+    config: { spec_path: "specs/auth.yaml", direction: "decode", on_error: "reject" }
+
+  # --- The switch ---
+  - name: "conductor"
+    type: "conductor"
+    deploy: "rack-switch"
+    config:
+      # The key must be unique for the lifetime of a ticket. STAN (DE11) wraps
+      # at 999999 and is reused per-terminal, so it is never unique on its own:
+      # the key also includes the terminal id (DE41) plus transmission date/time
+      # (DE7). All are echoed by the scheme on the reply. Numeric fields decode
+      # unpadded, but on both legs, so correlation holds. In production also add
+      # the acquirer id (DE32); see the conductor reference.
+      correlation_key: ["iso8583.field.11", "iso8583.field.7", "iso8583.field.41"]
+      valet: { store: "memory", default_ttl: "3s", retain_after_close: "5s" }
+      routes:
+        - name: "scheme-a"
+          match: { field: "iso8583.field.2", prefix: "4" }
+          destination: "out_scheme_a"
+        - name: "scheme-b"
+          match: { field: "iso8583.field.2", prefix: "5" }
+          destination: "out_scheme_b"
+        - name: "scheme-c"
+          match: { field: "iso8583.field.2", prefix: "6" }
+          destination: "out_scheme_c"
+        # No catch-all: any other BIN leaves on `error` as no_route.
+
+  # --- Scheme A uplink leg (approve) ---
+  - name: "encode-a"
+    type: "codec_iso8583"
+    deploy: "rack-switch"
+    config: { spec_path: "specs/auth.yaml", direction: "encode", on_error: "reject" }
+  - name: "uplink-a"
+    type: "io_iso8583"
+    deploy: "rack-switch"
+    config:
+      mode: "client"
+      connect: "127.0.0.1:10001"
+      frame_length_size: 2
+      frame_length_endian: "big"
+      encoding: "ascii"
+      reconnect_wait: "1s"
+  - name: "decode-a"
+    type: "codec_iso8583"
+    deploy: "rack-switch"
+    config: { spec_path: "specs/auth.yaml", direction: "decode", on_error: "reject" }
+
+  # --- Scheme B uplink leg (decline) ---
+  - name: "encode-b"
+    type: "codec_iso8583"
+    deploy: "rack-switch"
+    config: { spec_path: "specs/auth.yaml", direction: "encode", on_error: "reject" }
+  - name: "uplink-b"
+    type: "io_iso8583"
+    deploy: "rack-switch"
+    config:
+      mode: "client"
+      connect: "127.0.0.1:10002"
+      frame_length_size: 2
+      frame_length_endian: "big"
+      encoding: "ascii"
+      reconnect_wait: "1s"
+  - name: "decode-b"
+    type: "codec_iso8583"
+    deploy: "rack-switch"
+    config: { spec_path: "specs/auth.yaml", direction: "decode", on_error: "reject" }
+
+  # --- Scheme C uplink leg (timeout: the scheme never answers) ---
+  - name: "encode-c"
+    type: "codec_iso8583"
+    deploy: "rack-switch"
+    config: { spec_path: "specs/auth.yaml", direction: "encode", on_error: "reject" }
+  - name: "uplink-c"
+    type: "io_iso8583"
+    deploy: "rack-switch"
+    config:
+      mode: "client"
+      connect: "127.0.0.1:10003"
+      frame_length_size: 2
+      frame_length_endian: "big"
+      encoding: "ascii"
+      reconnect_wait: "1s"
+  - name: "decode-c"
+    type: "codec_iso8583"
+    deploy: "rack-switch"
+    config: { spec_path: "specs/auth.yaml", direction: "decode", on_error: "reject" }
+
+  # --- Exception path: author a decline for the terminal ---
+  # The Conductor never synthesizes a reply; on any error.reason (no_route,
+  # timeout, no_destination, unmatched_reply) it emits the original request on
+  # `error`, and this bento gear authors the terminal-facing decline.
+  - name: "decline-builder"
+    type: "bento"
+    deploy: "rack-switch"
+    config:
+      ports:
+        inputs: ["in"]
+        outputs: ["out"]
+      bento:
+        pipeline:
+          processors:
+            - mapping: |
+                root = this
+                let req = meta("iso8583.mti")
+                meta "iso8583.mti" = $req.slice(0, 2) + (($req.slice(2, 3).number() + 1).string()) + $req.slice(3)
+                # 91 = issuer or switch inoperative (timeout); 05 = do not honor
+                # (no route). Pick by the reason the Conductor stamped.
+                root.iso8583.field."39" = if meta("error.reason") == "timeout" { "91" } else { "05" }
+
+  # --- Response encoder back to the terminal ---
+  - name: "encode-response"
+    type: "codec_iso8583"
+    deploy: "rack-switch"
+    config: { spec_path: "specs/auth.yaml", direction: "encode", on_error: "reject" }
+
+wires:
+  # Ingress: terminal request -> decode -> conductor
+  - { from: "terminals.out", to: "decode-request.in" }
+  - { from: "decode-request.out", to: "conductor.in" }
+
+  # Routed requests -> per-scheme encode -> uplink
+  - { from: "conductor.out_scheme_a", to: "encode-a.in" }
+  - { from: "encode-a.out", to: "uplink-a.in" }
+  - { from: "conductor.out_scheme_b", to: "encode-b.in" }
+  - { from: "encode-b.out", to: "uplink-b.in" }
+  - { from: "conductor.out_scheme_c", to: "encode-c.in" }
+  - { from: "encode-c.out", to: "uplink-c.in" }
+
+  # Scheme replies -> per-scheme decode -> conductor.in_reply
+  - { from: "uplink-a.out", to: "decode-a.in" }
+  - { from: "decode-a.out", to: "conductor.in_reply" }
+  - { from: "uplink-b.out", to: "decode-b.in" }
+  - { from: "decode-b.out", to: "conductor.in_reply" }
+  - { from: "uplink-c.out", to: "decode-c.in" }
+  - { from: "decode-c.out", to: "conductor.in_reply" }
+
+  # Happy path: matched response -> encode -> terminal
+  - { from: "conductor.out_response", to: "encode-response.in" }
+
+  # Exception path: error -> decline builder -> same response encoder -> terminal
+  - { from: "conductor.error", to: "decline-builder.in" }
+  - { from: "decline-builder.out", to: "encode-response.in" }
+  - { from: "encode-response.out", to: "terminals.in" }

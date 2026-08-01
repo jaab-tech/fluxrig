@@ -40,6 +40,7 @@ func (m *MockCtx) Bus() bus.Bus             { return nil }
 func (m *MockCtx) Manager() manager.Manager { return nil }
 func (m *MockCtx) ControlPlane() any        { return nil }
 func (m *MockCtx) ClusterPublicKey() []byte { return nil }
+func (m *MockCtx) Emitter() sdk.PortEmitter { return sdk.NewNoopEmitter() }
 
 func TestGear_Init_Validation(t *testing.T) {
 	g := &Gear{}

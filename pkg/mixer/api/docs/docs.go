@@ -72,6 +72,67 @@ const docTemplate = `{
                 }
             }
         },
+        "/gears": {
+            "get": {
+                "description": "Returns the manifest catalog: every gear type this build can run, with identity, ports, and config schema",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "gears"
+                ],
+                "summary": "List gear manifests",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/sdk.Manifest"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/gears/{type}": {
+            "get": {
+                "description": "Returns the manifest for a single gear type",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "gears"
+                ],
+                "summary": "Get one gear manifest",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Gear type (e.g. io_iso8583)",
+                        "name": "type",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/sdk.Manifest"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
         "/health": {
             "get": {
                 "description": "Returns the operational status of the Mixer",
@@ -835,6 +896,10 @@ const docTemplate = `{
                 "convergenceTimeout": {
                     "type": "string"
                 },
+                "drainTimeout": {
+                    "description": "DrainTimeout bounds a graceful stop (SIGTERM or shutdown command). It\nmust exceed the largest gear ticket TTL so in-flight work can complete\nor time out before the process exits. Default 35s (\u003e a 30s switch TTL).",
+                    "type": "string"
+                },
                 "enrollmentInterval": {
                     "type": "string"
                 },
@@ -1151,6 +1216,137 @@ const docTemplate = `{
                     "example": "router.in"
                 }
             }
+        },
+        "sdk.GearCategory": {
+            "type": "string",
+            "enum": [
+                "io",
+                "codec",
+                "logic",
+                "observability"
+            ],
+            "x-enum-varnames": [
+                "CategoryIO",
+                "CategoryCodec",
+                "CategoryLogic",
+                "CategoryObservability"
+            ]
+        },
+        "sdk.GearStatus": {
+            "type": "string",
+            "enum": [
+                "stable",
+                "roadmap"
+            ],
+            "x-enum-varnames": [
+                "StatusStable",
+                "StatusRoadmap"
+            ]
+        },
+        "sdk.Manifest": {
+            "type": "object",
+            "properties": {
+                "category": {
+                    "description": "Category groups the gear for classification and styling.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/sdk.GearCategory"
+                        }
+                    ]
+                },
+                "config_schema": {
+                    "description": "ConfigSchema is the gear's configuration contract as a JSON Schema\n(draft-07) document. Empty means the gear takes no configuration.",
+                    "type": "string"
+                },
+                "doc_slug": {
+                    "description": "DocSlug is the reference-page slug on the public docs site; the full\nURL is derived. Empty means no dedicated page.",
+                    "type": "string"
+                },
+                "ports": {
+                    "description": "Ports are the input/output ports the gear declares.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/sdk.Port"
+                    }
+                },
+                "status": {
+                    "description": "Status is the maturity of the gear type.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/sdk.GearStatus"
+                        }
+                    ]
+                },
+                "summary": {
+                    "description": "Summary is a one-line description.",
+                    "type": "string"
+                },
+                "terminus": {
+                    "description": "Terminus tells the runtime binding walk how to treat this gear when it\nis the endpoint of a wire path. The zero value (TerminusTransparent)\nmeans a single-path pass-through, e.g. a codec.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/sdk.TerminusKind"
+                        }
+                    ]
+                },
+                "type": {
+                    "description": "Type is the gear type string, matching factory registration\n(e.g. \"io_iso8583\").",
+                    "type": "string"
+                }
+            }
+        },
+        "sdk.Port": {
+            "type": "object",
+            "properties": {
+                "dir": {
+                    "description": "Dir is the port direction.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/sdk.PortDir"
+                        }
+                    ]
+                },
+                "dynamic": {
+                    "description": "Dynamic is true when instances are user-named and Name is a pattern\n(e.g. \"out_\u003cname\u003e\", \"out_response_\u003corigin\u003e\").",
+                    "type": "boolean"
+                },
+                "name": {
+                    "description": "Name is the port name. It may be a concrete name (\"in\", \"out\",\n\"error\") or a pattern for user-named ports (\"out_\u003cname\u003e\") when Dynamic\nis true. Port names never contain dots (dots separate rack/gear/port in a\nwire endpoint); roles use underscores.",
+                    "type": "string"
+                },
+                "role": {
+                    "description": "Role is a free-form role tag for tooling and documentation:\n\"request\"/\"reply\"/\"response\"/\"error\" on a switch, \"ingress\"/\"egress\"\non an I/O gear (relative to the mesh), or \"message\" on a plain\ntransform/logic data port.",
+                    "type": "string"
+                },
+                "summary": {
+                    "description": "Summary is a one-line description of the port.",
+                    "type": "string"
+                }
+            }
+        },
+        "sdk.PortDir": {
+            "type": "string",
+            "enum": [
+                "input",
+                "output"
+            ],
+            "x-enum-varnames": [
+                "PortIn",
+                "PortOut"
+            ]
+        },
+        "sdk.TerminusKind": {
+            "type": "string",
+            "enum": [
+                "transparent",
+                "io",
+                "opaque"
+            ],
+            "x-enum-varnames": [
+                "TerminusTransparent",
+                "TerminusIO",
+                "TerminusOpaque"
+            ]
         }
     },
     "externalDocs": {
@@ -1161,7 +1357,7 @@ const docTemplate = `{
 
 // SwaggerInfo holds exported Swagger Info so clients can modify it
 var SwaggerInfo = &swag.Spec{
-	Version:          "v0.6.1",
+	Version:          "v0.7.0",
 	Host:             "localhost:8090",
 	BasePath:         "/api/v1",
 	Schemes:          []string{"http"},

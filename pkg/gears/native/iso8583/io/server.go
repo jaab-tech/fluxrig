@@ -5,6 +5,7 @@ package io
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -118,8 +119,16 @@ func (s *Server) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to bind %s after %d attempts: %w", s.config.Bind, maxRetries, err)
 	}
+	if s.config.TLS.Enabled {
+		conf, terr := s.config.TLS.buildServer()
+		if terr != nil {
+			_ = l.Close()
+			return fmt.Errorf("iso8583 server: %w", terr)
+		}
+		l = tls.NewListener(l, conf)
+	}
 	s.listener = l
-	s.log.Info("listening", "addr", s.config.Bind)
+	s.log.Info("listening", "addr", s.config.Bind, "tls", s.config.TLS.Enabled)
 
 	go s.acceptLoop(ctx)
 	s.log.Info("starting tcp server", "addr", s.config.Bind, "max_conns", s.config.MaxConnections)
@@ -189,8 +198,10 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 			return
 		}
 
-		// Set read deadline
-		if err := conn.SetReadDeadline(time.Now().Add(time.Duration(s.config.ReadTimeout))); err != nil {
+		// Idle wait for the next request's first bytes. A persistent terminal
+		// may sit quiet between transactions, so this is IdleTimeout, not the
+		// (shorter) in-progress ReadTimeout that readFrame applies to the body.
+		if err := setReadDeadline(conn, time.Duration(s.config.IdleTimeout)); err != nil {
 			s.log.Warn("failed to set read deadline", "error", err)
 			return
 		}
@@ -298,18 +309,26 @@ func (s *Server) readFrame(conn net.Conn) ([]byte, error) {
 		return nil, fmt.Errorf("invalid frame length: %d", length)
 	}
 
+	// A frame is now in progress: bound the body read by ReadTimeout so a
+	// half-sent frame cannot pin the connection, without conflating that with
+	// the (longer) idle wait between frames.
+	if err := setReadDeadline(conn, time.Duration(s.config.ReadTimeout)); err != nil {
+		return nil, err
+	}
 	payload := make([]byte, length)
 	if _, err := io.ReadFull(conn, payload); err != nil {
 		return nil, err
 	}
 
-	// TRACE logging for framing validation
+	// TRACE logging for framing validation. Raw frame bytes carry the PAN and
+	// SAD, so they are emitted only with UnsafeRawFrameLog (never in a CDE).
 	if s.log.Enabled(context.Background(), logger.LevelTrace) {
-		fullFrame := append(header, payload...)
-		s.log.Log(context.Background(), logger.LevelTrace, "raw frame read",
-			"len_prefix", length,
-			"frame_hex", fmt.Sprintf("0x%x", fullFrame),
-		)
+		args := []any{"len_prefix", length, "frame_len", len(header) + len(payload)}
+		if s.config.UnsafeRawFrameLog {
+			fullFrame := append(header, payload...)
+			args = append(args, "frame_hex", fmt.Sprintf("0x%x", fullFrame))
+		}
+		s.log.Log(context.Background(), logger.LevelTrace, "raw frame read", args...)
 	}
 
 	return payload, nil
@@ -358,7 +377,7 @@ func (s *Server) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.Fl
 	var header []byte
 	if s.config.PreserveHeaders {
 		if raw, ok := msg.Metadata["iso8583.raw_header"]; ok {
-			header = []byte(raw)
+			header = decodeRawHeader(raw)
 		}
 	}
 
@@ -384,24 +403,28 @@ func (s *Server) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.Fl
 
 	// TRACE logging
 	if s.log.Enabled(ctx, logger.LevelTrace) {
-		s.log.Log(ctx, logger.LevelTrace, "sending message",
+		args := []any{
 			"flux_id", fmt.Sprintf("0x%x", msg.FluxID),
 			"conn_id", connID,
 			"payload_len", len(msg.RawPayload),
-			"hex", fmt.Sprintf("%x", msg.RawPayload),
-		)
+		}
+		if s.config.UnsafeRawFrameLog {
+			args = append(args, "hex", fmt.Sprintf("%x", msg.RawPayload))
+		}
+		s.log.Log(ctx, logger.LevelTrace, "sending message", args...)
 	}
 
 	if _, err := conn.conn.Write(frame); err != nil {
 		return nil, fmt.Errorf("write error: %w", err)
 	}
 
-	// Telemetry - Frame Sent (DEBUG)
+	// Telemetry - Frame Sent (DEBUG). No frame bytes: the first 64 bytes span
+	// the PAN (PCI DSS Req. 3.4). Raw bytes only at TRACE with UnsafeRawFrameLog.
 	s.log.Debug("Frame Sent",
 		"conn_id", connID,
 		"remote", conn.conn.RemoteAddr().String(),
 		"len", len(fullPayload),
-		"hex", fmt.Sprintf("0x%x", fullPayload[:min(64, len(fullPayload))]),
+		"mti", msg.Metadata["iso8583.mti"],
 	)
 
 	// Metric: Egress

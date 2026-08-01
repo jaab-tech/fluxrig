@@ -83,6 +83,7 @@ func (m *MockContext) Bus() bus.Bus             { return nil }
 func (m *MockContext) Manager() manager.Manager { return nil }
 func (m *MockContext) ControlPlane() any        { return nil }
 func (m *MockContext) ClusterPublicKey() []byte { return nil }
+func (m *MockContext) Emitter() sdk.PortEmitter { return sdk.NewNoopEmitter() }
 
 func TestStrictValidation(t *testing.T) {
 	g := New()
@@ -102,6 +103,65 @@ func TestStrictValidation(t *testing.T) {
 	err := g.Init(ctx)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to parse bento yaml")
+}
+
+// Declaring more than one output port without an explicit bento 'output' block
+// must fail loudly: routing cannot be auto-wired, and silently
+// using outputs[0] would drop the others.
+func TestMultiOutput_RequiresExplicitOutput(t *testing.T) {
+	g := New()
+	ctx := &MockContext{
+		config: map[string]any{
+			"ports": map[string]any{
+				"inputs":  []any{"in"},
+				"outputs": []any{"out.high", "out.low"},
+			},
+			"bento": map[string]any{
+				"pipeline": map[string]any{
+					"processors": []any{
+						map[string]any{"mapping": "root = this"},
+					},
+				},
+			},
+		},
+	}
+	err := g.Init(ctx)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "multi-output routing cannot be auto-wired")
+}
+
+// With an explicit switch output the gear must accept multiple declared ports.
+func TestMultiOutput_ExplicitSwitchAccepted(t *testing.T) {
+	g := New()
+	ctx := &MockContext{
+		config: map[string]any{
+			"ports": map[string]any{
+				"inputs":  []any{"in"},
+				"outputs": []any{"out.high", "out.low"},
+			},
+			"bento": map[string]any{
+				"pipeline": map[string]any{
+					"processors": []any{map[string]any{"mapping": "root = this"}},
+				},
+				"output": map[string]any{
+					"switch": map[string]any{
+						"cases": []any{
+							map[string]any{
+								"check":  `this.priority == "high"`,
+								"output": map[string]any{"flux_out_test_gear": map[string]any{"name": "out.high"}},
+							},
+							map[string]any{
+								"check":  `true`,
+								"output": map[string]any{"flux_out_test_gear": map[string]any{"name": "out.low"}},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	err := g.Init(ctx)
+	require.NoError(t, err)
 }
 
 func TestAutoWiring(t *testing.T) {

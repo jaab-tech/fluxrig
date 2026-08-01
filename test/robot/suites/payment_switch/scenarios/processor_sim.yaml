@@ -1,0 +1,87 @@
+# Copyright (c) 2026 JAAB Tech SAS, Uruguay
+# SPDX-License-Identifier: Apache-2.0
+#
+# Processor simulator: a fluxrig Rack that plays the upstream scheme host. It
+# accepts an ISO 8583 request on a listening socket, decodes it, authors an
+# approval response (flip the MTI to a response, set DE39=00, echo the trace and
+# terminal), re-encodes it, and writes it back on the same connection. This is
+# what a Conductor's uplink leg dials during payment-switch validation; it is
+# also a standalone demonstration that fluxrig itself (io + codec + bento) can
+# synthesize protocol responses.
+meta:
+  name: "processor_sim"
+  version: "1.0.0"
+
+racks:
+  - name: "rack-processor"
+    labels:
+      role: "scheme-host"
+
+gears:
+  # Listen for uplink connections from the switch (or a load tool).
+  - name: "sim-ingress"
+    type: "io_iso8583"
+    deploy: "rack-processor"
+    config:
+      mode: "server"
+      bind: ":10000"
+      frame_length_size: 2
+      frame_length_endian: "big"
+      encoding: "ascii"
+      # Strip and preserve the caller's protocol header (the load tool prepends
+      # a 12-byte RTT header before the ISO message) so the codec sees pure ISO
+      # and the header is mirrored back on the response for correlation.
+      protocol_header_size: 12
+      preserve_headers: true
+      strict_connection_routing: true
+
+  - name: "sim-decode"
+    type: "codec_iso8583"
+    deploy: "rack-processor"
+    config:
+      spec_path: "specs/switch.yaml"
+      direction: "decode"
+      on_error: "reject"
+
+  # Author the approval response. Bloblang over the decoded fluxMsg: Data maps
+  # to `root` (iso8583.field.N), Metadata to `meta`. Flip the MTI to a response
+  # (0800 -> 0810, 0200 -> 0210), approve with DE39=00, echo a terminal id.
+  - name: "sim-authorize"
+    type: "bento"
+    deploy: "rack-processor"
+    config:
+      ports:
+        inputs: ["in"]
+        outputs: ["out"]
+      bento:
+        pipeline:
+          processors:
+            - mapping: |
+                root = this
+                # Response MTI = request MTI with the message-function digit
+                # advanced (index 2): 0800 -> 0810, 0200 -> 0210.
+                let req = meta("iso8583.mti")
+                meta "iso8583.mti" = $req.slice(0, 2) + (($req.slice(2, 3).number() + 1).string()) + $req.slice(3)
+                # Approve, and stamp a terminal id on the reply (DE39, DE41).
+                root.iso8583.field."39" = "00"
+                root.iso8583.field."41" = "SIM00001"
+
+  - name: "sim-encode"
+    type: "codec_iso8583"
+    deploy: "rack-processor"
+    config:
+      spec_path: "specs/switch.yaml"
+      direction: "encode"
+      on_error: "reject"
+
+wires:
+  - from: "sim-ingress.out"
+    to: "sim-decode.in"
+  - from: "sim-decode.out"
+    to: "sim-authorize.in"
+  - from: "sim-authorize.out"
+    to: "sim-encode.in"
+  # Write the encoded response back on the same connection it arrived on
+  # (conn.id, preserved through the pipeline, pins it to the caller).
+  - from: "sim-encode.out"
+    to: "sim-ingress.in"

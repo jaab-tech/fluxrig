@@ -122,3 +122,4 @@ func (m *mockGearContext) Bus() bus.Bus             { return m.bus }
 func (m *mockGearContext) Manager() manager.Manager { return nil }
 func (m *mockGearContext) ControlPlane() any        { return nil }
 func (m *mockGearContext) ClusterPublicKey() []byte { return nil }
+func (m *mockGearContext) Emitter() sdk.PortEmitter { return sdk.NewNoopEmitter() }

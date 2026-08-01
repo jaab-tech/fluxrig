@@ -1,0 +1,25 @@
+# Copyright (c) 2026 JAAB Tech SAS, Uruguay
+# SPDX-License-Identifier: Apache-2.0
+#
+# The rack name MUST equal the scenario's deploy target ("rack-switch"), or the
+# switch gears are skipped at ApplyScenario.
+[rack]
+name = "rack-switch"
+machine_id = 100
+enrollment_timeout = "10s"
+
+[bus]
+url = "nats://localhost:4222"
+domain = "flux"
+stream_name = "flux-msg"
+
+[logging]
+level = "info"
+filename = "logs/fluxrig.log"
+max_size_mb = 100
+max_backups = 3
+compress = false
+
+[enrollment]
+timeout = "10s"
+push_delay = "100ms"

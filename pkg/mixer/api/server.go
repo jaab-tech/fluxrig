@@ -26,6 +26,7 @@ import (
 	"github.com/jaab-tech/fluxrig/pkg/config"
 	"github.com/jaab-tech/fluxrig/pkg/controller"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
+	"github.com/jaab-tech/fluxrig/pkg/gears"
 	_ "github.com/jaab-tech/fluxrig/pkg/mixer/api/docs" // Swagger docs
 	"github.com/jaab-tech/fluxrig/pkg/pki"
 	"github.com/jaab-tech/fluxrig/pkg/registry"
@@ -43,6 +44,7 @@ type Server struct {
 	mixerEntityID uuid.UUID
 	cfg           *config.MixerConfig
 	wasmCatalog   WasmCatalog
+	gearFactory   *gears.Factory
 }
 
 // WasmCatalog defines the interface for the Wasm Catalog to avoid circular imports if needed.
@@ -58,6 +60,10 @@ func NewServer(reg registry.Registry, pub message.Publisher, signer *pki.Cluster
 		reg: reg, pub: pub, signer: signer, scenarioCtrl: sc,
 		metricsCache: cache, mixerID: mixerID, mixerEntityID: mixerEntityID, cfg: cfg,
 		wasmCatalog: wasmCat,
+		// The gear manifest catalog is static (built into the binary), so a
+		// single factory serves it. The Mixer knows the same gears a Rack of
+		// the same build does.
+		gearFactory: gears.NewFactory(),
 	}
 }
 
@@ -79,6 +85,8 @@ func (s *Server) Start(addr string) error {
 	mux.HandleFunc("GET /api/v1/topology/list", s.handleTopologyList)
 	mux.HandleFunc("POST /api/v1/wasm/import", s.handleWasmImport)
 	mux.HandleFunc("GET /api/v1/wasm/catalog", s.handleWasmCatalog)
+	mux.HandleFunc("GET /api/v1/gears", s.handleGears)
+	mux.HandleFunc("GET /api/v1/gears/{type}", s.handleGearManifest)
 
 	// Swagger UI
 	mux.Handle("/swagger/", httpSwagger.WrapHandler)
@@ -772,4 +780,38 @@ func (s *Server) handleWasmCatalog(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(list)
+}
+
+// handleGears godoc
+// @Summary List gear manifests
+// @Description Returns the manifest catalog: every gear type this build can run, with identity, ports, and config schema
+// @Tags gears
+// @Produce json
+// @Success 200 {array} sdk.Manifest
+// @Router /gears [get]
+func (s *Server) handleGears(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(s.gearFactory.Manifests())
+}
+
+// handleGearManifest godoc
+// @Summary Get one gear manifest
+// @Description Returns the manifest for a single gear type
+// @Tags gears
+// @Produce json
+// @Param type path string true "Gear type (e.g. io_iso8583)"
+// @Success 200 {object} sdk.Manifest
+// @Failure 404 {object} map[string]string
+// @Router /gears/{type} [get]
+func (s *Server) handleGearManifest(w http.ResponseWriter, r *http.Request) {
+	typ := r.PathValue("type")
+	m, ok := s.gearFactory.Manifest(typ)
+	if !ok {
+		http.Error(w, fmt.Sprintf("unknown gear type %q", typ), http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(m)
 }

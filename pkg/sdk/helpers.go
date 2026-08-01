@@ -107,3 +107,14 @@ func (m *mockGearContext) Bus() bus.Bus             { return nil } // Mock bus n
 func (m *mockGearContext) Manager() manager.Manager { return nil }
 func (m *mockGearContext) ControlPlane() any        { return nil }
 func (m *mockGearContext) ClusterPublicKey() []byte { return nil }
+func (m *mockGearContext) Emitter() PortEmitter     { return noopEmitter{} }
+
+// noopEmitter discards emissions; the mock context is for unit tests that
+// exercise gear config/logic, not the wired emit path.
+type noopEmitter struct{}
+
+func (noopEmitter) Emit(string, *fluxmsg.FluxMsg) error { return nil }
+
+// NewNoopEmitter returns a PortEmitter that discards everything. Gear unit
+// tests use it so a gear that calls ctx.Emitter().Emit(...) does not nil-panic.
+func NewNoopEmitter() PortEmitter { return noopEmitter{} }

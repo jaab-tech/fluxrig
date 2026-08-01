@@ -1,0 +1,134 @@
+# Copyright (c) 2026 JAAB Tech SAS, Uruguay
+# SPDX-License-Identifier: Apache-2.0
+#
+# Chaos variant of the payment switch: the two scheme uplinks connect through
+# Toxiproxy listeners (20001/20002 -> real schemes 10001/10002) so a suite can
+# cut or degrade a link mid-load. Both schemes approve (DE39=00) when healthy,
+# so a decline (91 timeout / 05 no-destination) unambiguously signals a link
+# fault. Cutting scheme A must degrade only BIN 4xxx while BIN 5xxx stays clean
+# (isolation), and restoring it must return BIN 4xxx to approvals (recovery).
+meta:
+  name: "conductor_chaos"
+  version: "1.0.0"
+
+racks:
+  - name: "rack-switch"
+    labels:
+      role: "switch"
+
+gears:
+  - name: "terminals"
+    type: "io_iso8583"
+    deploy: "rack-switch"
+    config:
+      mode: "server"
+      bind: ":8583"
+      frame_length_size: 2
+      frame_length_endian: "big"
+      encoding: "ascii"
+      strict_connection_routing: true
+
+  - name: "decode-request"
+    type: "codec_iso8583"
+    deploy: "rack-switch"
+    config: { spec_path: "specs/auth.yaml", direction: "decode", on_error: "reject" }
+
+  - name: "conductor"
+    type: "conductor"
+    deploy: "rack-switch"
+    config:
+      # STAN (DE11) is per-terminal and wraps, so the key also carries the
+      # terminal id (DE41) and transmission date/time (DE7) to stay globally
+      # unique. In production add the acquirer id (DE32) too.
+      correlation_key: ["iso8583.field.11", "iso8583.field.7", "iso8583.field.41"]
+      valet: { store: "memory", default_ttl: "3s", retain_after_close: "5s" }
+      routes:
+        - name: "scheme-a"
+          match: { field: "iso8583.field.2", prefix: "4" }
+          destination: "out_scheme_a"
+        - name: "scheme-b"
+          match: { field: "iso8583.field.2", prefix: "5" }
+          destination: "out_scheme_b"
+
+  # --- Scheme A uplink (through Toxiproxy :20001) ---
+  - name: "encode-a"
+    type: "codec_iso8583"
+    deploy: "rack-switch"
+    config: { spec_path: "specs/auth.yaml", direction: "encode", on_error: "reject" }
+  - name: "uplink-a"
+    type: "io_iso8583"
+    deploy: "rack-switch"
+    config:
+      mode: "client"
+      connect: "127.0.0.1:20001"
+      frame_length_size: 2
+      frame_length_endian: "big"
+      encoding: "ascii"
+      reconnect_wait: "1s"
+  - name: "decode-a"
+    type: "codec_iso8583"
+    deploy: "rack-switch"
+    config: { spec_path: "specs/auth.yaml", direction: "decode", on_error: "reject" }
+
+  # --- Scheme B uplink (through Toxiproxy :20002) ---
+  - name: "encode-b"
+    type: "codec_iso8583"
+    deploy: "rack-switch"
+    config: { spec_path: "specs/auth.yaml", direction: "encode", on_error: "reject" }
+  - name: "uplink-b"
+    type: "io_iso8583"
+    deploy: "rack-switch"
+    config:
+      mode: "client"
+      connect: "127.0.0.1:20002"
+      frame_length_size: 2
+      frame_length_endian: "big"
+      encoding: "ascii"
+      reconnect_wait: "1s"
+  - name: "decode-b"
+    type: "codec_iso8583"
+    deploy: "rack-switch"
+    config: { spec_path: "specs/auth.yaml", direction: "decode", on_error: "reject" }
+
+  # --- Exception path: author a decline for the terminal ---
+  - name: "decline-builder"
+    type: "bento"
+    deploy: "rack-switch"
+    config:
+      ports:
+        inputs: ["in"]
+        outputs: ["out"]
+      bento:
+        pipeline:
+          processors:
+            - mapping: |
+                root = this
+                let req = meta("iso8583.mti")
+                meta "iso8583.mti" = $req.slice(0, 2) + (($req.slice(2, 3).number() + 1).string()) + $req.slice(3)
+                # 91 = switch inoperative (timeout); 05 = do not honor (no destination).
+                root.iso8583.field."39" = if meta("error.reason") == "timeout" { "91" } else { "05" }
+
+  - name: "encode-response"
+    type: "codec_iso8583"
+    deploy: "rack-switch"
+    config: { spec_path: "specs/auth.yaml", direction: "encode", on_error: "reject" }
+
+wires:
+  - { from: "terminals.out", to: "decode-request.in" }
+  - { from: "decode-request.out", to: "conductor.in" }
+
+  - { from: "conductor.out_scheme_a", to: "encode-a.in" }
+  - { from: "encode-a.out", to: "uplink-a.in" }
+  - { from: "conductor.out_scheme_b", to: "encode-b.in" }
+  - { from: "encode-b.out", to: "uplink-b.in" }
+
+  - { from: "uplink-a.out", to: "decode-a.in" }
+  - { from: "decode-a.out", to: "conductor.in_reply" }
+  - { from: "uplink-b.out", to: "decode-b.in" }
+  - { from: "decode-b.out", to: "conductor.in_reply" }
+
+  - { from: "conductor.out_response", to: "encode-response.in" }
+
+  - { from: "conductor.error", to: "decline-builder.in" }
+  - { from: "decline-builder.out", to: "encode-response.in" }
+  - { from: "encode-response.out", to: "terminals.in" }

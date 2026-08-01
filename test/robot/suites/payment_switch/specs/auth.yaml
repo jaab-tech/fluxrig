@@ -1,0 +1,127 @@
+meta:
+  name: "payment_switch_auth"
+  version: "1.0.0"
+spec:
+fields:
+  0:
+    label: "MTI"
+    type: "numeric"
+    length: 4
+    enc: "ascii"
+    pad: "none"
+  1:
+    label: "Bitmap"
+    type: "binary"
+    length: 8
+    enc: "binary"
+  2:
+    label: "PAN"
+    type: "llvar_n"
+    length: 19
+    alias: "card.pan"
+    log_mask: true
+    enc: "ascii"
+  3:
+    label: "Processing Code"
+    type: "numeric"
+    length: 6
+    enc: "ascii"
+  4:
+    label: "Amount"
+    type: "numeric"
+    length: 12
+    enc: "ascii"
+  7:
+    label: "Transmission Date & Time"
+    type: "numeric"
+    length: 10
+    enc: "ascii"
+  11:
+    label: "STAN"
+    type: "numeric"
+    length: 6
+    alias: "stan"
+    enc: "ascii"
+  12:
+    label: "Time, Local Transaction"
+    type: "numeric"
+    length: 6
+    enc: "ascii"
+  13:
+    label: "Date, Local Transaction"
+    type: "numeric"
+    length: 4
+    enc: "ascii"
+  14:
+    label: "Date, Expiration"
+    type: "numeric"
+    length: 4
+    enc: "ascii"
+  22:
+    label: "POS Entry Mode"
+    type: "numeric"
+    length: 3
+    enc: "ascii"
+  23:
+    label: "Card Sequence Number"
+    type: "numeric"
+    length: 3
+    enc: "ascii"
+  25:
+    label: "POS Condition Code"
+    type: "numeric"
+    length: 2
+    enc: "ascii"
+  26:
+    label: "POS Capture Code"
+    type: "numeric"
+    length: 2
+    enc: "ascii"
+  35:
+    label: "Track 2 Data"
+    type: "llvar"
+    length: 37
+    enc: "ascii"
+  37:
+    label: "Retrieval Reference Number"
+    type: "alpha"
+    length: 12
+    enc: "ascii"
+  38:
+    label: "Authorization ID"
+    type: "alpha"
+    length: 6
+    alias: "auth_id"
+    enc: "ascii"
+  39:
+    label: "Response Code"
+    type: "alpha"
+    length: 2
+    alias: "response_code"
+    enc: "ascii"
+  41:
+    label: "Terminal ID"
+    type: "alpha"
+    length: 8
+    alias: "terminal_id"
+    enc: "ascii"
+  42:
+    label: "Card Acceptor ID"
+    type: "alpha"
+    length: 15
+    enc: "ascii"
+  43:
+    label: "Card Acceptor Name/Location"
+    type: "alpha"
+    length: 40
+    enc: "ascii"
+  49:
+    label: "Currency Code"
+    type: "numeric"
+    length: 3
+    enc: "ascii"
+  70:
+    label: "Network Management Information Code"
+    type: "numeric"
+    length: 3
+    enc: "ascii"
