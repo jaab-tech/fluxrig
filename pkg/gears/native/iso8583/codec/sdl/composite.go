@@ -13,6 +13,15 @@ import (
 	"github.com/moov-io/iso8583/field"
 )
 
+const (
+	// maxTLVLengthBytes bounds the BER-TLV long form. Four bytes already allow a
+	// 4 GB value, far beyond any ISO 8583 field, and staying under the width of an
+	// int keeps the accumulation in decodeTLVLength free of overflow.
+	maxTLVLengthBytes = 4
+	// maxTLVValueLen is the largest TLV value length accepted from the wire.
+	maxTLVValueLen = 1 << 20
+)
+
 // CompositeConfig holds the parsing rules for the composite field.
 type CompositeConfig struct {
 	Structure string // "fixed", "tlv", "dataset"
@@ -209,7 +218,9 @@ func (c *CompositeField) unpackSubfields(content []byte) error {
 			}
 			offset += read
 
-			if offset+valLen > len(content) {
+			// valLen is already bounded by decodeTLVLength; the negative guard is
+			// kept so a future length decoder cannot silently drive offset backwards.
+			if valLen < 0 || offset+valLen > len(content) {
 				return fmt.Errorf("TLV field %s: length %d exceeds remaining data %d", tagName, valLen, len(content)-offset)
 			}
 
@@ -367,7 +378,14 @@ func (c *CompositeField) decodeTLVLength(data []byte) (int, int, error) {
 		if b < 0x80 {
 			return int(b), 1, nil
 		}
+		// BER-TLV long form: the low 7 bits give the number of length bytes that
+		// follow. Cap it: accumulating more than maxTLVLengthBytes shifts past the
+		// width of an int, so a crafted length such as 0x88 0x80 00 00 00 00 00 00 00
+		// (2^63) would wrap negative and drive the caller's offset out of range.
 		numBytes := int(b & 0x7F)
+		if numBytes == 0 || numBytes > maxTLVLengthBytes {
+			return 0, 0, fmt.Errorf("unsupported multi-byte length: %d length bytes", numBytes)
+		}
 		if len(data) < 1+numBytes {
 			return 0, 0, fmt.Errorf("truncated multi-byte length")
 		}
@@ -375,17 +393,26 @@ func (c *CompositeField) decodeTLVLength(data []byte) (int, int, error) {
 		for i := 0; i < numBytes; i++ {
 			val = (val << 8) | int(data[1+i])
 		}
+		if val < 0 || val > maxTLVValueLen {
+			return 0, 0, fmt.Errorf("invalid TLV length: %d", val)
+		}
 		return val, 1 + numBytes, nil
 
 	case "bcd":
-		val := int((data[0]>>4)*10 + (data[0] & 0x0F))
-		return val, 1, nil
+		hi, lo := data[0]>>4, data[0]&0x0F
+		if hi > 9 || lo > 9 {
+			return 0, 0, fmt.Errorf("invalid bcd length byte: %#02x", data[0])
+		}
+		return int(hi)*10 + int(lo), 1, nil
 
 	default: // ascii
 		if len(data) < 2 {
 			return 0, 0, fmt.Errorf("truncated ascii length")
 		}
-		val, _ := strconv.Atoi(string(data[:2]))
+		val, err := strconv.Atoi(string(data[:2]))
+		if err != nil || val < 0 {
+			return 0, 0, fmt.Errorf("invalid ascii length %q", string(data[:2]))
+		}
 		return val, 2, nil
 	}
 }

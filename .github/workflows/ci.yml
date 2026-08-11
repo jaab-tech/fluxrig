@@ -70,9 +70,6 @@ jobs:
           mkdir -p bin
           go build -v -o bin/fluxrig ./cmd/fluxrig
           go build -v -o bin/fluxrig-mixer ./cmd/fluxrig-mixer
-      - name: Archive binaries
-        uses: actions/upload-artifact@v7
-        with:
-          name: fluxrig-binaries
-          path: bin/
-          retention-days: 5
+      # No artifact upload: nothing consumes the binaries (releases are built
+      # locally via `make publish`), and storing ~75 MB per push exhausted the
+      # Actions storage quota. The build step itself is the CI signal.

@@ -664,7 +664,7 @@ info:
     name: Apache 2.0
     url: http://www.apache.org/licenses/LICENSE-2.0.html
   title: fluxrig Mixer API
-  version: v0.7.0
+  version: v0.7.1
 paths:
   /config:
     get:

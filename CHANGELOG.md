@@ -18,13 +18,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 | Version | Date | Status | Summary |
 | :--- | :--- | :--- | :--- |
-| [Unreleased](#unreleased) | | Active | (next release) |
+| [v0.7.1](#v071) | 2026-08-10 | Delivered | ISO 8583 TLV length hardening |
 | [v0.7.0](#v070) | 2026-08-01 | Delivered | Payment switch: Conductor gear, gear manifests, ISO 8583 TLS |
 
 
-## [Unreleased] {#unreleased}
-### Added
-- 
+## [v0.7.1] - 2026-08-10 {#v071}
+
+### Fixed
+- **ISO 8583 TLV length hardening**: a crafted BER-TLV long-form length in a composite field (for example ICC data in DE 55) could wrap to a negative value, bypass the bounds check and crash the codec while skipping the unknown tag. Length decoding now rejects unsupported long forms, out-of-range values, invalid BCD length bytes and non-numeric ASCII lengths, so malformed input is reported as an error instead of failing the message.
+
 
 ## [v0.7.0] - 2026-08-01 {#v070}
 
@@ -160,7 +162,6 @@ The payment-switch release: the **Conductor** transaction switch, a manifest sys
 - **Snake Protocol**: Secure tunneling implementation for Rack-to-Mixer connectivity.
 - **FluxMsg**: Canonical JSON schema for inter-gear communication.
 
-[Unreleased]: https://github.com/jaab-tech/fluxrig/compare/v0.7.0...HEAD
 [v0.7.0]: https://github.com/jaab-tech/fluxrig/releases/tag/v0.7.0
 [v0.6.1]: https://github.com/jaab-tech/fluxrig/releases/tag/v0.6.1
 [v0.6.0]: https://github.com/jaab-tech/fluxrig/releases/tag/v0.6.0
