@@ -146,6 +146,90 @@ func TestCompositeField_TLV_UnknownTag(t *testing.T) {
 	assert.Empty(t, comp.values["5e"])
 }
 
+// TestCompositeField_TLV_MalformedLength covers lengths crafted to drive the
+// unpack offset out of range. A BER-TLV long form declaring eight length bytes
+// of 2^63 used to wrap to a negative int, slip past the bounds check and panic
+// the parser on the next iteration; malformed input must return an error.
+func TestCompositeField_TLV_MalformedLength(t *testing.T) {
+	tests := []struct {
+		name string
+		hex  string
+	}{
+		{
+			// TAG 8A (unknown), long form: 8 length bytes encoding 2^63.
+			name: "long form overflows to negative",
+			hex:  "8a888000000000000000",
+		},
+		{
+			// Same shape but a large positive length: must not read past the buffer.
+			name: "long form exceeds remaining data",
+			hex:  "8a887fffffffffffffff",
+		},
+		{
+			// 4 length bytes, still far beyond the accepted value length.
+			name: "length above accepted maximum",
+			hex:  "8a847fffffff",
+		},
+		{
+			// Long form announcing more bytes than are present.
+			name: "truncated long form",
+			hex:  "8a8800",
+		},
+		{
+			// Long form with a zero length-byte count is not valid BER-TLV.
+			name: "zero length bytes",
+			hex:  "8a80",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			comp := NewCompositeField(&field.Spec{}, CompositeConfig{
+				Structure: "tlv",
+				TagEnc:    "hex",
+				LenEnc:    "binary",
+			})
+			data, err := hex.DecodeString(tc.hex)
+			require.NoError(t, err)
+
+			require.NotPanics(t, func() {
+				err = comp.unpackSubfields(data)
+			})
+			require.Error(t, err)
+		})
+	}
+}
+
+func TestCompositeField_TLV_LongFormLength(t *testing.T) {
+	comp := NewCompositeField(&field.Spec{}, CompositeConfig{
+		Structure: "tlv",
+		TagEnc:    "hex",
+		LenEnc:    "binary",
+	})
+	comp.AddSubfield("4f", field.NewString(&field.Spec{Length: 2, Pref: prefix.ASCII.Fixed}))
+
+	// TAG 4F, long form with a single length byte (0x81 0x02), value "HI".
+	data, err := hex.DecodeString("4f81024849")
+	require.NoError(t, err)
+
+	require.NoError(t, comp.unpackSubfields(data))
+	assert.Equal(t, "HI", comp.values["4f"])
+}
+
+func TestCompositeField_TLV_InvalidBCDLength(t *testing.T) {
+	comp := NewCompositeField(&field.Spec{}, CompositeConfig{
+		Structure: "tlv",
+		TagEnc:    "hex",
+		LenEnc:    "bcd",
+	})
+
+	// 0xFF is not a valid BCD pair; it used to decode as length 165.
+	data, err := hex.DecodeString("4fff4849")
+	require.NoError(t, err)
+
+	require.Error(t, comp.unpackSubfields(data))
+}
+
 func TestCompositeField_Unmarshal_InvalidType(t *testing.T) {
 	comp := NewCompositeField(&field.Spec{}, CompositeConfig{})
 	var i int
