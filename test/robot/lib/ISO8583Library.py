@@ -5,6 +5,7 @@ import subprocess
 import json
 import os
 import signal
+import socket
 import time
 import threading
 from robot.api import logger
@@ -13,9 +14,7 @@ class ISO8583Library:
     """
     Robot Framework Library for ISO8583 Performance & Functional Testing.
     Wraps 'iso8583-load' (Go) and 'iso8583_tool.py' (Python).
-    
-    import socket
-    
+
     Supports ASYNC execution for specialized load variance scenarios (Spikes, Steps).
     """
 
@@ -238,6 +237,56 @@ class ISO8583Library:
             logger.info("Stopping ISO Tool Server...")
             os.killpg(os.getpgid(self._server_process.pid), signal.SIGTERM)
             self._server_process.wait()
+
+    # --- Single-message exchange ---
+
+    def send_iso_message(self, message_hex, target="localhost:8583", header_len=2, timeout=10):
+        """Sends one framed ISO8583 message and returns the reply as a hex string.
+
+        Every other keyword here drives the load generator, which builds its own
+        traffic. Fidelity tests need the opposite: one exact message, chosen
+        byte by byte, compared against exactly what comes back.
+
+        The message is sent verbatim. Nothing here parses or rebuilds it, so a
+        difference between what goes out and what returns is the system under
+        test, never the harness.
+
+        `header_len` is the size of the big-endian length prefix that frames the
+        message on the wire, matching the gear's `frame_length_size`.
+        """
+        payload = bytes.fromhex(message_hex.replace(" ", "").replace("\n", ""))
+        header_len = int(header_len)
+        frame = len(payload).to_bytes(header_len, "big") + payload
+
+        host, _, port = target.rpartition(":")
+        logger.info(f"Sending {len(payload)} bytes to {target}: {payload.hex()}")
+
+        with socket.create_connection((host, int(port)), timeout=float(timeout)) as sock:
+            sock.settimeout(float(timeout))
+            sock.sendall(frame)
+
+            reply_header = self._recv_exactly(sock, header_len)
+            reply_len = int.from_bytes(reply_header, "big")
+            reply = self._recv_exactly(sock, reply_len)
+
+        logger.info(f"Received {len(reply)} bytes: {reply.hex()}")
+        return reply.hex()
+
+    def _recv_exactly(self, sock, count):
+        """Reads exactly count bytes, because a short read is a test result too.
+
+        Returning whatever happened to arrive would turn a truncated reply into
+        a confusing byte-comparison failure instead of a clear one.
+        """
+        buf = b""
+        while len(buf) < count:
+            chunk = sock.recv(count - len(buf))
+            if not chunk:
+                raise AssertionError(
+                    f"connection closed after {len(buf)} of {count} expected bytes"
+                )
+            buf += chunk
+        return buf
 
     # --- Helpers ---
 

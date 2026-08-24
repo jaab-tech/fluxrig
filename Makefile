@@ -279,6 +279,10 @@ test-robot-iso: build-bin iso8583-tool ## Run Robot ISO8583 Suite
 	@echo "Running Robot ISO8583 Suite (Validation)..."
 	@./test/robot/run.sh test/robot/suites/iso8583/server_validation.robot
 
+test-robot-tlv: build-bin iso8583-tool ## Run Robot ISO8583 TLV Fidelity Suite
+	@echo "Running Robot ISO8583 TLV Fidelity Suite..."
+	@./test/robot/run.sh test/robot/suites/iso8583/tlv_fidelity.robot
+
 test-robot-coatcheck: build-bin ## Run Robot Coatcheck Suite
 	@echo "Running Robot Coatcheck Suite..."
 	@./test/robot/run.sh test/robot/suites/iso8583/coatcheck_loop.robot
@@ -295,7 +299,7 @@ test-robot-conductor: robot-prep build-bin iso8583-tool ## Run Robot Conductor S
 	@echo "Running Conductor Stress + Chaos Suite (chaos needs toxiproxy-server on PATH)..."
 	@cd test/robot && ./run.sh suites/conductor
 
-test-robot: test-robot-iso test-robot-coatcheck test-robot-topology test-robot-telemetry ## Run all Robot Framework suites
+test-robot: test-robot-iso test-robot-tlv test-robot-coatcheck test-robot-topology test-robot-telemetry ## Run all Robot Framework suites
 
 test-robot-staged: robot-prep build-bin ## Run Robot Staged Load Suite (QoS Validation)
 	@echo "Running Staged Load Test..."

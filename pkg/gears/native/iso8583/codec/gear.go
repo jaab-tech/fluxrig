@@ -9,8 +9,10 @@ import (
 	"log/slog"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/moov-io/iso8583"
+	"github.com/moov-io/iso8583/field"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -221,31 +223,105 @@ func (g *Gear) decode(msg *fluxmsg.FluxMsg) (string, []int, error) {
 			continue
 		}
 
+		raw, rawErr := isoMsg.GetBytes(i)
+		stored := storable(val, raw, rawErr)
+
 		alias, ok := g.meta.Aliases[i]
 		if ok {
-			_ = msg.Set(alias, val)
+			_ = msg.Set(alias, stored)
 		}
-		// Always store in Data with field prefix for transparency/trace
-		_ = msg.Set(fmt.Sprintf("iso8583.field.%d", i), val)
+		// Always store in Data with field prefix for transparency/trace.
+		key := fmt.Sprintf("iso8583.field.%d", i)
+		_ = msg.Set(key, stored)
 
 		// Subfield Extraction
 		f := isoMsg.GetField(i)
-		if comp, ok := f.(*sdl.CompositeField); ok {
-			for subKey, subVal := range comp.GetSubvalues() {
+		if comp, ok := f.(*field.Composite); ok {
+			for subKey, subField := range comp.GetSubfields() {
+				subVal, err := subField.String()
+				if err != nil {
+					continue
+				}
+				subRaw, subRawErr := subField.Bytes()
+				subStored := storable(subVal, subRaw, subRawErr)
+
 				// 1. Raw Subfield ID
-				_ = msg.Set(fmt.Sprintf("iso8583.field.%d.%s", i, subKey), subVal)
+				_ = msg.Set(fmt.Sprintf("iso8583.field.%d.%s", i, subKey), subStored)
 
 				// 2. Alias for Subfield (if defined)
 				if subAliases, hasSubAliases := g.meta.SubAliases[i]; hasSubAliases {
 					if alias, hasAlias := subAliases[subKey]; hasAlias {
-						_ = msg.Set(alias, subVal)
+						_ = msg.Set(alias, subStored)
 					}
 				}
 			}
 		}
 	}
 
+	g.preserveUnknownTags(isoMsg, msg)
+
 	return mti, presentFields, nil
+}
+
+// storable picks the representation a decoded value must take to survive the
+// bus.
+//
+// A fluxMsg travels as CBOR, which encodes a Go string as a text string and so
+// requires valid UTF-8. Binary payloads -- composites, PIN blocks, MACs, EMV
+// tags -- are not text, and holding them in a string corrupts the message the
+// first time it crosses a rack boundary: the receiving end rejects the whole
+// message, not just the offending field.
+//
+// Every place a decoded value enters Data must go through here. A single path
+// that skips it, an alias for instance, is enough to lose the message.
+func storable(val string, raw []byte, rawErr error) any {
+	if rawErr == nil && !utf8.ValidString(val) {
+		return raw
+	}
+	return val
+}
+
+// unknownTagsKey holds TLV tags present on the wire but absent from the spec.
+// They are kept so a re-encoded message still carries the brand-specific data
+// it arrived with, which for a switch is the difference between forwarding a
+// message and quietly truncating it.
+const unknownTagsKey = "iso8583.unknown_tags"
+
+// toBytes reports whether a Data value is a binary payload. CBOR decodes a byte
+// string back into []byte, so a value that made the round trip across the bus
+// still arrives as bytes rather than as text.
+func toBytes(v any) ([]byte, bool) {
+	switch b := v.(type) {
+	case []byte:
+		return b, true
+	default:
+		return nil, false
+	}
+}
+
+// preserveUnknownTags copies retained unknown TLV tags into the fluxMsg.
+//
+// Values are stored as []byte on purpose. A fluxMsg crosses gear and rack
+// boundaries as CBOR, which encodes a Go string as a text string and therefore
+// requires valid UTF-8; an unknown TLV value is arbitrary binary and would fail
+// to survive that round trip. Byte slices encode as CBOR byte strings and come
+// back identical.
+func (g *Gear) preserveUnknownTags(isoMsg *iso8583.Message, msg *fluxmsg.FluxMsg) {
+	unknown := iso8583.UnknownTags(isoMsg)
+	if len(unknown) == 0 {
+		return
+	}
+	tags := make(map[string][]byte, len(unknown))
+	for path, f := range unknown {
+		raw, err := f.Bytes()
+		if err != nil {
+			continue
+		}
+		tags[path] = raw
+	}
+	if len(tags) > 0 {
+		msg.Data[unknownTagsKey] = tags
+	}
 }
 
 func (g *Gear) encode(msg *fluxmsg.FluxMsg) (string, []int, error) {
@@ -287,6 +363,17 @@ func (g *Gear) encode(msg *fluxmsg.FluxMsg) (string, []int, error) {
 		key := fmt.Sprintf("iso8583.field.%d", i)
 		val, ok := msg.Get(key)
 		if !ok {
+			continue
+		}
+		// Binary payloads arrive as bytes (see decode) and must be set as such,
+		// otherwise the value is reinterpreted as text and the field is
+		// corrupted. This is also what carries unknown TLV tags back out: they
+		// live inside the composite's raw bytes.
+		if raw, isBytes := toBytes(val); isBytes {
+			if err := isoMsg.BinaryField(i, raw); err != nil {
+				return mti, presentFields, fmt.Errorf("failed to set raw field %d: %w", i, err)
+			}
+			presentFields = append(presentFields, i)
 			continue
 		}
 		strVal := fmt.Sprintf("%v", val)

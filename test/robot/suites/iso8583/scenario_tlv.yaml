@@ -1,0 +1,61 @@
+# Copyright 2026 JAAB Tech SAS, Uruguay
+#
+# TLV fidelity topology.
+#
+# A single server gear loops back through a decode/encode pair, so a message
+# entering the port comes back out having been fully parsed into a fluxMsg and
+# rebuilt from it.
+#
+# The decode/encode split is what makes the run meaningful. Echoing the raw
+# frame would prove nothing; the message has to be taken apart, cross the bus as
+# CBOR, and be reassembled, which is where chip data carried as text is lost.
+meta:
+  name: "iso8583_tlv"
+  version: "1.0.0"
+
+racks:
+  - name: "iso-node-01"
+    labels:
+      tier: "edge"
+
+gears:
+  - name: "iso-gateway"
+    type: "io_iso8583"
+    deploy: "iso-node-01"
+    config:
+      mode: "server"
+      bind: ":8583"
+      frame_length_size: 2
+      frame_length_endian: "big"
+      encoding: "ascii"
+      # No protocol header: the suite sends bare framed messages so that any
+      # difference between request and reply is the codec and nothing else.
+      preserve_headers: false
+      strict_connection_routing: true
+
+  - name: "codec-decode"
+    type: "codec_iso8583"
+    deploy: "iso-node-01"
+    config:
+      # Resolved against the Rack's working directory; the suite provisions it.
+      spec_path: "specs/tlv.yaml"
+      direction: "decode"
+      on_error: "reject"
+
+  - name: "codec-encode"
+    type: "codec_iso8583"
+    deploy: "iso-node-01"
+    config:
+      spec_path: "specs/tlv.yaml"
+      direction: "encode"
+      on_error: "reject"
+
+wires:
+  - from: "iso-gateway.out"
+    to: "codec-decode.in"
+
+  - from: "codec-decode.out"
+    to: "codec-encode.in"
+
+  - from: "codec-encode.out"
+    to: "iso-gateway.in"

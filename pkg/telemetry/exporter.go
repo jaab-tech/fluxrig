@@ -12,7 +12,6 @@ import (
 
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
-	otellog "go.opentelemetry.io/otel/log"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -172,7 +171,7 @@ func (e *LogExporter) Export(ctx context.Context, records []sdklog.Record) error
 			r["span_id"] = rec.SpanID().String()
 		}
 		attrs := make(map[string]interface{})
-		rec.WalkAttributes(func(kv otellog.KeyValue) bool {
+		rec.WalkAttributes(func(kv attribute.KeyValue) bool {
 			attrs[string(kv.Key)] = logValueToInterface(kv.Value)
 			return true
 		})
@@ -404,23 +403,13 @@ func (e *MetricExporter) Aggregation(k sdkmetric.InstrumentKind) sdkmetric.Aggre
 func (e *MetricExporter) Shutdown(ctx context.Context) error   { return nil }
 func (e *MetricExporter) ForceFlush(ctx context.Context) error { return nil }
 
-func logValueToInterface(v otellog.Value) interface{} {
-	switch v.Kind() {
-	case otellog.KindBool:
-		return v.AsBool()
-	case otellog.KindFloat64:
-		return v.AsFloat64()
-	case otellog.KindInt64:
-		return v.AsInt64()
-	case otellog.KindString:
-		return v.AsString()
-	case otellog.KindBytes:
-		return v.AsBytes()
-	case otellog.KindSlice:
-		return v.AsString() // Simplify slice for now
-	case otellog.KindMap:
-		return v.AsString() // Simplify map for now
-	default:
-		return v.AsString()
-	}
+// logValueToInterface converts an OTel attribute value into the plain Go value
+// that goes onto the bus.
+//
+// The log signal used to carry its own value type; since otel/log v0.21.0 it
+// shares attribute.Value with traces and metrics, and that type already knows
+// how to unwrap itself. The switch this replaces mapped each kind by hand and
+// flattened slices and maps to their string form, which lost their contents.
+func logValueToInterface(v attribute.Value) interface{} {
+	return v.AsInterface()
 }

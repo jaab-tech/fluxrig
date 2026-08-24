@@ -246,6 +246,14 @@ func (n *NatsBus) Subscribe(subject string, handler Handler) (Subscription, erro
 		var fluxMsg fluxmsg.FluxMsg
 
 		if errUnmarshal := cbor.Unmarshal(msg.Data(), &fluxMsg); errUnmarshal != nil {
+			// A message that cannot be decoded used to vanish here without a
+			// trace, which reads downstream as a gear that never received
+			// anything rather than as a message that was thrown away.
+			slog.Error("NATS Bus: Discarding undecodable message",
+				"subject", subject,
+				"bytes", len(msg.Data()),
+				"error", errUnmarshal,
+			)
 			return
 		}
 
@@ -343,8 +351,14 @@ func (n *NatsBus) SubscribeDurable(subject, durableName string, handler Handler)
 		// Deserialize
 		var fluxMsg fluxmsg.FluxMsg
 		if errUnmarshal := cbor.Unmarshal(msg.Data(), &fluxMsg); errUnmarshal != nil {
-			// If corrupt, we still Ack to move past it?
-			// Ideally dead letter queue, but for now Ack + Log error (if logger avail)
+			// Acked rather than left to redeliver: a message that cannot be
+			// decoded will not decode on the next attempt either, and holding
+			// it stalls the consumer. A dead letter queue is the real answer.
+			slog.Error("NATS Bus: Discarding undecodable message",
+				"subject", subject,
+				"bytes", len(msg.Data()),
+				"error", errUnmarshal,
+			)
 			_ = msg.Ack()
 			return
 		}

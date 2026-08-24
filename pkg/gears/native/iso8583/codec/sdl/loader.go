@@ -177,39 +177,9 @@ func buildMoovField(id int, f SDLField) (field.Field, error) {
 	}
 
 	// 3. Create moov-io field by type
-	// If structure is defined, use CompositeField
+	// A structured field becomes a native moov Composite; see buildComposite.
 	if f.Structure != "" {
-		cfg := CompositeConfig{
-			Structure: f.Structure,
-			TagEnc:    f.TLVTagEnc,
-			LenEnc:    f.TLVLenEnc,
-		}
-		comp := NewCompositeField(spec, cfg)
-
-		// Sort subkeys for deterministic order
-		subKeys := make([]string, 0, len(f.Sub))
-		for k := range f.Sub {
-			subKeys = append(subKeys, k)
-		}
-		sort.Strings(subKeys)
-
-		for _, k := range subKeys {
-			subF := f.Sub[k]
-			// Recursive build for subfield
-			// Note: subfield 'id' is irrelevant for map[string]Field, but needed for buildMoovField signature.
-			// We can pass 0 or parse k if numeric.
-			// But buildMoovField expects an int ID.
-			// Currently CompositeField stores map[string]Field.
-			// We need a version of buildMoovField that doesn't depend on ID for type selection (it uses f.Type).
-			subField, err := buildMoovField(0, subF)
-			if err != nil {
-				return nil, fmt.Errorf("failed to build subfield %s: %w", k, err)
-			}
-			if subField != nil {
-				comp.AddSubfield(k, subField)
-			}
-		}
-		return comp, nil
+		return buildComposite(f, spec)
 	}
 
 	var res field.Field
