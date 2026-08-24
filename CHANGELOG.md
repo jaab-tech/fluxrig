@@ -18,8 +18,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 | Version | Date | Status | Summary |
 | :--- | :--- | :--- | :--- |
+| [v0.8.0](#v080) | 2026-08-24 | Delivered | EMV chip data: BER-TLV parsing with unknown-tag preservation |
 | [v0.7.1](#v071) | 2026-08-10 | Delivered | ISO 8583 TLV length hardening |
 | [v0.7.0](#v070) | 2026-08-01 | Delivered | Payment switch: Conductor gear, gear manifests, ISO 8583 TLS |
+
+
+## [v0.8.0] - 2026-08-24 {#v080}
+
+The EMV release: fluxrig parses BER-TLV composite fields, and carries the tags it does not model through untouched.
+
+### Added
+- **BER-TLV composite parsing**: a field declared `structure: tlv`, such as ICC data in DE 55, is parsed into its EMV tags. Tags the spec does not declare are retained rather than discarded and re-emitted on encode, which is what forwarding to a scheme depends on, and are exposed to downstream gears under `iso8583.unknown_tags`. Validated by a round trip across a serialization boundary and by a Robot suite against a running Rack.
+  - Tag order is canonical rather than preserved: tags are re-emitted sorted, so every value survives but the byte layout of a field may differ from the one that arrived.
+
+### Changed
+- **Binary field values cross the bus as bytes**: a field whose value is not valid UTF-8, such as chip data, PIN blocks or MACs, is placed on the `fluxMsg` as bytes rather than as a string, including when reached through an `alias` or as a composite subfield. Gears and pipelines reading such a field now receive `[]byte` where they received a `string`. Serialization requires it: a Go string holding binary is not valid CBOR text, so a spec declaring a binary field previously lost the message at the first rack boundary.
+
+### Fixed
+- **The bus no longer drops undecodable messages silently**: a message that cannot be decoded is logged with its subject and the reason, instead of being discarded without trace.
 
 
 ## [v0.7.1] - 2026-08-10 {#v071}

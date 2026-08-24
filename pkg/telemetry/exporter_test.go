@@ -79,7 +79,7 @@ func TestLogExporter_Export(t *testing.T) {
 	// Create detailed Record
 	rec := sdklog.Record{}
 	rec.SetTimestamp(time.Now())
-	rec.SetBody(log.StringValue("test log body"))
+	rec.SetBody(attribute.StringValue("test log body"))
 	rec.SetSeverity(log.SeverityInfo)
 	rec.SetSeverityText("INFO")
 

@@ -1,0 +1,59 @@
+# Copyright 2026 JAAB Tech SAS, Uruguay
+#
+# TLV fidelity round trip.
+#
+# A message carrying EMV chip data (DE 55) enters, is decoded into a fluxMsg,
+# crosses the bus, and is re-encoded on the way out. The message contains a TLV
+# tag the spec does not declare, which must arrive at the far end untouched.
+#
+# The decode/encode pair is the point: preservation inside one gear proves
+# nothing, because a switch re-encodes on a different gear and often on a
+# different rack. Between the two the message is CBOR on the wire, which is
+# where a binary field carried as text would be lost.
+meta:
+  name: "iso8583_tlv_roundtrip"
+  version: "1.0.0"
+
+racks:
+  - name: "rack-iso-01"
+    labels:
+      tier: "edge"
+
+gears:
+  - name: "iso-gateway"
+    type: "io_iso8583"
+    deploy: "rack-iso-01"
+    config:
+      mode: "server"
+      bind: ":8583"
+      frame_length_size: 2
+      frame_length_endian: "big"
+      encoding: "ascii"
+
+  - name: "codec-decode"
+    type: "codec_iso8583"
+    deploy: "rack-iso-01"
+    config:
+      spec_path: "specs/e2e_tlv.yaml"
+      direction: "decode"
+      on_error: "reject"
+
+  - name: "codec-encode"
+    type: "codec_iso8583"
+    deploy: "rack-iso-01"
+    config:
+      spec_path: "specs/e2e_tlv.yaml"
+      direction: "encode"
+      on_error: "reject"
+
+wires:
+  # Ingress -> decode -> encode -> back out to the sender.
+  # What returns must be byte-identical to what arrived, unknown tag included.
+  - from: "iso-gateway.out"
+    to: "codec-decode.in"
+
+  - from: "codec-decode.out"
+    to: "codec-encode.in"
+
+  - from: "codec-encode.out"
+    to: "iso-gateway.in"

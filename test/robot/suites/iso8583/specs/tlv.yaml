@@ -1,0 +1,85 @@
+# Copyright 2026 JAAB Tech SAS, Uruguay
+#
+# ISO 8583 spec exercising a BER-TLV composite (DE 55, EMV ICC data).
+#
+# DE 55 declares three EMV tags. Any other tag arriving inside it is unknown to
+# this spec and must survive a decode/encode cycle untouched, which is what a
+# switch forwarding to a scheme depends on. The declared set is deliberately
+# incomplete: real chip data carries far more tags than any switch models.
+meta:
+  name: "robot_tlv"
+  version: "1.0.0"
+
+fields:
+  0:
+    label: "MTI"
+    type: "numeric"
+    length: 4
+    enc: "ascii"
+  1:
+    label: "Bitmap"
+    type: "binary"
+    length: 8
+    enc: "binary"
+  2:
+    label: "PAN"
+    type: "llvar_n"
+    length: 19
+    alias: "card.pan"
+    log_mask: true
+    enc: "ascii"
+  3:
+    label: "Processing Code"
+    type: "numeric"
+    length: 6
+    enc: "ascii"
+  4:
+    label: "Amount"
+    type: "numeric"
+    length: 12
+    enc: "ascii"
+  11:
+    label: "STAN"
+    type: "numeric"
+    length: 6
+    alias: "stan"
+    enc: "ascii"
+  39:
+    label: "Response Code"
+    type: "alpha"
+    length: 2
+    alias: "response_code"
+    enc: "ascii"
+  41:
+    label: "Terminal ID"
+    type: "alpha"
+    length: 8
+    alias: "terminal_id"
+    enc: "ascii"
+  55:
+    label: "ICC Data"
+    type: "lllvar"
+    length: 999
+    alias: "icc_data"
+    enc: "binary"
+    len_enc: "ascii"
+    structure: "tlv"
+    tlv_tag_encoding: "hex"
+    tlv_len_encoding: "binary"
+    subfields:
+      "82":
+        label: "Application Interchange Profile"
+        type: "binary"
+        enc: "binary"
+      "9F02":
+        label: "Amount, Authorized"
+        type: "binary"
+        enc: "binary"
+      "9F36":
+        label: "Application Transaction Counter"
+        type: "binary"
+        enc: "binary"
+      "5F2A":
+        label: "Transaction Currency Code"
+        type: "binary"
+        enc: "binary"

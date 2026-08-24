@@ -11,7 +11,6 @@ import (
 
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
-	otellog "go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/jaab-tech/fluxrig/pkg/bus"
@@ -40,12 +39,12 @@ func TestIsAllowedMetricAttribute(t *testing.T) {
 }
 
 func TestLogValueToInterface(t *testing.T) {
-	v := otellog.StringValue("test")
+	v := attribute.StringValue("test")
 	if got := logValueToInterface(v); got != "test" {
 		t.Errorf("Expected test, got %v", got)
 	}
 
-	v = otellog.Int64Value(42)
+	v = attribute.Int64Value(42)
 	if got := logValueToInterface(v); got != int64(42) {
 		t.Errorf("Expected 42, got %v", got)
 	}
