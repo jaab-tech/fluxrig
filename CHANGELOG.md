@@ -18,10 +18,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 | Version | Date | Status | Summary |
 | :--- | :--- | :--- | :--- |
+| [v0.9.0](#v090) | 2026-09-03 | Delivered | Enrichment from outside the message, and correlation keys that survive a bus hop |
 | [v0.8.0](#v080) | 2026-08-24 | Delivered | EMV chip data: BER-TLV parsing with unknown-tag preservation |
 | [v0.7.1](#v071) | 2026-08-10 | Delivered | ISO 8583 TLV length hardening |
 | [v0.7.0](#v070) | 2026-08-01 | Delivered | Payment switch: Conductor gear, gear manifests, ISO 8583 TLS |
 
+
+## [v0.9.0] - 2026-09-03 {#v090}
+
+### Added
+
+- **`coatcheck`: `key_normalize`.** Key field values are canonicalized before they are joined, so the two sides of an exchange agree on a key even when they render the same value differently. `trim` (default) removes surrounding whitespace; `numeric` also drops leading zeros, for fixed-width fields decoded against specs that declare different widths.
+- **`coatcheck`: `await_store`.** A store can forward the message without waiting for the write. The default stays blocking, which is right when the reply depends on the entry; set it false when the entry only enriches a record and holding a message for a control-plane write costs more than losing one.
+- **`codec_iso8583`: `iso8583.mti_class`.** A decode now also exposes the leading MTI digits, which a request and its reply share. Correlation keys can be scoped by message class, so an authorization and a reversal reusing a trace number are no longer indistinguishable.
+- **Scenarios can name what a diagram cannot derive.** A Rack's `role` label reaches its description, and two gear labels, `peer` and `peer_played_by`, say who is on the far side of a socket and whether anything is standing in for it.
+- **`iso8583-tool`: `-scheme-move`.** The host simulator can report a request field back in another, so a host receiving a private field can show which value arrived. It reports into a different field deliberately, and pads to the destination's declared width.
+- **Enriching an authorization from outside the message.** A [use case](use_cases/mobile_network_signals.md) on the GSMA Open Gateway APIs in payments, and a [tutorial](tutorials/roaming_enrichment.md) building one end to end: an operator call under a hard deadline, four named reasons for having no signal, and the degradation paths, all as configuration.
+
+### Fixed
+
+- **Nested field paths silently stopped resolving after a bus hop.** `GetValue` descended only into `map[string]any`, but CBOR decodes a nested object as `map[any]any`. A correlation key built from an ISO 8583 field therefore worked in a single-gear pipeline and returned "field missing" in any real deployment, with nothing logged.
+- **The `bento` gear injected a memory buffer over a config that declared its own input.** A buffer acknowledges the input before the pipeline has produced anything, so a synchronous responder answered with an empty body and no error anywhere. The injection now happens only when the gear supplies the input itself.
+- **A `bento` gear in a relay path dropped the wire bytes.** `RawPayload` survived only when the structured view was empty, so any gear that merely read fields destroyed the payload a downstream io gear had to write. It now travels across the bridge.
+- **`fluxrig scenario viz` drew both ends of one socket as strangers.** Every I/O gear produced its own external box, so a client and the server it dials appeared as two unrelated outsiders. When both ends are in the scenario they are now one relationship.
 
 ## [v0.8.0] - 2026-08-24 {#v080}
 

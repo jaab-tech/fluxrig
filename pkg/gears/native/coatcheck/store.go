@@ -74,15 +74,42 @@ func (s *StoreLogic) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxms
 	// Or Daemon calculates it from "TSInit + TTL"? Yes.
 
 	bucket := s.gear.config.Bucket
-	_, err = s.gear.ctx.Bus().KV().Put(ctx, bucket, key, valBytes)
-	if err != nil {
+
+	// The store is a write to the bus, so it costs a round trip. Whether the
+	// message waits for it is a property of what the entry is for.
+	//
+	// Blocking is right when the reply depends on the entry: stripping a PAN
+	// and reattaching it later is meaningless if the strip is forwarded and the
+	// store then fails, because the reply can never be made whole. Failing the
+	// message is the honest outcome there.
+	//
+	// It is wrong when the entry only enriches a record. A stamp parked to
+	// measure a round trip is worth losing: holding an authorization, or worse
+	// failing it, because a control-plane write was slow trades a payment for a
+	// metric.
+	if !s.gear.config.AwaitStore {
+		go func() {
+			// Detached from the message's context, which is cancelled as soon as
+			// the message moves on; inheriting it would cancel nearly every write.
+			putCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.gear.config.StoreTimeout)
+			defer cancel()
+			if _, putErr := s.gear.ctx.Bus().KV().Put(putCtx, bucket, key, valBytes); putErr != nil {
+				s.gear.ctx.Logger().Warn("coat store failed, message already forwarded",
+					"key", key, "bucket", bucket, "error", putErr)
+			}
+		}()
+		if s.gear.emit != nil {
+			s.gear.emit(msg)
+		}
+		return nil, nil
+	}
+
+	if _, err = s.gear.ctx.Bus().KV().Put(ctx, bucket, key, valBytes); err != nil {
 		return nil, fmt.Errorf("coatcheck store: kv put failed: %w", err)
 	}
 
-	// 4. Trace/Log
 	s.gear.ctx.Logger().Debug("coat stored", "key", key, "bucket", bucket)
 
-	// 5. Forward Original Message
 	if s.gear.emit != nil {
 		s.gear.emit(msg)
 	}

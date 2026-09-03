@@ -67,6 +67,35 @@ if [ -z "$TARGETS" ]; then
     TARGETS="${BASE_DIR}/suites"
 fi
 
+# A suite runs against the compiled binaries in bin/, and run.sh does not build
+# them. Running it directly (rather than through `make test-robot-*`, which builds
+# first) can test a missing binary, or worse a STALE one: edit a .go file, run the
+# suite, and it silently exercises the old code, so a real failure reads as a pass.
+# Refuse instead. The staleness rule mirrors the Makefile's bin/<x> prerequisites
+# exactly (cmd/<x> + pkg, minus the generated OpenAPI docs); keep them in step, or
+# a rebuild and this check will disagree and deadlock.
+# Set FLUXRIG_ROBOT_SKIP_BIN_CHECK=true to run against bin/ as-is.
+PROJECT_ROOT="$(cd "${BASE_DIR}/../.." && pwd)"
+if [ "${FLUXRIG_ROBOT_SKIP_BIN_CHECK}" != "true" ]; then
+    STALE=""
+    for b in fluxrig fluxrig-mixer iso8583-tool; do
+        bin="${PROJECT_ROOT}/bin/${b}"
+        if [ ! -x "$bin" ]; then
+            STALE="${STALE}
+  bin/${b} is missing"
+        elif [ -n "$(find "${PROJECT_ROOT}/cmd/${b}" "${PROJECT_ROOT}/pkg" -name '*.go' -not -path '*/mixer/api/docs/*' -newer "$bin" -print -quit 2>/dev/null)" ]; then
+            STALE="${STALE}
+  bin/${b} is older than a .go source"
+        fi
+    done
+    if [ -n "$STALE" ]; then
+        printf '[ROBOT] Refusing to run against stale or missing binaries:%s\n' "$STALE" >&2
+        printf '[ROBOT] Build them first:  make build-bin\n' >&2
+        printf '[ROBOT] Or bypass on purpose:  FLUXRIG_ROBOT_SKIP_BIN_CHECK=true %s %s\n' "$0" "$*" >&2
+        exit 1
+    fi
+fi
+
 # Verify VENV
 echo "[ROBOT] Using Python Environment: $VENV_DIR"
 "$VENV_DIR/bin/python3" --version

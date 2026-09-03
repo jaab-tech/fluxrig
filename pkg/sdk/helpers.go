@@ -5,6 +5,7 @@ package sdk
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 
@@ -60,16 +61,42 @@ func GetValue(msg *fluxmsg.FluxMsg, path string) (any, bool) {
 				return val, true
 			}
 			// Descent
-			if next, ok := val.(map[string]any); ok {
-				current = next
-			} else {
+			next, ok := asStringMap(val)
+			if !ok {
 				// Path mismatch (not a map)
 				return nil, false
 			}
+			current = next
 		}
 	}
 
 	return nil, false
+}
+
+// asStringMap accepts either shape a nested object can take on a FluxMsg.
+//
+// A message built in process carries map[string]any, but CBOR decodes an object
+// into map[any]any, so the same field is one shape before a bus hop and the
+// other after it. Descending only into map[string]any therefore made any nested
+// path resolve locally and fail once the message had crossed the bus, with no
+// error anywhere: the caller simply saw a missing field.
+func asStringMap(v any) (map[string]any, bool) {
+	switch t := v.(type) {
+	case map[string]any:
+		return t, true
+	case map[any]any:
+		out := make(map[string]any, len(t))
+		for k, val := range t {
+			ks, ok := k.(string)
+			if !ok {
+				ks = fmt.Sprint(k)
+			}
+			out[ks] = val
+		}
+		return out, true
+	default:
+		return nil, false
+	}
 }
 
 // JoinKeys Helper to create composite keys (concat with underscores).

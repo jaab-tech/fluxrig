@@ -4,6 +4,7 @@
 package codec
 
 import (
+	"context"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
@@ -223,4 +224,32 @@ func TestBinaryFieldSurvivesTheBus(t *testing.T) {
 
 	_, err = cbor.Marshal(in.Data)
 	require.NoError(t, err)
+}
+
+// TestDecodeExposesMTIClass covers the metadata a correlation key needs.
+//
+// A request and its reply carry different MTIs, so the full value cannot join
+// them. The leading digits can: they hold the version and the message class,
+// which the pair shares, while the digits that differ are the function and the
+// origin. Without this, a correlation store cannot tell an authorization from a
+// reversal that happens to carry the same trace number.
+func TestDecodeExposesMTIClass(t *testing.T) {
+	path := writeSpec(t, emvTLVSpec)
+	g := newTLVCodec(t, path)
+
+	for _, tc := range []struct{ mti, class string }{
+		{"0100", "01"}, // authorization request
+		{"0110", "01"}, // ...and its reply: same class
+		{"0400", "04"}, // a reversal is a different class
+	} {
+		packed := buildISO(t, path, tc.mti, "4111111111111111", "9F0206000000000501")
+		in := &fluxmsg.FluxMsg{Data: map[string]any{}, Metadata: map[string]string{}, RawPayload: packed}
+		out, err := g.Process(context.Background(), in)
+		require.NoError(t, err)
+		require.NotNil(t, out)
+
+		assert.Equal(t, tc.mti, out.Metadata["iso8583.mti"])
+		assert.Equal(t, tc.class, out.Metadata["iso8583.mti_class"],
+			"MTI %s must expose class %s for correlation", tc.mti, tc.class)
+	}
 }

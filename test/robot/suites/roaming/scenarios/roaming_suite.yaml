@@ -1,0 +1,445 @@
+# Copyright (c) 2026 JAAB Tech SAS, Uruguay
+# SPDX-License-Identifier: Apache-2.0
+#
+# The roaming enrichment under test, with the telco simulator alongside it.
+#
+# One file, and that is not tidiness: a Rack holds ONE scenario, and applying a
+# second replaces the first rather than adding to it. Importing several in
+# sequence leaves only the last one running, which shows up as a listener that
+# closed and a client dialling a port nobody is on. One scenario can still span
+# Racks: gears are filtered by their deploy target.
+#
+# The scheme and the issuer's authorizer are not in here at all. They are played
+# by iso8583-tool, outside fluxrig, because a suite where every counterparty is
+# also fluxrig is a conversation with itself. The telco is the exception: no
+# tool serves an HTTP contract, and it is a gear like any other.
+#
+# The enrichment under test. This is examples/scenarios/roaming_enrichment.yaml
+# with three deliberate differences, and no others:
+#
+#   * test ports, so a suite run cannot collide with a live rack;
+#   * the enrolment snapshot and the country table are seeded in memory rather
+#     than loaded from a file, because what is under test here is the enrichment
+#     and its degradation, not the loader;
+#   * a fixed derivation key, so the fixtures below are reproducible.
+#
+# The enrolment keys are HMAC-SHA256 of the PAN under that key, hex, truncated to
+# 128 bits, which is exactly what the pipeline computes. They are not arbitrary
+# strings: a card resolves only if the derivation agrees end to end.
+# Clear text throughout, and only here: this runs against loopback, where a
+# certificate would add setup and prove nothing. In production the ISO 8583 legs
+# run over TLS, usually mutually authenticated, and the operator leg is HTTPS.
+# Both are configuration: io_iso8583 takes a tls block natively, the Bento http
+# processor takes one for the outbound call, and the http_server input serves
+# TLS from cert_file and key_file.
+meta:
+  name: "roaming_enrichment_test"
+  version: "1.0.0"
+
+racks:
+  # Two Racks. The scheme and the issuer's authorizer are external systems and
+  # are played by iso8583-tool, not by fluxrig pretending to be them: a suite
+  # where every counterparty is also fluxrig proves less than it appears to.
+  - name: "rack-fluxrig"
+    labels:
+      role: "fluxrig, the switch under test"
+  - name: "rack-telco"
+    labels:
+      role: "telco, the operator API"
+  
+gears:
+  - name: "scheme-in"
+    type: "io_iso8583"
+    labels:
+      peer: "Sello (card scheme)"
+      peer_played_by: "the Robot suite, which packs each message"
+    deploy: "rack-fluxrig"
+    config:
+      mode: "server"
+      bind: ":8586"
+      frame_length_size: 2
+      frame_length_endian: "big"
+      encoding: "ascii"
+      strict_connection_routing: true
+
+  - name: "decode-scheme"
+    type: "codec_iso8583"
+    deploy: "rack-fluxrig"
+    config:
+      spec_path: "specs/scheme.yaml"
+      direction: "decode"
+      on_error: "reject"
+
+  - name: "enrich-roaming"
+    type: "bento"
+    deploy: "rack-fluxrig"
+    config:
+      ports:
+        inputs: ["in"]
+        outputs: ["out"]
+      bento:
+        cache_resources:
+          - label: enrolment
+            memory:
+              default_ttl: 24h
+              init_values:
+                "c6c4ab411853fd6decd3a534ff606512": "+59899000001"   # 4111111111111111: handset in UY
+                "2106dc28d78b96c91745095a652af32a": "+59899000002"   # 4222222222222222: handset in BR
+                "d4900cbb08ca2c6f1646a0ead7fafbc4": "+59899000003"   # 4333333333333333: one code, five countries
+                "f7eca81e83dfb177662f34550ba4b919": "+59899000004"   # 4444444444444444: empty country list
+                "f52c900fa6a51f1fecb14abf94bc019b": "+59899000005"   # 4555555555555555: country fields absent
+                "76f8d67e663e6f602a114167a1751a88": "+59899000006"   # 4666666666666666: answers too late
+                "6ca01764c53c63e85235f93a4f854819": "+59899000007"   # 4777777777777777: operator error
+          - label: iso3166_to_mobile_country_code
+            memory:
+              default_ttl: 24h
+              init_values:
+                # Keyed by the merchant's country. Comma-joined because a country
+                # can hold several codes, so step 4 tests membership either way.
+                "UY": "748"
+                "BR": "724"
+                "MQ": "340"
+                "US": "310,311,312,313,314,315,316"
+        pipeline:
+          processors:
+            # 1. The enrolled number, under a key derived from the PAN.
+            - branch:
+                request_map: 'root = this.iso8583.field."2".hash("hmac_sha256", env("ENROLMENT_HMAC_KEY")).encode("hex").slice(0, 32)'
+                processors:
+                  - cache:
+                      resource: enrolment
+                      operator: get
+                      key: '${! content() }'
+                result_map: 'meta msisdn = content().string()'
+            # 2. Ask the operator inside a strict time budget, and give up on
+            #    the signal rather than on the payment. Stamped first, so the
+            #    call can be timed: a time budget nobody measures is a wish.
+            - mapping: |
+                meta op_start_ns = now().ts_unix_nano().string()
+                # Parked by the coat check and handed back on the matching
+                # reply. Set here because nothing sets it for us.
+                meta received_at = now().ts_unix_nano().string()
+            - try:
+                - branch:
+                    request_map: 'root.device.phoneNumber = meta("msisdn")'
+                    processors:
+                      - http:
+                          url: '${ROAMING_URL:http://127.0.0.1:19500/retrieve}'
+                          verb: POST
+                          timeout: 250ms
+                          retries: 0
+                          # 404 and 503 are answers, not failures: one says the
+                          # network does not know this subscriber, the other that
+                          # the operator is down, and the authorizer should be
+                          # able to tell them apart. Treating them as successes
+                          # keeps the status readable in result_map instead of
+                          # collapsing both into a caught error.
+                          successful_on: [200, 404, 503]
+                    result_map: |
+                      meta device_alpha2 = (this.countryName | []).join(",")
+                      meta device_mcc = (this.countryCode | "").string()
+                      # An EMPTY countryName is not a missing one. The contract
+                      # says the operator returns [] when the code maps to no
+                      # country at all, as 901 does for the global networks.
+                      # That is a declared "nowhere", not a different country,
+                      # so the code comparison below must not run and invent a
+                      # mismatch out of it.
+                      meta no_country = if this.exists("countryName") && (this.countryName | []).length() == 0 { "yes" } else { "" }
+                      meta op_status = meta("http_status_code").or("200").string()
+            # 3. No alpha-2 from the operator, but a country code: resolve the
+            #    merchant's own country to its mobile country code and compare
+            #    those instead. The table is keyed by alpha-2, so it cannot be
+            #    confused with one of ISO 3166 numeric codes, where 724 is Spain
+            #    rather than Brazil.
+            #
+            #    The guard covers BOTH halves. When the operator call fails there
+            #    is no country code either, and a lookup under an empty key marks
+            #    the message as errored: the outcome still reads `unknown`, so it
+            #    looks like it worked, but the error travels with the message.
+            - branch:
+                request_map: 'root = if meta("device_alpha2").or("") == "" && meta("device_mcc").or("") != "" && meta("no_country").or("") == "" { this.iso8583.field."43".string().slice(-2).uppercase() } else { deleted() }'
+                processors:
+                  - cache:
+                      resource: iso3166_to_mobile_country_code
+                      operator: get
+                      key: '${! content() }'
+                result_map: 'meta merchant_mcc = content().string()'
+            # 4. Membership, not equality: one code can cover several countries.
+            - metric:
+                type: timing
+                name: operator_call_ns
+                value: '${! (now().ts_unix_nano() - meta("op_start_ns").number()).floor() }'
+            - mapping: |
+                let device = meta("device_alpha2").or("")
+                let merchant = this.iso8583.field."43".string().slice(-2).uppercase()
+                let op_mcc = meta("device_mcc").or("")
+                let me_mcc = meta("merchant_mcc").or("")
+                root = this
+                # The readable name is for telemetry; the wire carries a code.
+                let outcome = if $device != "" {
+                    if $device.split(",").contains($merchant) { "match" } else { "mismatch" }
+                  } else if meta("device_mcc").or("") != "" && meta("merchant_mcc").or("") != "" {
+                    if meta("merchant_mcc").split(",").contains(meta("device_mcc")) { "match" } else { "mismatch" }
+                  } else if meta("no_country").or("") == "yes" { "no_country"
+                  } else if meta("op_status").or("") == "404" { "no_subscriber"
+                  } else if meta("op_status").or("") == "503" { "operator_down"
+                  } else { "no_answer" }
+                # A card with no number on file was never asked about, so it
+                # gets no field at all rather than a reason for silence. Saying
+                # "no answer" about a call that was never made would make the
+                # enrolment gap invisible in exactly the metric that measures it.
+                let enrolled = meta("msisdn").or("") != ""
+                root.risk.roaming = if $enrolled { $outcome } else { deleted() }
+
+                # What travels in the private field. Tagged, so a second
+                # enrichment can be appended without moving this one, and
+                # grouped so the first digit alone answers "did the network
+                # answer at all": 0x did, 1x did not. An authorizer that only
+                # wants to know whether the countries disagree reads one
+                # character; one that wants the reason reads both.
+                root.risk.roaming_code = if !$enrolled { deleted() } else { "RS" + match $outcome {
+                    "match"         => "00",
+                    "mismatch"      => "01",
+                    "no_subscriber" => "10",
+                    "operator_down" => "11",
+                    "no_answer"     => "12",
+                    "no_country"    => "13",
+                    _               => "19",
+                  } }
+                meta msisdn = deleted()
+                meta device_mcc = deleted()
+                meta merchant_mcc = deleted()
+                meta device_alpha2 = deleted()
+                meta no_country = deleted()
+                meta op_status = deleted()
+                meta op_start_ns = deleted()
+            # What the transactions themselves say, from fields the message
+            # already carries. Bounded values only: DE 42 and DE 43 identify
+            # individual merchants and would grow a series per acceptor, which
+            # belongs in the Parquet where a GROUP BY costs nothing.
+            - metric:
+                type: counter
+                name: authorization_result
+                labels:
+                  merchant_category: '${! json("iso8583.field.18").catch("") }'
+                  entry_mode: '${! json("iso8583.field.22").catch("") }'
+                  acceptor_country: '${! json("iso8583.field.43").string().slice(-2).uppercase().catch("") }'
+            - metric:
+                type: counter
+                name: risk_roaming_outcome
+                labels:
+                  outcome: '${! json("risk.roaming") }'
+      # WARN, not INFO: the enrolled number passes through this gear, and Bento
+      # logs message context at INFO on some paths.
+      log_level: "WARN"
+
+  # Creates and sweeps the bucket the pair below uses. Without it the first
+  # store fails with "bucket not found": a correlation bucket is not created on
+  # demand, because expiry needs one owner and an on-demand bucket would have
+  # none.
+  - name: "in-flight-daemon"
+    type: "coatcheck"
+    deploy: "rack-fluxrig"
+    config:
+      mode: "daemon"
+      bucket: "auth_in_flight"
+      storage: "memory"
+      replicas: 1
+      # Short on purpose. A parked context outliving its entry is a real path
+      # (a slow authorizer, a reply that arrives after the sweeper has been
+      # through) and the suite has to reach it without waiting half a minute per
+      # transaction. Every other case here completes in milliseconds, so a
+      # three-second entry is still an eternity for them.
+      default_ttl: "3s"
+
+  - name: "stamp-request"
+    type: "coatcheck"
+    deploy: "rack-fluxrig"
+    config:
+      mode: "store"
+      bucket: "auth_in_flight"
+      key_fields: ["meta.iso8583.mti_class", "data.iso8583.field.41", "data.iso8583.field.11"]
+      key_normalize: "numeric"
+      # The arrival stamp, and the connection the request came in on. The reply
+      # is a different message: it comes back over the link to the authorizer
+      # and knows nothing about the scheme's socket, so without carrying that
+      # identifier across, the switch has an answer and nowhere to write it.
+      value_fields: ["meta.received_at", "meta.conn.id"]
+      # The message does not wait for this write. The entry exists only to
+      # measure the authorizer, so losing one loses a measurement; blocking the
+      # authorization on a control-plane write, or failing it when that write
+      # fails, would trade a payment for a metric.
+      await_store: false
+      store_timeout: "1s"
+
+  - name: "encode-issuer"
+    type: "codec_iso8583"
+    deploy: "rack-fluxrig"
+    config:
+      spec_path: "specs/issuer.yaml"
+      direction: "encode"
+      on_error: "reject"
+
+  - name: "authorizer-out"
+    type: "io_iso8583"
+    labels:
+      peer: "Emisor (issuer authorizer)"
+      peer_played_by: "iso8583-tool"
+    deploy: "rack-fluxrig"
+    config:
+      mode: "client"
+      connect: "127.0.0.1:18590"
+      frame_length_size: 2
+      frame_length_endian: "big"
+      encoding: "ascii"
+      reconnect_wait: "1s"
+
+  - name: "match-reply"
+    type: "coatcheck"
+    deploy: "rack-fluxrig"
+    config:
+      mode: "restore"
+      bucket: "auth_in_flight"
+      key_fields: ["meta.iso8583.mti_class", "data.iso8583.field.41", "data.iso8583.field.11"]
+      key_normalize: "numeric"
+      # Overwrite, or the restore is a no-op for the field that matters. The
+      # reply already carries a conn.id: the link to the authorizer. Preserving
+      # it means the switch answers into the wrong socket, which reads as a
+      # connection that does not exist.
+      merge_strategy: "overwrite"
+      on_missing: "forward"
+
+  # The only gear on the reply path that does anything. The coat check hands
+  # back the arrival stamp; the elapsed time is computed here and emitted as a
+  # timing, because no gear sees both halves of a transaction on its own.
+  #
+  # Guarded: an unmatched reply carries no stamp, and subtracting from an absent
+  # value would fail the message rather than skip a measurement.
+  - name: "measure-authorizer"
+    type: "bento"
+    deploy: "rack-fluxrig"
+    config:
+      ports:
+        inputs: ["in"]
+        outputs: ["out"]
+      bento:
+        pipeline:
+          processors:
+            - switch:
+                - check: 'meta("received_at").or("") != ""'
+                  processors:
+                    - metric:
+                        type: timing
+                        name: authorizer_round_trip_ns
+                        value: '${! (now().ts_unix_nano() - meta("received_at").number()).floor() }'
+            # The response code lives on the reply and nowhere else, so the
+            # decline rate is counted here rather than on the way out. The
+            # message is already decoded: match-reply needed it parsed.
+            - metric:
+                type: counter
+                name: authorization_outcome
+                labels:
+                  response_code: '${! json("iso8583.field.39").catch("") }'
+            - mapping: 'meta received_at = deleted()'
+
+  - name: "decode-issuer"
+    type: "codec_iso8583"
+    deploy: "rack-fluxrig"
+    config:
+      spec_path: "specs/issuer.yaml"
+      direction: "decode"
+      on_error: "reject"
+
+  # ══ Operator endpoint (simulated) ═══════════════════════════════════════
+  #
+  # CAMARA Device Roaming Status simulator.
+  #
+  # Serves the contract vendored at examples/reference/camara/, tag r2.2, API
+  # version 1.0.0: POST /retrieve, a `device` object in the request, and a
+  # response whose only required member is `roaming`.
+  #
+  # It exists because the cases that decide whether the enrichment is correct are
+  # the ones a real operator will not produce on demand: a country list with more
+  # than one entry, an empty list, a reply missing both country fields, a reply
+  # that arrives after the time budget, and an outright failure. The behaviour is
+  # selected by the last two digits of the number so a test can ask for a case by
+  # dialling it, with no control channel and no state.
+  - name: "camara-endpoint"
+    type: "bento"
+    deploy: "rack-telco"
+    config:
+      bento:
+        input:
+          http_server:
+            address: "127.0.0.1:19500"
+            path: /retrieve
+            allowed_verbs: [POST]
+            sync_response:
+              status: '${! meta("sim_status") }'
+        pipeline:
+          processors:
+            # Case selection. The number is the only input, so a test reads as
+            # the case it exercises.
+            - mapping: |
+                let case = this.device.phoneNumber.or("").slice(-2)
+                meta sim_case = $case
+                meta sim_status = "200"
+
+                root = match $case {
+                  # Handset in Uruguay: mobile country code 748.
+                  "01" => {"roaming": true, "countryCode": 748, "countryName": ["UY"]},
+                  # Handset in Brazil: 724, which is also Spain's ISO 3166
+                  # numeric code. Comparing the two registries untranslated is
+                  # the defect the alpha-2 comparison exists to avoid.
+                  "02" => {"roaming": true, "countryCode": 724, "countryName": ["BR"]},
+                  # One code, five countries. Reading the first entry alone
+                  # would report a mismatch for the other four.
+                  "03" => {"roaming": true, "countryCode": 340, "countryName": ["BL","GF","GP","MF","MQ"]},
+                  # 901 is a global network and maps to no country: the spec
+                  # says an empty array, not an omitted field.
+                  "04" => {"roaming": true, "countryCode": 901, "countryName": []},
+                  # Only the required member. Both country fields are optional.
+                  "05" => {"roaming": true},
+                  # Answers, but too late to be used.
+                  "06" => {"roaming": true, "countryCode": 748, "countryName": ["UY"]},
+                  # The operator is down.
+                  "07" => {"error": "operator unavailable"},
+                  # Anyone else is not a subscriber here.
+                  _ => {"error": "not found"},
+                }
+
+                meta sim_status = match {
+                  $case == "07" => "503",
+                  ["01","02","03","04","05","06"].contains($case) => "200",
+                  _ => "404",
+                }
+            # Spend the time budget without answering within it. Applied after the
+            # body is chosen so the slow case is otherwise identical to "01",
+            # which is what isolates lateness as the only variable.
+            - switch:
+                - check: 'meta("sim_case") == "06"'
+                  processors:
+                    - sleep:
+                        duration: 400ms
+        output:
+          sync_response: {}
+
+wires:
+  - from: "scheme-in.out"
+    to: "decode-scheme.in"
+  - from: "decode-scheme.out"
+    to: "enrich-roaming.in"
+  - from: "enrich-roaming.out"
+    to: "stamp-request.in"
+  - from: "stamp-request.out"
+    to: "encode-issuer.in"
+  - from: "encode-issuer.out"
+    to: "authorizer-out.in"
+  - from: "authorizer-out.out"
+    to: "decode-issuer.in"
+  - from: "decode-issuer.out"
+    to: "match-reply.in"
+  - from: "match-reply.out"
+    to: "measure-authorizer.in"
+  - from: "measure-authorizer.out"
+    to: "scheme-in.in"

@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"encoding/base64"
@@ -19,6 +20,29 @@ const (
 	ModeStore   = "store"
 	ModeRestore = "restore"
 	ModeDaemon  = "daemon"
+)
+
+// Key normalization modes.
+//
+// A correlation key only works when both sides of an exchange render the same
+// logical value the same way. They often do not: a request and its reply can
+// cross gears configured with different specs, and a field that is zero-padded
+// on one side may arrive trimmed on the other. The join is exact, so "000123"
+// and "123" are simply different keys, and the failure is silent -- nothing
+// errors, the entry is never found, and whatever the correlation was for stops
+// happening.
+const (
+	// NormalizeTrim removes surrounding whitespace. It is the default because
+	// it can only ever make two renderings of one value agree, never make two
+	// distinct values collide.
+	NormalizeTrim = "trim"
+	// NormalizeNumeric additionally drops leading zeros, so fixed-width numeric
+	// fields agree regardless of the width each side declares. Opt-in: it makes
+	// "0001" and "1" the same key, which is right for a padded counter and
+	// wrong for an identifier where the padding is significant.
+	NormalizeNumeric = "numeric"
+	// NormalizeNone joins values exactly as they are rendered.
+	NormalizeNone = "none"
 )
 
 // CoatCheckGear implements the Generic Context Correlation logic.
@@ -35,12 +59,23 @@ type CoatCheckGear struct {
 }
 
 type Config struct {
-	Mode          string   `mapstructure:"mode"`
-	Bucket        string   `mapstructure:"bucket"`
-	KeyFields     []string `mapstructure:"key_fields"`
-	ValueFields   []string `mapstructure:"value_fields"`
-	MergeStrategy string   `mapstructure:"merge_strategy"`
-	OnMissing     string   `mapstructure:"on_missing"` // "error", "drop", "forward"
+	Mode         string   `mapstructure:"mode"`
+	Bucket       string   `mapstructure:"bucket"`
+	KeyFields    []string `mapstructure:"key_fields"`
+	KeyNormalize string   `mapstructure:"key_normalize"`
+
+	// AwaitStore decides whether a stored message waits for the write.
+	//
+	// Defaults to true, because the original use of this gear is stripping a
+	// field and reattaching it on the reply, where forwarding before the entry
+	// exists produces a reply that can never be made whole. Set it false when
+	// the entry only enriches a record and losing one is preferable to holding
+	// the message.
+	AwaitStore    bool          `mapstructure:"await_store"`
+	StoreTimeout  time.Duration `mapstructure:"store_timeout"`
+	ValueFields   []string      `mapstructure:"value_fields"`
+	MergeStrategy string        `mapstructure:"merge_strategy"`
+	OnMissing     string        `mapstructure:"on_missing"` // "error", "drop", "forward"
 
 	// Daemon Config
 	Storage       string        `mapstructure:"storage"`
@@ -66,18 +101,41 @@ func (g *CoatCheckGear) extractKey(msg *fluxmsg.FluxMsg) (string, error) {
 		if !found {
 			return "", fmt.Errorf("missing key field: %s", field)
 		}
-		keyParts = append(keyParts, fmt.Sprint(val))
+		keyParts = append(keyParts, g.normalizeKeyPart(fmt.Sprint(val)))
 	}
 	// Sanitize Key for NATS KV (RawURLEncoding avoids padding =)
 	rawKey := sdk.JoinKeys(keyParts...)
 	return base64.RawURLEncoding.EncodeToString([]byte(rawKey)), nil
 }
 
+// normalizeKeyPart brings one rendering of a key field to a canonical form, so
+// that the two sides of an exchange agree on the key even when they disagree on
+// how to render the value.
+func (g *CoatCheckGear) normalizeKeyPart(v string) string {
+	switch g.config.KeyNormalize {
+	case NormalizeNone:
+		return v
+	case NormalizeNumeric:
+		trimmed := strings.TrimLeft(strings.TrimSpace(v), "0")
+		if trimmed == "" {
+			// An all-zero value is a value. Collapsing it to the empty string
+			// would make it indistinguishable from a missing one.
+			return "0"
+		}
+		return trimmed
+	default:
+		return strings.TrimSpace(v)
+	}
+}
+
 func (g *CoatCheckGear) Init(ctx sdk.GearContext) error {
 	g.ctx = ctx
 	g.config = &Config{
-		DefaultTTL: 1 * time.Minute,
-		MaxTTL:     5 * time.Minute,
+		DefaultTTL:   1 * time.Minute,
+		MaxTTL:       5 * time.Minute,
+		KeyNormalize: NormalizeTrim,
+		AwaitStore:   true,
+		StoreTimeout: 5 * time.Second,
 	}
 	// Basic Config Loading (Manual map decoding for now, or use mapstructure if available in util)
 	// Assuming raw map access for Phase 2 velocity
@@ -103,6 +161,17 @@ func (g *CoatCheckGear) Init(ctx sdk.GearContext) error {
 	}
 	if v, ok := cfg["merge_strategy"].(string); ok {
 		g.config.MergeStrategy = v
+	}
+	if v, ok := cfg["key_normalize"].(string); ok {
+		g.config.KeyNormalize = v
+	}
+	if v, ok := cfg["await_store"].(bool); ok {
+		g.config.AwaitStore = v
+	}
+	if v, ok := cfg["store_timeout"].(string); ok {
+		if d, err := time.ParseDuration(v); err == nil {
+			g.config.StoreTimeout = d
+		}
 	}
 	// Parse KeyFields (handle []interface{} from generic YAML/JSON)
 	if v, ok := cfg["key_fields"].([]interface{}); ok {

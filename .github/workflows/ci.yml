@@ -25,6 +25,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Check no compiled binaries are tracked
+        run: ./scripts/check_no_binaries.sh
       - name: Set up Go
         uses: actions/setup-go@v7
         with:

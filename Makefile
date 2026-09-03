@@ -30,17 +30,23 @@ endif
 all: lint test build
 
 # Binary-specific targets to allow parallel builds (make -j)
-bin/fluxrig: catalog $(shell find cmd/fluxrig -name "*.go")
+# Every binary links most of pkg/, so a change there must rebuild it. Depending
+# only on cmd/<x> (as these rules once did) left a binary stale after a pkg edit,
+# and a stale binary makes a test exercise the old code silently. The generated
+# OpenAPI docs are excluded: they are a build output, not an input.
+GO_LIB := $(shell find pkg -name "*.go" -not -path "pkg/mixer/api/docs/*")
+
+bin/fluxrig: catalog $(shell find cmd/fluxrig -name "*.go") $(GO_LIB)
 	@echo "Building fluxrig..."
 	@mkdir -p bin
 	go build $(GO_FLAGS) -ldflags "$(LDFLAGS)" -o bin/fluxrig ./cmd/fluxrig
 
-bin/fluxrig-mixer: catalog openapi $(shell find cmd/fluxrig-mixer -name "*.go")
+bin/fluxrig-mixer: catalog openapi $(shell find cmd/fluxrig-mixer -name "*.go") $(GO_LIB)
 	@echo "Building fluxrig-mixer..."
 	@mkdir -p bin
 	go build $(GO_FLAGS) -ldflags "$(LDFLAGS)" -o bin/fluxrig-mixer ./cmd/fluxrig-mixer
 
-bin/iso8583-tool: cmd/iso8583-tool/main.go
+bin/iso8583-tool: $(shell find cmd/iso8583-tool -name "*.go") $(GO_LIB)
 	@echo "Building iso8583-tool..."
 	@mkdir -p bin
 	go build -o bin/iso8583-tool ./cmd/iso8583-tool
@@ -71,7 +77,7 @@ build-all-variants: build-bin build-lite ## Build both the full and lean Rack bi
 
 build: lint bin/fluxrig bin/fluxrig-mixer bin/iso8583-tool ## Build all binaries
 	@echo "--------------------------------------------------"
-	@echo "Build Complete (v$(VERSION))"
+	@echo "Build Complete ($(VERSION))"
 	@echo "--------------------------------------------------"
 
 build-bin: bin/fluxrig bin/fluxrig-mixer bin/iso8583-tool ## Build all binaries without linting
@@ -114,7 +120,10 @@ test: ## Run unit tests with race detection and coverage
 	go test -race -ldflags "$(LDFLAGS)" -coverprofile=test/test_logs/coverage.out $$(go list ./... | grep -v '/test/utils' | grep -v 'cmd/fluxrig$$' | grep -v 'cmd/fluxrig-mixer$$')
 	@go tool cover -func=test/test_logs/coverage.out | grep total | awk '{print "Total Coverage: " $$3}'
 
-lint: ## Run golangci-lint
+check-no-binaries: ## Fail if a compiled executable is tracked in git
+	@./scripts/check_no_binaries.sh
+
+lint: check-no-binaries ## Run golangci-lint
 	@echo "Linting..."
 	@if command -v golangci-lint >/dev/null; then \
 		golangci-lint run ./...; \
@@ -237,24 +246,33 @@ clean-robot: ## Clean Robot Framework artifacts
 	@find test/robot -name "work" -type l -delete
 
 .PHONY: openapi
-openapi: pkg/mixer/api/docs/.generated ## Generate OpenAPI specification and sync to ops
+openapi: pkg/mixer/api/docs/.generated ## Generate the OpenAPI specification
 
-pkg/mixer/api/docs/.generated: cmd/fluxrig-mixer/main.go pkg/mixer/api/server.go pkg/mixer/api/types.go VERSION
-	@echo "Generating OpenAPI spec for version $(VERSION) (Clean Source Strategy)..."
-	@cp cmd/fluxrig-mixer/main.go cmd/fluxrig-mixer/main_gen.go
-	@sed -i '' 's/@version 0.0.0-dev/@version $(VERSION)/' cmd/fluxrig-mixer/main_gen.go
+# The spec is generated straight from main.go, whose @version annotation stays
+# at the 0.0.0-dev placeholder. Stamping the real version here would make the
+# checked-in swagger.yaml and docs.go differ from HEAD on every build between
+# releases, and the release refuses to run against a dirty tree. The served
+# spec reports the real version instead: pkg/mixer/api/server.go assigns it to
+# docs.SwaggerInfo.Version from the same ldflag the rest of the binary uses.
+pkg/mixer/api/docs/.generated: cmd/fluxrig-mixer/main.go pkg/mixer/api/server.go pkg/mixer/api/types.go
+	@echo "Generating OpenAPI spec..."
 	@mkdir -p pkg/mixer/api/docs
 	@if command -v swag >/dev/null; then \
-		swag init -g main_gen.go -d cmd/fluxrig-mixer,pkg/mixer/api --parseDependency --parseInternal --packagePrefix $(MODULE_NAME) -o pkg/mixer/api/docs --outputTypes yaml,go; \
+		swag init -g main.go -d cmd/fluxrig-mixer,pkg/mixer/api --parseDependency --parseInternal --packagePrefix $(MODULE_NAME) -o pkg/mixer/api/docs --outputTypes yaml,go; \
 	else \
-		$(shell go env GOPATH)/bin/swag init -g main_gen.go -d cmd/fluxrig-mixer,pkg/mixer/api --parseDependency --parseInternal --packagePrefix $(MODULE_NAME) -o pkg/mixer/api/docs --outputTypes yaml,go; \
-	fi; \
-	EXIT_CODE=$$?; \
-	rm cmd/fluxrig-mixer/main_gen.go; \
-	if [ $$EXIT_CODE -ne 0 ]; then exit $$EXIT_CODE; fi
+		$(shell go env GOPATH)/bin/swag init -g main.go -d cmd/fluxrig-mixer,pkg/mixer/api --parseDependency --parseInternal --packagePrefix $(MODULE_NAME) -o pkg/mixer/api/docs --outputTypes yaml,go; \
+	fi
 	@touch pkg/mixer/api/docs/.generated
+	@echo "Spec generated at pkg/mixer/api/docs/"
+
+# Copying the spec into the sibling docs repositories is deliberate, not a
+# side effect of building: the copy there is a release artifact carrying a real
+# version, and a developer build overwriting it with the placeholder leaves
+# those repositories dirty. The release publishes its own stamped copy.
+.PHONY: openapi-sync
+openapi-sync: openapi ## Copy the generated spec into the docs repos (needs OPENAPI_DEST in .env.local)
 	@if [ -z "$(OPENAPI_DEST)" ]; then \
-		echo "Spec generated at pkg/mixer/api/docs/ (skipping sync — OPENAPI_DEST not set in .env.local)"; \
+		echo "Nothing to sync — OPENAPI_DEST not set in .env.local"; \
 	else \
 		mkdir -p $$(dirname $(OPENAPI_DEST)); \
 		cp pkg/mixer/api/docs/swagger.yaml $(OPENAPI_DEST); \
@@ -263,7 +281,7 @@ pkg/mixer/api/docs/.generated: cmd/fluxrig-mixer/main.go pkg/mixer/api/server.go
 			cp pkg/mixer/api/docs/swagger.yaml $(STATIC_SYNC_DIR)/openapi.yaml; \
 			echo "Synced static spec to $(STATIC_SYNC_DIR)/openapi.yaml"; \
 		fi; \
-		echo "Spec generated at pkg/mixer/api/docs/ and synced to $(OPENAPI_DEST)"; \
+		echo "Synced spec to $(OPENAPI_DEST)"; \
 	fi
 
 .PHONY: iso8583-tool
@@ -299,7 +317,38 @@ test-robot-conductor: robot-prep build-bin iso8583-tool ## Run Robot Conductor S
 	@echo "Running Conductor Stress + Chaos Suite (chaos needs toxiproxy-server on PATH)..."
 	@cd test/robot && ./run.sh suites/conductor
 
-test-robot: test-robot-iso test-robot-tlv test-robot-coatcheck test-robot-topology test-robot-telemetry ## Run all Robot Framework suites
+# Pins the most recent Robot run into the documentation site: the report and log
+# verbatim under static/, plus a summary the page renders as text.
+#
+# What lands is a snapshot, not a live status, and an existing one is left alone
+# unless REPLACE=1. Re-publishing on every local run would rewrite half a
+# megabyte of HTML in the repository each time without telling a reader anything
+# new, so replacing a pinned run is a decision rather than a habit.
+#
+# Failing runs are published too, deliberately. A report that only appears when
+# it is green tells a reader nothing about whether the suite is green.
+robot-publish: ## Pin the latest Robot run into the docs site (usage: make robot-publish SUITE=roaming [REPLACE=1])
+	@if [ -z "$(SUITE)" ]; then echo "SUITE is required, e.g. make robot-publish SUITE=roaming"; exit 1; fi
+	@if [ -z "$(ROBOT_REPORTS_STATIC)" ] || [ -z "$(ROBOT_REPORTS_GENERATED)" ]; then \
+		echo "Skipping (ROBOT_REPORTS_STATIC / ROBOT_REPORTS_GENERATED not set - configure .env.local)"; \
+	else \
+		latest=$$(ls -dt /tmp/fluxrig/robot_run_*/results 2>/dev/null | head -1); \
+		if [ -z "$$latest" ]; then echo "No Robot run found under /tmp/fluxrig"; exit 1; fi; \
+		echo "Publishing $$latest as '$(SUITE)'..."; \
+		flag=""; [ -n "$(REPLACE)" ] && flag="--replace"; \
+		../fluxrig-ops/.venv/bin/python ../fluxrig-ops/scripts/publish_robot_report.py \
+			$$flag "$(SUITE)" "$$latest" "$(ROBOT_REPORTS_STATIC)" "$(ROBOT_REPORTS_GENERATED)"; \
+	fi
+
+test-robot-roaming: robot-prep build-bin ## Run Robot Roaming Enrichment Suite (network signal, with a CAMARA simulator)
+	@echo "Running Roaming Enrichment Suite..."
+	@cd test/robot && ./run.sh suites/roaming/roaming.robot
+
+test-robot-roaming-stress: robot-prep build-bin ## Run Robot Roaming Stress Suite (correlation under load; runs on its own, not in test-robot)
+	@echo "Running Roaming Stress Suite..."
+	@cd test/robot && ./run.sh suites/roaming/stress_load.robot
+
+test-robot: test-robot-iso test-robot-tlv test-robot-coatcheck test-robot-topology test-robot-telemetry test-robot-roaming ## Run the functional Robot suites (the performance and chaos suites run on their own)
 
 test-robot-staged: robot-prep build-bin ## Run Robot Staged Load Suite (QoS Validation)
 	@echo "Running Staged Load Test..."
