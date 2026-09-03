@@ -1,0 +1,59 @@
+# Copyright 2026 JAAB Tech SAS, Uruguay
+#
+# ISO 3166-1 alpha-2 to Mobile Country Code (MCC).
+#
+# The fallback path only. CAMARA's `countryName` is already alpha-2 and DE 43
+# carries alpha-2 in its last two characters, so the two normally compare
+# directly and this table is not consulted. It is used when the operator
+# returned nothing but `countryCode`.
+#
+# Keyed by country rather than by code. The lookup key is then the merchant's
+# country, which the message always carries, and an alpha-2 key cannot be
+# mistaken for an ISO 3166 numeric one -- where 724 is Spain, while in E.212 it
+# is Brazil. A code covering several countries is simply several rows; the
+# reverse, a country holding several codes, carries a list, and the comparison
+# tests membership either way.
+#
+# Subset, not the full list: enough for the worked example, LatAm and the
+# corridors it touches. Codes are assigned under ITU-T Recommendation E.212 and
+# published in its Operational Bulletin annex (https://www.itu.int/pub/T-SP-E.212B).
+# Every entry here was checked on 2026-08-24 against https://mcc-mnc.dev, which
+# mirrors those assignments.
+#
+# Regenerate rather than hand-edit when extending: the full E.212 list is long,
+# and transcription is where errors of exactly this kind get in.
+meta:
+  name: "iso3166_to_mobile_country_code"
+  version: "1.0.0"
+  note: "subset; extend from ITU-T E.212 before production use"
+
+mapping:
+  # ── South America ────────────────────────────────────────────────────────
+  AR: 722   # Argentina
+  BO: 736   # Bolivia
+  BR: 724   # Brazil
+  CL: 730   # Chile
+  CO: 732   # Colombia
+  EC: 740   # Ecuador
+  PY: 744   # Paraguay
+  PE: 716   # Peru
+  UY: 748   # Uruguay
+  VE: 734   # Venezuela
+  # ── North and Central America ────────────────────────────────────────────
+  CA: 302   # Canada
+  MX: 334   # Mexico
+  US: [310, 311, 312, 313, 314, 315, 316]   # the multi-code case
+  # ── One network across several territories ───────────────────────────────
+  # Code 340 covers all five. In this direction that is five ordinary rows.
+  BL: 340   # Saint Barthelemy
+  GF: 340   # French Guiana
+  GP: 340   # Guadeloupe
+  MF: 340   # Saint Martin
+  MQ: 340   # Martinique
+  # ── Europe ───────────────────────────────────────────────────────────────
+  DE: 262   # Germany
+  ES: 214   # Spain
+  FR: 208   # France
+  IT: 222   # Italy
+  PT: 268   # Portugal
+  GB: 234   # United Kingdom

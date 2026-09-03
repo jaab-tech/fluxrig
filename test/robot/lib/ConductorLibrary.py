@@ -33,17 +33,28 @@ class ConductorLibrary:
     # --- Scheme hosts -----------------------------------------------------
 
     @keyword
-    def start_scheme_host(self, alias, port, spec, de39=None, sink=False, log_file=None):
-        """Start an upstream scheme host in the background.
+    def start_scheme_host(self, alias, port, spec, de39=None, sink=False, log_file=None, move=None, delay=None):
+        """Start an ISO 8583 host in the background.
 
-        Replies 0210 with `de39`, or (with sink=True) accepts and never answers
-        to drive the switch's timeout path.
+        Replies with `de39`, or (with sink=True) accepts and never answers to
+        drive the caller's timeout path.
+
+        `move` reports one request field back in another, as "src:dst". A host
+        that only echoes correlation fields cannot show it read anything, so an
+        authorizer receiving a private field needs this for a test to see which
+        value arrived. It reports into a different field on purpose: echoing a
+        private one would return it to a counterparty whose dialect need not
+        declare it.
         """
         cmd = [self._tool, "-mode", "scheme", "-scheme-port", str(port), "-scheme-spec", spec]
         if sink:
             cmd.append("-scheme-sink")
         elif de39 is not None:
             cmd.extend(["-scheme-de39", str(de39)])
+        if move:
+            cmd.extend(["-scheme-move", str(move)])
+        if delay:
+            cmd.extend(["-scheme-delay", str(delay)])
         self._spawn(alias, cmd, log_file)
 
     # --- Auth terminals ---------------------------------------------------
@@ -61,6 +72,8 @@ class ConductorLibrary:
             "accept_de39": "-auth-accept-de39", "conns": "-auth-conns",
             "count": "-auth-count", "rate": "-auth-rate",
             "stan_base": "-auth-stan-base", "timeout": "-auth-timeout",
+            "de43": "-auth-de43",
+            "mti": "-auth-mti",
         }
         for key, flag in flag_map.items():
             if key in opts and opts[key] is not None:
@@ -142,6 +155,21 @@ class ConductorLibrary:
             raise AssertionError(f"expected at least one DE39={de39}, saw none. by_de39={report.get('by_de39')}")
 
     @keyword
+    def assert_de42_seen(self, report, de42):
+        """Assert at least one reply carried this DE42 value.
+
+        A scheme that moves a private field into DE 42 reports its outcome there,
+        so this is how a suite proves a named path ran rather than merely that a
+        reply came back. Matches on prefix: the field is padded to its declared
+        width.
+        """
+        by = report.get("by_de42", {}) or {}
+        want = str(de42)
+        n = sum(v for k, v in by.items() if str(k).strip().startswith(want))
+        if n <= 0:
+            raise AssertionError(f"expected at least one DE42 starting with {want}, saw none. by_de42={by}")
+
+    @keyword
     def assert_declines_present(self, report, approve_de39="00"):
         """Assert at least one non-approve reply came back (chaos took effect)."""
         by = report.get("by_de39", {})
@@ -178,6 +206,70 @@ class ConductorLibrary:
             return {}
         with open(path) as f:
             return json.load(f)
+
+    # --- Load mode (throughput) ---------------------------------------------
+
+    @keyword
+    def run_load(self, target, spec, report_file, mti="0100", pan="", de43="", rate=10,
+                 duration="30s", conns=2, timeout=60):
+        """Run iso8583-tool in load mode and return parsed JSON report.
+
+        Generates authorization messages (MTI 0100) with configurable PAN/DE43.
+        """
+        cmd = [self._tool, "-mode", "load",
+               "-target", target,
+               "-load-spec", os.path.abspath(spec),
+               "-encoding", "ascii",
+               "-endian", "big",
+               "-framing-bytes", "2",
+               # The Rack's io_iso8583 declares framing and nothing else, so the
+               # generator's 12-byte correlation header would arrive as bytes before
+               # the MTI and the message would never decode.
+               "-header-len", "0",
+               "-rate", str(rate),
+               "-duration", duration,
+               "-concurrency", str(conns),
+               "-report", os.path.abspath(report_file),
+               "-load-mti", mti,
+               "-load-pan", pan,
+               "-load-de43", de43,
+               "-load-de41", "TERM",
+               "-load-proc-code", "000000",
+               "-load-amount", "000000010000",
+               "-load-mcc", "5411",
+               "-load-entry-mode", "051"]
+        logger.info(f"load: {' '.join(cmd)}")
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=int(timeout))
+        if proc.stdout:
+            logger.info(proc.stdout.strip())
+        if proc.stderr:
+            logger.info(f"stderr:\n{proc.stderr.strip()}")
+        return self.read_load_report(report_file)
+
+    @keyword
+    def read_load_report(self, report_file):
+        path = os.path.abspath(report_file)
+        if not os.path.exists(path):
+            return {}
+        with open(path) as f:
+            return json.load(f)
+
+    @keyword
+    def assert_load_ok(self, report):
+        """Assert load test invariants: all responses received, no failures."""
+        sent = int(report.get("req_sent", -1))
+        recv = int(report.get("resp_recv", -1))
+        failed = int(report.get("resp_failed", -1))
+        req_failed = int(report.get("req_failed", -1))
+        if sent != recv:
+            raise AssertionError(f"req_sent={sent} != resp_recv={recv}")
+        if failed != 0:
+            raise AssertionError(f"resp_failed={failed} (connection errors)")
+        if req_failed != 0:
+            raise AssertionError(f"req_failed={req_failed} (send errors)")
+        tps = float(report.get("actual_tps", 0))
+        if tps <= 0:
+            raise AssertionError(f"actual_tps={tps} (no throughput)")
 
     # --- Process management ----------------------------------------------
 

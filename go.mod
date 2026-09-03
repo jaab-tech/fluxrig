@@ -4,11 +4,11 @@ go 1.26.4
 
 require (
 	github.com/HdrHistogram/hdrhistogram-go v1.3.0
-	github.com/ThreeDotsLabs/watermill v1.5.2
+	github.com/ThreeDotsLabs/watermill v1.5.3
 	github.com/ThreeDotsLabs/watermill-nats/v2 v2.2.0
 	github.com/duckdb/duckdb-go/v2 v2.10505.0
 	github.com/fatih/color v1.19.0
-	github.com/fxamacker/cbor/v2 v2.9.2
+	github.com/fxamacker/cbor/v2 v2.9.3
 	github.com/go-viper/mapstructure/v2 v2.5.0
 	github.com/google/uuid v1.6.0
 	github.com/knadh/koanf/parsers/toml v0.1.0
@@ -17,7 +17,7 @@ require (
 	github.com/knadh/koanf/v2 v2.3.6
 	github.com/mitchellh/mapstructure v1.5.0
 	github.com/moov-io/iso8583 v0.26.1
-	github.com/nats-io/nats-server/v2 v2.14.5
+	github.com/nats-io/nats-server/v2 v2.14.6
 	github.com/nats-io/nats.go v1.53.1
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2
 	github.com/spf13/cobra v1.10.2
@@ -28,15 +28,15 @@ require (
 	github.com/tidwall/wal v1.2.1
 	github.com/warpstreamlabs/bento v1.18.1
 	github.com/xeipuuv/gojsonschema v1.2.0
-	go.opentelemetry.io/contrib/instrumentation/host v0.70.0
-	go.opentelemetry.io/contrib/instrumentation/runtime v0.70.0
-	go.opentelemetry.io/otel v1.45.0
-	go.opentelemetry.io/otel/log v0.21.0
-	go.opentelemetry.io/otel/metric v1.45.0
-	go.opentelemetry.io/otel/sdk v1.45.0
-	go.opentelemetry.io/otel/sdk/log v0.21.0
-	go.opentelemetry.io/otel/sdk/metric v1.45.0
-	go.opentelemetry.io/otel/trace v1.45.0
+	go.opentelemetry.io/contrib/instrumentation/host v0.71.0
+	go.opentelemetry.io/contrib/instrumentation/runtime v0.71.0
+	go.opentelemetry.io/otel v1.46.0
+	go.opentelemetry.io/otel/log v0.22.0
+	go.opentelemetry.io/otel/metric v1.46.0
+	go.opentelemetry.io/otel/sdk v1.46.0
+	go.opentelemetry.io/otel/sdk/log v0.22.0
+	go.opentelemetry.io/otel/sdk/metric v1.46.0
+	go.opentelemetry.io/otel/trace v1.46.0
 	golang.org/x/mod v0.40.0
 	golang.org/x/sys v0.47.0
 	golang.org/x/time v0.15.0
@@ -127,7 +127,7 @@ require (
 	github.com/pelletier/go-toml v1.9.5 // indirect
 	github.com/pierrec/lz4/v4 v4.1.26 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
-	github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55 // indirect
+	github.com/power-devops/perfstat v0.0.0-20260805114148-88456608a4f6 // indirect
 	github.com/quipo/dependencysolver v0.0.0-20170801134659-2b009cb4ddcc // indirect
 	github.com/rcrowley/go-metrics v0.0.0-20250401214520-65e299d6c5c9 // indirect
 	github.com/rickb777/period v1.0.27 // indirect

@@ -17,7 +17,7 @@ func (g *Gear) Manifest() sdk.Manifest {
 		Terminus: sdk.TerminusTransparent,
 		Ports: []sdk.Port{
 			{Name: "in", Dir: sdk.PortIn, Role: "message", Summary: "Message to encode or decode."},
-			{Name: "out", Dir: sdk.PortOut, Role: "message", Summary: "Encoded or decoded message."},
+			{Name: "out", Dir: sdk.PortOut, Role: "message", Summary: "Encoded or decoded message. A decode also sets iso8583.mti and iso8583.mti_class, the latter being the leading digits a request and its reply share."},
 		},
 		ConfigSchema: `{
   "$schema": "http://json-schema.org/draft-07/schema#",

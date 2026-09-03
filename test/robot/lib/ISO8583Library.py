@@ -238,6 +238,81 @@ class ISO8583Library:
             os.killpg(os.getpgid(self._server_process.pid), signal.SIGTERM)
             self._server_process.wait()
 
+    # --- Message construction ---
+
+    # Field formats for the fields these suites exercise. ASCII throughout, which
+    # is what the SDL specs under test declare.
+    #
+    #   n<len>   fixed numeric, left-padded with zeros
+    #   a<len>   fixed alphanumeric, exact length required
+    #   ll / lll ASCII length prefix of that many digits
+    _FIELD_FORMATS = {
+        2: ("ll", 19), 3: ("n", 6), 4: ("n", 12), 7: ("n", 10), 11: ("n", 6),
+        18: ("n", 4), 22: ("n", 3), 39: ("a", 2), 41: ("a", 8), 42: ("a", 15),
+        43: ("a", 40), 48: ("lll", 999),
+    }
+
+    def build_iso_message(self, mti, **fields):
+        """Builds an ASCII ISO 8583 message and returns it as a hex string.
+
+        Fields are passed as `f<N>=value`, because Robot keyword arguments
+        cannot begin with a digit. Only the primary bitmap is emitted, which
+        covers fields 1..64.
+
+        Fixed alphanumeric fields must be supplied at their exact declared
+        length rather than being padded here. `DE 43` is the reason: its country
+        occupies the last two characters, so right-padding a short value would
+        silently move the country out of the position the comparison reads, and
+        the test would pass or fail for the wrong reason.
+        """
+        parsed = {}
+        for name, value in fields.items():
+            if not name.startswith("f"):
+                raise ValueError(f"field arguments are named f<N>, got '{name}'")
+            parsed[int(name[1:])] = str(value)
+
+        bitmap = 0
+        body = ""
+        for num in sorted(parsed):
+            fmt, length = self._FIELD_FORMATS.get(num, (None, None))
+            if fmt is None:
+                raise ValueError(f"DE {num} has no declared format in this library")
+            value = parsed[num]
+
+            if fmt == "n":
+                if len(value) > length:
+                    raise ValueError(f"DE {num}: {len(value)} digits exceeds {length}")
+                body += value.rjust(length, "0")
+            elif fmt == "a":
+                if len(value) != length:
+                    raise ValueError(
+                        f"DE {num}: expected exactly {length} characters, got {len(value)}"
+                    )
+                body += value
+            else:
+                digits = len(fmt)
+                if len(value) > length:
+                    raise ValueError(f"DE {num}: {len(value)} exceeds max {length}")
+                body += str(len(value)).rjust(digits, "0") + value
+
+            bitmap |= 1 << (64 - num)
+
+        # The bitmap is binary on the wire; everything around it is ASCII.
+        return (mti.encode().hex()
+                + bitmap.to_bytes(8, "big").hex()
+                + body.encode().hex())
+
+    def acceptor_location(self, name, country):
+        """Composes DE 43 with the country in the last two characters.
+
+        The field is 40 characters and the comparison reads its tail, so the
+        country's position is the whole point of the field here.
+        """
+        country = str(country).upper()
+        if len(country) != 2:
+            raise ValueError(f"country must be ISO 3166 alpha-2, got '{country}'")
+        return str(name)[: 40 - 2].ljust(40 - 2)[: 40 - 2] + country
+
     # --- Single-message exchange ---
 
     def send_iso_message(self, message_hex, target="localhost:8583", header_len=2, timeout=10):
@@ -271,6 +346,56 @@ class ISO8583Library:
 
         logger.info(f"Received {len(reply)} bytes: {reply.hex()}")
         return reply.hex()
+
+    def send_iso_messages_together(self, messages_hex, target="localhost:8583",
+                                   header_len=2, timeout=10):
+        """Sends several messages on their own connections before reading any reply.
+
+        Sending one message and waiting for it, then sending the next, never puts
+        two of them in flight at once. A correlation store only collides when two
+        contexts are parked simultaneously, so a test for that property has to
+        construct the overlap rather than hope for it: this opens a connection per
+        message, sends them all, and only then collects the replies.
+
+        Returns the replies as hex, in the order the messages were given.
+        """
+        header_len = int(header_len)
+        host, _, port = target.rpartition(":")
+        socks = []
+        try:
+            for hexmsg in messages_hex:
+                payload = bytes.fromhex(str(hexmsg).replace(" ", "").replace("\n", ""))
+                sock = socket.create_connection((host, int(port)), timeout=float(timeout))
+                sock.settimeout(float(timeout))
+                sock.sendall(len(payload).to_bytes(header_len, "big") + payload)
+                socks.append(sock)
+                logger.info(f"Sent {len(payload)} bytes: {payload.hex()}")
+
+            replies = []
+            for i, sock in enumerate(socks):
+                try:
+                    reply_len = int.from_bytes(self._recv_exactly(sock, header_len), "big")
+                    reply = self._recv_exactly(sock, reply_len)
+                except (socket.timeout, TimeoutError) as exc:
+                    # Starvation is the interesting outcome, not an infrastructure
+                    # hiccup: when two parked contexts collide, one connection is
+                    # answered twice and the other never. Saying which one waited
+                    # is the difference between a diagnosis and a stack trace.
+                    raise AssertionError(
+                        f"message {i} of {len(socks)} got no reply within {timeout}s. "
+                        f"With several messages in flight this usually means their "
+                        f"correlation keys collided and another connection received "
+                        f"this one's reply."
+                    ) from exc
+                logger.info(f"Received {len(reply)} bytes: {reply.hex()}")
+                replies.append(reply.hex())
+            return replies
+        finally:
+            for sock in socks:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
 
     def _recv_exactly(self, sock, count):
         """Reads exactly count bytes, because a short read is a test result too.

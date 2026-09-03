@@ -157,8 +157,19 @@ func (g *Gear) Init(ctx sdk.GearContext) error {
 		// Non-fatal?
 	}
 
-	// Default Buffer if missing (Bento requires one usually, or defaults?)
-	if _, hasBuffer := cfg.Bento["buffer"]; !hasBuffer {
+	// A buffer decouples the input from the output: the input is acknowledged
+	// as soon as the message is buffered, before the pipeline has produced
+	// anything. For a gear fed by the bus that is harmless, and it is what the
+	// gear has always injected.
+	//
+	// It is not harmless for a config that brings its own input. A synchronous
+	// responder answers the moment the message is acknowledged, so a buffer
+	// makes it answer before there is a body: the caller gets 200 with an empty
+	// response, and nothing reports an error. So the injection is skipped when
+	// the config declares an input, where delivery semantics belong to whoever
+	// wrote it. Bento's own default is no buffer.
+	_, bringsOwnInput := cfg.Bento["input"]
+	if _, hasBuffer := cfg.Bento["buffer"]; !hasBuffer && !bringsOwnInput {
 		cfg.Bento["buffer"] = map[string]any{
 			"memory": map[string]any{},
 		}

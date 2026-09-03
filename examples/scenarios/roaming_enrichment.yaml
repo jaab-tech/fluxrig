@@ -1,0 +1,420 @@
+# Copyright 2026 JAAB Tech SAS, Uruguay
+#
+# Issuing-side enrichment: an authorization arriving from a card scheme is
+# annotated with a mobile-network signal before it reaches the bank's own
+# authorizer, which never calls anything itself.
+#
+# The two legs speak different dialects on purpose. What arrives from the scheme
+# is untouched; the private field carrying the outcome exists only on the
+# internal leg.
+meta:
+  name: "roaming_enrichment"
+  version: "1.0.0"
+
+racks:
+  - name: "rack-issuer"
+    labels:
+      tier: "core"
+      zone: "issuer"
+      role: "the issuer's switch, between the scheme and its authorizer"
+
+gears:
+  # ── Scheme side ───────────────────────────────────────────────────────────
+  - name: "scheme-in"
+    type: "io_iso8583"
+    labels:
+      peer: "Sello (card scheme)"
+      peer_played_by: "the Robot suite, which packs each message"
+    deploy: "rack-issuer"
+    config:
+      mode: "server"
+      bind: ":8583"
+      frame_length_size: 2
+      frame_length_endian: "big"
+      encoding: "ascii"
+      # The default, stated because the whole reply path depends on it: each
+      # reply returns on the exact connection its request arrived on. That is
+      # also why the coat check parks conn.id and restores it with overwrite.
+      strict_connection_routing: true
+
+  - name: "decode-scheme"
+    type: "codec_iso8583"
+    deploy: "rack-issuer"
+    config:
+      spec_path: "specs/scheme.yaml"
+      direction: "decode"
+      on_error: "reject"
+
+  # ── Enrichment ────────────────────────────────────────────────────────────
+  # One Bento pipeline does all three steps: read the enrolled number from
+  # memory, ask the operator inside a strict time budget, and reduce the answer to
+  # an outcome. The number never leaves this gear.
+  - name: "enrich-roaming"
+    type: "bento"
+    deploy: "rack-issuer"
+    config:
+      bento:
+        # The mapping table is a fallback, consulted only when the operator
+        # answers with an a mobile country code and no alpha-2. See examples/reference/.
+        cache_resources:
+          # Read once per transaction, so it must not be a round trip. The Snake
+          # runs inside the Mixer, which means a bare nats_kv lookup here would
+          # put the control plane on the authorization path. Memory in front,
+          # read through, so only the cold tail ever leaves the Rack.
+          #
+          # Sizing is the constraint: a memory cache is a sharded map, so this
+          # holds a few million cards. Past that the tail stops being a tail.
+          - label: enrolment
+            multilevel: [enrolment_hot, enrolment_cold]
+          - label: enrolment_hot
+            memory:
+              default_ttl: 24h
+              shards: 32
+          - label: enrolment_cold
+            nats_kv:
+              urls: ["nats://localhost:4222"]
+              bucket: enrolment
+          # The fallback table stays remote on purpose. It is consulted only
+          # when the operator answers with an a mobile country code and no alpha-2, so the round
+          # trip is rare and buys back the memory.
+          - label: iso3166_to_mobile_country_code
+            nats_kv:
+              urls: ["nats://localhost:4222"]
+              bucket: iso3166_to_mobile_country_code
+        pipeline:
+          processors:
+            # 1. The enrolled number. The key is an HMAC, not a bare hash: a PAN
+            #    is 16 digits with a known BIN and a check digit, so a plain
+            #    SHA-256 of one is reversible with a table anyone can build. The
+            #    secret lives in the environment, never in the scenario.
+            #    That is the pilot shape. In production the key is fetched from
+            #    a secret manager by a `cached` processor keyed on the
+            #    snapshot's own key id, which is what lets a rotation be nothing
+            #    more than publishing the next file. See the tutorial.
+            #    The number goes to metadata, not to the message body, so it is
+            #    never serialised onward.
+            - branch:
+                #    Truncated to 128 bits: the full 256 double the key column
+                #    of the snapshot for nothing, and 128 keeps the odds of two
+                #    cards colliding at ~1e-25 for ten million of them. A
+                #    collision here is not a miss, it is another customer's
+                #    number, so this is not the place to shave further.
+                request_map: 'root = this.iso8583.field."2".hash("hmac_sha256", env("ENROLMENT_HMAC_KEY")).encode("hex").slice(0, 32)'
+                processors:
+                  - cache:
+                      resource: enrolment
+                      operator: get
+                      key: '${! content() }'
+                result_map: 'meta msisdn = content().string()'
+            # 2. Ask the operator inside a strict time budget, and give up on
+            #    the signal rather than on the payment. Stamped first, so the
+            #    call can be timed: a time budget nobody measures is a wish.
+            - mapping: |
+                meta op_start_ns = now().ts_unix_nano().string()
+                # Parked by the coat check and handed back on the matching
+                # reply. Set here because nothing sets it for us.
+                meta received_at = now().ts_unix_nano().string()
+            #
+            #    The body is a device object, not a bare number: the API accepts
+            #    several kinds of identifier and a phone number is one of them.
+            #
+            #    Only `roaming` is required in the answer. Both country fields
+            #    are optional, so neither can be assumed present.
+            - try:
+                - branch:
+                    request_map: 'root.device.phoneNumber = meta("msisdn")'
+                    processors:
+                      - http:
+                          url: '${ROAMING_URL:http://127.0.0.1:9500/retrieve}'
+                          verb: POST
+                          timeout: 250ms
+                          retries: 0
+                          # 404 and 503 are answers, not failures: one says the
+                          # network does not know this subscriber, the other that
+                          # the operator is down, and the authorizer should be
+                          # able to tell them apart. Treating them as successes
+                          # keeps the status readable in result_map instead of
+                          # collapsing both into a caught error.
+                          successful_on: [200, 404, 503]
+                    #    countryName is a LIST, and that is not a technicality.
+                    #    One mobile country code can cover several countries: 340
+                    #    is BL, GF, GP, MF and MQ. Reading the first entry would
+                    #    invent a mismatch for the other four, which on a fraud
+                    #    control means friction on a good transaction.
+                    result_map: |
+                      meta device_alpha2 = (this.countryName | []).join(",")
+                      meta device_mcc = (this.countryCode | "").string()
+                      # An EMPTY countryName is not a missing one. The contract
+                      # says the operator returns [] when the code maps to no
+                      # country at all, as 901 does for the global networks.
+                      # That is a declared "nowhere", not a different country,
+                      # so the code comparison below must not run and invent a
+                      # mismatch out of it.
+                      meta no_country = if this.exists("countryName") && (this.countryName | []).length() == 0 { "yes" } else { "" }
+                      meta op_status = meta("http_status_code").or("200").string()
+            # 3. No alpha-2 from the operator, but a country code: resolve the
+            #    merchant's own country to its mobile country code and compare
+            #    those instead. The table is keyed by alpha-2, so it cannot be
+            #    confused with one of ISO 3166 numeric codes, where 724 is Spain
+            #    rather than Brazil.
+            #
+            #    The guard covers BOTH halves. When the operator call fails there
+            #    is no country code either, and a lookup under an empty key marks
+            #    the message as errored: the outcome still reads `unknown`, so it
+            #    looks like it worked, but the error travels with the message.
+            - branch:
+                request_map: 'root = if meta("device_alpha2").or("") == "" && meta("device_mcc").or("") != "" && meta("no_country").or("") == "" { this.iso8583.field."43".string().slice(-2).uppercase() } else { deleted() }'
+                processors:
+                  - cache:
+                      resource: iso3166_to_mobile_country_code
+                      operator: get
+                      key: '${! content() }'
+                result_map: 'meta merchant_mcc = content().string()'
+            # 4. Compare like with like: alpha-2 against the last two characters
+            #    of DE 43, which is where the card acceptor's country lives and
+            #    which, unlike DE 19, every dialect carries.
+            #
+            #    Membership, not equality, because of the list above: the handset
+            #    is in the merchant's country if that country appears anywhere in
+            #    what the operator returned.
+            - metric:
+                type: timing
+                name: operator_call_ns
+                value: '${! (now().ts_unix_nano() - meta("op_start_ns").number()).floor() }'
+            - mapping: |
+                let device = meta("device_alpha2").or("")
+                let merchant = this.iso8583.field."43".string().slice(-2).uppercase()
+                let op_mcc = meta("device_mcc").or("")
+                let me_mcc = meta("merchant_mcc").or("")
+                root = this
+                # The readable name is for telemetry; the wire carries a code.
+                let outcome = if $device != "" {
+                    if $device.split(",").contains($merchant) { "match" } else { "mismatch" }
+                  } else if meta("device_mcc").or("") != "" && meta("merchant_mcc").or("") != "" {
+                    if meta("merchant_mcc").split(",").contains(meta("device_mcc")) { "match" } else { "mismatch" }
+                  } else if meta("no_country").or("") == "yes" { "no_country"
+                  } else if meta("op_status").or("") == "404" { "no_subscriber"
+                  } else if meta("op_status").or("") == "503" { "operator_down"
+                  } else { "no_answer" }
+                # A card with no number on file was never asked about, so it
+                # gets no field at all rather than a reason for silence. Saying
+                # "no answer" about a call that was never made would make the
+                # enrolment gap invisible in exactly the metric that measures it.
+                let enrolled = meta("msisdn").or("") != ""
+                root.risk.roaming = if $enrolled { $outcome } else { deleted() }
+
+                # What travels in the private field. Tagged, so a second
+                # enrichment can be appended without moving this one, and
+                # grouped so the first digit alone answers "did the network
+                # answer at all": 0x did, 1x did not. An authorizer that only
+                # wants to know whether the countries disagree reads one
+                # character; one that wants the reason reads both.
+                root.risk.roaming_code = if !$enrolled { deleted() } else { "RS" + match $outcome {
+                    "match"         => "00",
+                    "mismatch"      => "01",
+                    "no_subscriber" => "10",
+                    "operator_down" => "11",
+                    "no_answer"     => "12",
+                    "no_country"    => "13",
+                    _               => "19",
+                  } }
+                meta msisdn = deleted()
+                meta device_mcc = deleted()
+                meta merchant_mcc = deleted()
+                meta device_alpha2 = deleted()
+                meta no_country = deleted()
+                meta op_status = deleted()
+                meta op_start_ns = deleted()
+            # What the transactions themselves say, from fields the message
+            # already carries. Bounded values only: DE 42 and DE 43 identify
+            # individual merchants and would grow a series per acceptor, which
+            # belongs in the Parquet where a GROUP BY costs nothing.
+            - metric:
+                type: counter
+                name: authorization_result
+                labels:
+                  merchant_category: '${! json("iso8583.field.18").catch("") }'
+                  entry_mode: '${! json("iso8583.field.22").catch("") }'
+                  acceptor_country: '${! json("iso8583.field.43").string().slice(-2).uppercase().catch("") }'
+            - metric:
+                type: counter
+                name: risk_roaming_outcome
+                labels:
+                  outcome: '${! json("risk.roaming") }'
+      # WARN, not INFO: Bento logs message context at INFO on some paths, and
+      # the enrolled number passes through this gear.
+      log_level: "WARN"
+
+  # Parks the arrival stamp under the transaction key and hands it back on the
+  # matching reply. Without it the reply is a different message and the round
+  # trip to the authorizer cannot be measured: each gear knows its own time and
+  # nothing knows the whole.
+  # Creates and sweeps the bucket the pair below uses. Without it the first
+  # store fails with "bucket not found": a correlation bucket is not created on
+  # demand, because expiry needs one owner and an on-demand bucket would have
+  # none.
+  - name: "in-flight-daemon"
+    type: "coatcheck"
+    deploy: "rack-issuer"
+    config:
+      mode: "daemon"
+      bucket: "auth_in_flight"
+      storage: "memory"
+      replicas: 1
+      # A ceiling on the authorizer, not only a memory bound. The connection the
+      # request arrived on is parked here, so an entry swept before the reply
+      # lands leaves nothing to route it with: the reply crosses the pipeline and
+      # is dropped at the last gear. Keep it comfortably above the slowest reply
+      # worth waiting for.
+      default_ttl: "30s"
+
+  - name: "stamp-request"
+    type: "coatcheck"
+    deploy: "rack-issuer"
+    config:
+      mode: "store"
+      bucket: "auth_in_flight"
+      # DE 41 (terminal) + DE 11 (STAN), which is the pairing widely used as a
+      # default across ISO 8583 switch implementations. DE 11 is six digits and
+      # wraps, so it needs scoping; a
+      # terminal scopes it better than a timestamp, because two terminals can
+      # produce the same STAN inside the same second while one terminal will not
+      # reuse one for a long time.
+      #
+      # Scoped by message class so an authorization cannot be matched by a
+      # reversal that happens to reuse the trace number. The full MTI would not
+      # work: a request and its reply carry different ones. The class is the
+      # leading digits they share, and the codec exposes it for this purpose.
+      #
+      # numeric, because both fields are fixed-width and the two sides of this
+      # exchange are decoded against different specs. Without it a value padded
+      # on one side and trimmed on the other yields two different keys and the
+      # match is silently lost. `trim`, the default, is the safer choice where
+      # padding may be significant.
+      key_fields: ["meta.iso8583.mti_class", "data.iso8583.field.41", "data.iso8583.field.11"]
+      key_normalize: "numeric"
+      # The arrival stamp, and the connection the request came in on. The reply
+      # is a different message: it comes back over the link to the authorizer
+      # and knows nothing about the scheme's socket, so without carrying that
+      # identifier across, the switch has an answer and nowhere to write it.
+      value_fields: ["meta.received_at", "meta.conn.id"]
+      # The message does not wait for this write. The entry exists only to
+      # measure the authorizer, so losing one loses a measurement; blocking the
+      # authorization on a control-plane write, or failing it when that write
+      # fails, would trade a payment for a metric.
+      await_store: false
+      store_timeout: "1s"
+
+  # ── Authorizer side ───────────────────────────────────────────────────────
+  - name: "encode-issuer"
+    type: "codec_iso8583"
+    deploy: "rack-issuer"
+    config:
+      # This spec declares the private field the outcome rides in.
+      spec_path: "specs/issuer.yaml"
+      direction: "encode"
+      on_error: "reject"
+
+  - name: "authorizer-out"
+    type: "io_iso8583"
+    labels:
+      peer: "Emisor (issuer authorizer)"
+      peer_played_by: "iso8583-tool"
+    deploy: "rack-issuer"
+    config:
+      mode: "client"
+      connect: "127.0.0.1:8590"
+      frame_length_size: 2
+      frame_length_endian: "big"
+      encoding: "ascii"
+      reconnect_wait: "1s"
+
+  # ── Reply path ────────────────────────────────────────────────────────────
+  - name: "match-reply"
+    type: "coatcheck"
+    deploy: "rack-issuer"
+    config:
+      mode: "restore"
+      bucket: "auth_in_flight"
+      key_fields: ["meta.iso8583.mti_class", "data.iso8583.field.41", "data.iso8583.field.11"]
+      key_normalize: "numeric"   # must match stamp-request exactly
+      # Overwrite, or the restore is a no-op for the field that matters. The
+      # reply already carries a conn.id: the link to the authorizer. Preserving
+      # it means the switch answers into the wrong socket, which reads as a
+      # connection that does not exist.
+      merge_strategy: "overwrite"
+      on_missing: "forward"      # an unmatched reply is still a reply
+
+
+  # Decoded for one reason only: coatcheck matches on the message class,
+  # DE 41 and DE 11, and none of those is readable until the reply is parsed. Nothing here modifies the
+  # message. Decoding leaves the bytes that arrived untouched, so the reply is
+  # relayed to the scheme exactly as the authorizer wrote it, with no re-encode
+  # on the way out.
+  #
+  # There is nothing to re-encode: the two specs differ only in the private
+  # field carrying the outcome, which travels outbound and which the authorizer
+  # has already consumed by the time it replies. Packing the reply again would
+  # cost a full round of work per transaction to produce identical bytes.
+  # The only gear on the reply path that does anything. The coat check hands
+  # back the arrival stamp; the elapsed time is computed here and emitted as a
+  # timing, because no gear sees both halves of a transaction on its own.
+  #
+  # Guarded: an unmatched reply carries no stamp, and subtracting from an absent
+  # value would fail the message rather than skip a measurement.
+  - name: "measure-authorizer"
+    type: "bento"
+    deploy: "rack-issuer"
+    config:
+      ports:
+        inputs: ["in"]
+        outputs: ["out"]
+      bento:
+        pipeline:
+          processors:
+            - switch:
+                - check: 'meta("received_at").or("") != ""'
+                  processors:
+                    - metric:
+                        type: timing
+                        name: authorizer_round_trip_ns
+                        value: '${! (now().ts_unix_nano() - meta("received_at").number()).floor() }'
+            # The response code lives on the reply and nowhere else, so the
+            # decline rate is counted here rather than on the way out. The
+            # message is already decoded: match-reply needed it parsed.
+            - metric:
+                type: counter
+                name: authorization_outcome
+                labels:
+                  response_code: '${! json("iso8583.field.39").catch("") }'
+            - mapping: 'meta received_at = deleted()'
+
+  - name: "decode-issuer"
+    type: "codec_iso8583"
+    deploy: "rack-issuer"
+    config:
+      spec_path: "specs/issuer.yaml"
+      direction: "decode"
+      on_error: "reject"
+
+wires:
+  # request
+  - from: "scheme-in.out"
+    to: "decode-scheme.in"
+  - from: "decode-scheme.out"
+    to: "enrich-roaming.in"
+  - from: "enrich-roaming.out"
+    to: "stamp-request.in"
+  - from: "stamp-request.out"
+    to: "encode-issuer.in"
+  - from: "encode-issuer.out"
+    to: "authorizer-out.in"
+  # reply, unenriched: the outcome was for the authorizer, not for the scheme
+  - from: "authorizer-out.out"
+    to: "decode-issuer.in"
+  - from: "decode-issuer.out"
+    to: "match-reply.in"
+  - from: "match-reply.out"
+    to: "measure-authorizer.in"
+  - from: "measure-authorizer.out"
+    to: "scheme-in.in"

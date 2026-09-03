@@ -1,6 +1,12 @@
 # Binaries
 bin/
 build/
+# A stray `go build -o <name>` drops the artifact in the repository root,
+# where the rules above do not reach it. scripts/check_no_binaries.sh is the
+# backstop for anything these names miss.
+/fluxrig
+/fluxrig-mixer
+/iso8583-tool
 *.exe
 *.dll
 *.so
@@ -62,3 +68,8 @@ coverage.html
 .generated
 *.duckdb
 dist/
+
+# Claude Code worktrees and session data. Skills are project assets and are
+# versioned: a skill that only exists on one machine is not a shared procedure.
+.claude/*
+!.claude/skills/

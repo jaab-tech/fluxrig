@@ -1,0 +1,98 @@
+# Copyright (c) 2026 JAAB Tech SAS, Uruguay
+# SPDX-License-Identifier: Apache-2.0
+#
+# The dialect spoken towards the issuer's authorizer. Identical to the scheme
+# dialect except for DE 48, the private field the enrichment outcome rides in.
+# That one field is the whole difference between the two specs, which is why the
+# reply needs no re-encoding: by the time it comes back, the field has been read
+# and the bytes are already what the scheme expects.
+meta:
+  name: "roaming_issuer"
+  version: "1.0.0"
+fields:
+  0:
+    label: "MTI"
+    type: "numeric"
+    length: 4
+    enc: "ascii"
+    pad: "none"
+  1:
+    label: "Bitmap"
+    type: "binary"
+    length: 8
+    enc: "binary"
+  2:
+    label: "PAN"
+    type: "llvar_n"
+    length: 19
+    alias: "card.pan"
+    log_mask: true
+    enc: "ascii"
+  3:
+    label: "Processing Code"
+    type: "numeric"
+    length: 6
+    enc: "ascii"
+  4:
+    label: "Amount"
+    type: "numeric"
+    length: 12
+    enc: "ascii"
+  7:
+    label: "Transmission Date & Time"
+    type: "numeric"
+    length: 10
+    enc: "ascii"
+  11:
+    label: "STAN"
+    type: "numeric"
+    length: 6
+    alias: "stan"
+    enc: "ascii"
+  18:
+    label: "Merchant Category Code"
+    type: "numeric"
+    length: 4
+    enc: "ascii"
+  22:
+    label: "POS Entry Mode"
+    type: "numeric"
+    length: 3
+    enc: "ascii"
+  39:
+    label: "Response Code"
+    type: "alpha"
+    length: 2
+    enc: "ascii"
+  41:
+    label: "Card Acceptor Terminal ID"
+    type: "alpha"
+    length: 8
+    enc: "ascii"
+  42:
+    label: "Card Acceptor ID"
+    type: "alpha"
+    length: 15
+    enc: "ascii"
+  43:
+    # The last two characters are the acceptor's country as ISO 3166 alpha-2.
+    # This is the field the enrichment compares against, rather than DE 19,
+    # because every dialect carries it.
+    label: "Card Acceptor Name/Location"
+    type: "alpha"
+    length: 40
+    enc: "ascii"
+  48:
+    label: "Additional Data - Private"
+    type: "lllvar"
+    length: 999
+    alias: "risk.roaming_code"
+    enc: "ascii"
+
+  # The scheme leg carries the currency, so the issuer leg has to declare it too:
+  # a field decoded on one side and undeclared on the other fails at encode.
+  49:
+    label: "Currency Code"
+    type: "numeric"
+    length: 3
+    enc: "ascii"

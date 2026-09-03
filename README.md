@@ -44,6 +44,8 @@ fluxrig uses a modular architecture inspired by the precision of a **Recording S
 *   **Go 1.26+**
 *   **Make**
 *   **GCC/Clang** (Required for Mixer/DuckDB)
+*   **swag** (Regenerates the Mixer's OpenAPI spec during the build):
+    `go install github.com/swaggo/swag/cmd/swag@v1.16.6`
 *   **golangci-lint** (For contributors)
 
 ### 1. Build from source

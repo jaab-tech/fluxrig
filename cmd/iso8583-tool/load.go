@@ -12,9 +12,11 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -26,6 +28,8 @@ import (
 	"github.com/moov-io/iso8583/padding"
 	"github.com/moov-io/iso8583/prefix"
 	"golang.org/x/time/rate"
+
+	"github.com/jaab-tech/fluxrig/pkg/gears/native/iso8583/codec/sdl"
 )
 
 var (
@@ -40,6 +44,17 @@ var (
 	staticHeaderVal  = flag.String("header-val", "", "Static header hex value (overrides -header-len, disables RTT)")
 	warmupDuration   = flag.Duration("warmup", 0, "Warmup duration before measurement (e.g. 2s)")
 	reportFile       = flag.String("report", "report.json", "JSON report output file")
+
+	// Authorization message fields (for load mode with MTI 0100)
+	loadMTI       = flag.String("load-mti", "0800", "Message MTI (0800=echo, 0100=auth)")
+	loadPANs      = flag.String("load-pan", "", "Comma-separated PANs (randomly picked per txn, BIN drives routing)")
+	loadDE43      = flag.String("load-de43", "", "Comma-separated DE43 values (merchant country in last 2 chars)")
+	loadDE41      = flag.String("load-de41", "TERM0001", "Terminal ID (DE41)")
+	loadSpecPath  = flag.String("load-spec", "", "Path to the SDL spec. Without it, load mode uses the built-in 0800 echo spec, which defines only DE 0/1/7/11/70 and cannot carry an authorization.")
+	loadProcCode  = flag.String("load-proc-code", "000000", "Processing Code (DE3)")
+	loadAmount    = flag.String("load-amount", "000000010000", "Amount (DE4)")
+	loadMCC       = flag.String("load-mcc", "5411", "Merchant Category Code (DE18)")
+	loadEntryMode = flag.String("load-entry-mode", "051", "POS Entry Mode (DE22)")
 )
 
 // MetricEvent represents a single metric data point for aggregation
@@ -206,8 +221,18 @@ func runLoadMode() {
 	// Time Series Collector
 	collector := NewCollector()
 
-	// Build Template Spec (0800 Echo)
+	// The built-in spec is an 0800 echo template: it defines DE 0, 1, 7, 11 and 70
+	// and nothing else, so every authorization field the -load-* flags set would be
+	// rejected. Load the scenario's own SDL to drive anything but an echo, rather
+	// than hand-syncing a second copy of the field definitions.
 	spec := getEchoSpec()
+	if *loadSpecPath != "" {
+		loaded, _, err := sdl.LoadSpec(*loadSpecPath)
+		if err != nil {
+			log.Fatalf("load: cannot read spec %s: %v", *loadSpecPath, err)
+		}
+		spec = loaded
+	}
 
 	// Warmup Phase (if configured)
 	if *warmupDuration > 0 {
@@ -397,15 +422,27 @@ func (w *Worker) writeLoop(ctx context.Context) {
 	//nolint:gosec // id is small enough
 	stan := uint32(w.id * 100000 % 1000000)
 
-	// Initialize Message once
-	msg := iso8583.NewMessage(w.spec)
-	msg.MTI("0800")
-	if err := msg.Field(70, "301"); err != nil { // 301 = Echo Test
-		log.Printf("Worker %d: Failed to set Field 70: %v", w.id, err)
-		w.localReqFailed.Add(1)
-		w.globalReqFailed.Add(1)
-		return
+	// Parse PANs and DE43 lists for auth mode
+	var panList []string
+	if *loadMTI == "0100" && *loadPANs != "" {
+		for _, p := range strings.Split(*loadPANs, ",") {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				panList = append(panList, p)
+			}
+		}
 	}
+	var de43List []string
+	if *loadMTI == "0100" && *loadDE43 != "" {
+		for _, d := range strings.Split(*loadDE43, ",") {
+			d = strings.TrimSpace(d)
+			if d != "" {
+				de43List = append(de43List, d)
+			}
+		}
+	}
+	// RNG for random selection
+	rng := rand.New(rand.NewSource(time.Now().UnixNano() + int64(w.id)*7919))
 
 	for {
 		if err := w.limiter.Wait(ctx); err != nil {
@@ -416,21 +453,111 @@ func (w *Worker) writeLoop(ctx context.Context) {
 		stan = (stan + 1) % 1000000
 		stanStr := fmt.Sprintf("%06d", stan)
 
-		// Update Dynamic Fields
-		if err := msg.Field(11, stanStr); err != nil {
-			w.localReqFailed.Add(1)
-			w.globalReqFailed.Add(1)
-			continue
-		}
-		if err := msg.Field(7, time.Now().UTC().Format("0102150405")); err != nil {
-			w.localReqFailed.Add(1)
-			w.globalReqFailed.Add(1)
-			continue
+		fmt.Fprintf(os.Stderr, "Worker %d: attempting write, stan=%s\n", w.id, stanStr)
+
+		// Build message based on MTI
+		msg := iso8583.NewMessage(w.spec)
+		if *loadMTI == "0100" {
+			// Authorization request
+			msg.MTI("0100")
+			// PAN (random from list, or default)
+			// A fixed-width field rejects a short value at pack time, and the -load-*
+			// flags carry values shorter than the spec declares. fitField pads to the
+			// declared width and leaves variable-length fields untouched.
+			pan := "4111111111111111"
+			if len(panList) > 0 {
+				pan = panList[rng.Intn(len(panList))]
+			}
+			if err := msg.Field(2, fitField(w.spec, 2, pan)); err != nil {
+				w.localReqFailed.Add(1)
+				w.globalReqFailed.Add(1)
+				continue
+			}
+			// Processing Code (DE3)
+			if err := msg.Field(3, fitField(w.spec, 3, *loadProcCode)); err != nil {
+				w.localReqFailed.Add(1)
+				w.globalReqFailed.Add(1)
+				continue
+			}
+			// Amount (DE4)
+			if err := msg.Field(4, fitField(w.spec, 4, *loadAmount)); err != nil {
+				w.localReqFailed.Add(1)
+				w.globalReqFailed.Add(1)
+				continue
+			}
+			// STAN (DE11)
+			if err := msg.Field(11, stanStr); err != nil {
+				w.localReqFailed.Add(1)
+				w.globalReqFailed.Add(1)
+				continue
+			}
+			// Date/Time (DE7)
+			if err := msg.Field(7, time.Now().UTC().Format("0102150405")); err != nil {
+				w.localReqFailed.Add(1)
+				w.globalReqFailed.Add(1)
+				continue
+			}
+			// MCC (DE18)
+			if err := msg.Field(18, fitField(w.spec, 18, *loadMCC)); err != nil {
+				w.localReqFailed.Add(1)
+				w.globalReqFailed.Add(1)
+				continue
+			}
+			// POS Entry Mode (DE22)
+			if err := msg.Field(22, fitField(w.spec, 22, *loadEntryMode)); err != nil {
+				w.localReqFailed.Add(1)
+				w.globalReqFailed.Add(1)
+				continue
+			}
+			// Terminal ID (DE41)
+			if err := msg.Field(41, fitField(w.spec, 41, *loadDE41)); err != nil {
+				w.localReqFailed.Add(1)
+				w.globalReqFailed.Add(1)
+				continue
+			}
+			// Card Acceptor Name/Location (DE43) - random from list or default
+			de43 := "SHOPUY"
+			if len(de43List) > 0 {
+				de43 = de43List[rng.Intn(len(de43List))]
+			}
+			if err := msg.Field(43, fitField(w.spec, 43, de43)); err != nil {
+				w.localReqFailed.Add(1)
+				w.globalReqFailed.Add(1)
+				continue
+			}
+			// Currency Code (DE49) - required by some specs
+			if err := msg.Field(49, fitField(w.spec, 49, "858")); err != nil {
+				w.localReqFailed.Add(1)
+				w.globalReqFailed.Add(1)
+				continue
+			}
+		} else {
+			// Echo test (default)
+			msg.MTI("0800")
+			if err := msg.Field(70, "301"); err != nil { // 301 = Echo Test
+				log.Printf("Worker %d: Failed to set Field 70: %v", w.id, err)
+				w.localReqFailed.Add(1)
+				w.globalReqFailed.Add(1)
+				return
+			}
+			// STAN for echo
+			if err := msg.Field(11, stanStr); err != nil {
+				w.localReqFailed.Add(1)
+				w.globalReqFailed.Add(1)
+				continue
+			}
+			// Date/Time for echo
+			if err := msg.Field(7, time.Now().UTC().Format("0102150405")); err != nil {
+				w.localReqFailed.Add(1)
+				w.globalReqFailed.Add(1)
+				continue
+			}
 		}
 
 		// Pack Message using library
 		packed, err := msg.Pack()
 		if err != nil {
+			fmt.Fprintf(os.Stderr, "Worker %d: Pack failed: %v\n", w.id, err)
 			w.localReqFailed.Add(1)
 			w.globalReqFailed.Add(1)
 			continue
@@ -461,12 +588,12 @@ func (w *Worker) writeLoop(ctx context.Context) {
 
 		frame := buildFrame(fullPayload)
 		if _, err := w.conn.Write(frame); err != nil {
-			// If we can't write, likely connection issue.
-			// We count error and exit loop (which closes connection).
+			fmt.Fprintf(os.Stderr, "Worker %d: Write error: %v\n", w.id, err)
 			w.localReqFailed.Add(1)
 			w.globalReqFailed.Add(1)
 			return
 		}
+		fmt.Fprintf(os.Stderr, "Worker %d: write succeeded\n", w.id)
 		w.localReqSent.Add(1)
 		w.globalReqSent.Add(1)
 		w.collector.Record(MetricEvent{Type: "sent"})

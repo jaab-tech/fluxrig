@@ -27,12 +27,20 @@ import (
 	"github.com/jaab-tech/fluxrig/pkg/controller"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/jaab-tech/fluxrig/pkg/gears"
-	_ "github.com/jaab-tech/fluxrig/pkg/mixer/api/docs" // Swagger docs
+	"github.com/jaab-tech/fluxrig/pkg/mixer/api/docs" // Swagger docs
 	"github.com/jaab-tech/fluxrig/pkg/pki"
 	"github.com/jaab-tech/fluxrig/pkg/registry"
 	"github.com/jaab-tech/fluxrig/pkg/telemetry"
 	"github.com/jaab-tech/fluxrig/pkg/version"
 )
+
+// swag bakes the @version annotation into docs.go as a literal, so the checked-in
+// spec carries the 0.0.0-dev placeholder and regenerating it never dirties the
+// tree. Report the build's real version at serve time instead, from the same
+// ldflag the rest of the binary reads.
+func init() {
+	docs.SwaggerInfo.Version = version.Version
+}
 
 type Server struct {
 	reg           registry.Registry

@@ -40,11 +40,17 @@ var (
 	authCount    = flag.Int("auth-count", 1, "Transactions per terminal")
 	authRate     = flag.Float64("auth-rate", 0, "Transactions per second per terminal (0 = as fast as possible)")
 	authStanBase = flag.Int("auth-stan-base", 100000, "Base STAN for concurrent mode; give each terminal a distinct range so keys never collide")
-	authMix      = flag.String("auth-mix", "", "Multi-scheme terminal: comma list of BIN:expected-de39 (e.g. 4:00,5:05). Each txn picks one at random; the reply's DE39 must match that BIN's expectation.")
-	authAccept   = flag.String("auth-accept-de39", "", "Chaos mode: comma list of ACCEPTABLE DE39 values (e.g. 00,91). A reply passes if its DE39 is any of these, instead of an exact match. STAN-echo (cross-wiring) is still enforced strictly.")
-	authReport   = flag.String("auth-report", "", "Write a JSON summary report to this path")
-	authReconn   = flag.Bool("auth-reconnect", false, "Terminal-side chaos: on a connection error, reconnect and continue (dropped txns are counted, not failed). Models a POS that survives an ingress blip.")
-	authTermID   = flag.String("auth-terminal-id", "", "DE41 terminal id. Empty = TERM0001 in single mode, or a per-terminal unique id in concurrent mode so the correlation key is globally unique across terminals (not just per-terminal STAN).")
+	// A reversal reuses the trace number of the authorization it reverses, which
+	// is normal in several dialects and is the reason the correlation key carries
+	// the message class. Sending both classes over one trace range is what proves
+	// the class is doing that work.
+	authMTI    = flag.String("auth-mti", "0200", "Request MTI (0200 financial, 0400 reversal)")
+	authDE43   = flag.String("auth-de43", "", "Acceptor location (DE 43); last two chars are the merchant country. Empty omits the field.")
+	authMix    = flag.String("auth-mix", "", "Multi-scheme terminal: comma list of BIN:expected-de39 (e.g. 4:00,5:05). Each txn picks one at random; the reply's DE39 must match that BIN's expectation.")
+	authAccept = flag.String("auth-accept-de39", "", "Chaos mode: comma list of ACCEPTABLE DE39 values (e.g. 00,91). A reply passes if its DE39 is any of these, instead of an exact match. STAN-echo (cross-wiring) is still enforced strictly.")
+	authReport = flag.String("auth-report", "", "Write a JSON summary report to this path")
+	authReconn = flag.Bool("auth-reconnect", false, "Terminal-side chaos: on a connection error, reconnect and continue (dropped txns are counted, not failed). Models a POS that survives an ingress blip.")
+	authTermID = flag.String("auth-terminal-id", "", "DE41 terminal id. Empty = TERM0001 in single mode, or a per-terminal unique id in concurrent mode so the correlation key is globally unique across terminals (not just per-terminal STAN).")
 )
 
 // binExpect is one scheme a mixed-source terminal drives: a BIN prefix and the
@@ -55,15 +61,19 @@ type binExpect struct{ prefix, de39 string }
 // -auth-report, so a Robot suite can assert on structured results rather than
 // scraping stdout.
 type authRep struct {
-	Terminals    int            `json:"terminals"`
-	Count        int            `json:"count"`
-	Total        int            `json:"total"`
-	OK           int            `json:"ok"`
-	CrossWired   int            `json:"cross_wired"`
-	Failed       int            `json:"failed"`
-	Dropped      int            `json:"dropped"`
-	Reconnects   int            `json:"reconnects"`
-	ByDE39       map[string]int `json:"by_de39"`
+	Terminals  int            `json:"terminals"`
+	Count      int            `json:"count"`
+	Total      int            `json:"total"`
+	OK         int            `json:"ok"`
+	CrossWired int            `json:"cross_wired"`
+	Failed     int            `json:"failed"`
+	Dropped    int            `json:"dropped"`
+	Reconnects int            `json:"reconnects"`
+	ByDE39     map[string]int `json:"by_de39"`
+	// DE 42 carries whatever the host reported back, which is where a scheme
+	// that moves a private field lands it. Aggregating it lets a suite assert
+	// that a named outcome actually occurred, not merely that a reply arrived.
+	ByDE42       map[string]int `json:"by_de42"`
 	ElapsedSec   float64        `json:"elapsed_sec"`
 	AchievedTPS  float64        `json:"achieved_tps"`
 	LatencyP50Ms float64        `json:"latency_p50_ms"`
@@ -74,14 +84,20 @@ type authRep struct {
 type aggregator struct {
 	mu        sync.Mutex
 	byDE39    map[string]int
+	byDE42    map[string]int
 	latencies []float64 // milliseconds
 }
 
-func newAggregator() *aggregator { return &aggregator{byDE39: make(map[string]int)} }
+func newAggregator() *aggregator {
+	return &aggregator{byDE39: make(map[string]int), byDE42: make(map[string]int)}
+}
 
-func (a *aggregator) record(de39 string, latencyMs float64) {
+func (a *aggregator) record(de39, de42 string, latencyMs float64) {
 	a.mu.Lock()
 	a.byDE39[de39]++
+	if de42 != "" {
+		a.byDE42[de42]++
+	}
 	a.latencies = append(a.latencies, latencyMs)
 	a.mu.Unlock()
 }
@@ -229,10 +245,10 @@ func runAuthConcurrent(spec *iso8583.MessageSpec) {
 				case r.mti != *authExpMTI || !de39OK(r.de39, expDE39, accept):
 					failed.Add(1)
 					fmt.Fprintf(os.Stderr, "BAD RESPONSE: pan=%s stan=%s mti=%s de39=%s (want de39=%s)\n", pan, r.stan, r.mti, r.de39, expDE39)
-					agg.record(r.de39, time.Since(sent).Seconds()*1000)
+					agg.record(r.de39, r.de42, time.Since(sent).Seconds()*1000)
 				default:
 					ok.Add(1)
-					agg.record(r.de39, time.Since(sent).Seconds()*1000)
+					agg.record(r.de39, r.de42, time.Since(sent).Seconds()*1000)
 				}
 			}
 		}(c)
@@ -301,6 +317,10 @@ func writeAuthReport(agg *aggregator, elapsed float64, total, ok, crossed, faile
 	for k, v := range agg.byDE39 {
 		byDE39[k] = v
 	}
+	byDE42 := make(map[string]int, len(agg.byDE42))
+	for k, v := range agg.byDE42 {
+		byDE42[k] = v
+	}
 	agg.mu.Unlock()
 	sort.Float64s(lat)
 
@@ -314,6 +334,7 @@ func writeAuthReport(agg *aggregator, elapsed float64, total, ok, crossed, faile
 		Dropped:      dropped,
 		Reconnects:   reconnects,
 		ByDE39:       byDE39,
+		ByDE42:       byDE42,
 		ElapsedSec:   elapsed,
 		AchievedTPS:  float64(total) / elapsed,
 		LatencyP50Ms: percentile(lat, 50),
@@ -361,7 +382,7 @@ func randomizePAN(rng *rand.Rand, prefix string) string {
 	return string(b)
 }
 
-type authResult struct{ mti, de39, stan string }
+type authResult struct{ mti, de39, stan, de42 string }
 
 func sendAuthNewConn(spec *iso8583.MessageSpec, target, pan, stan, termID string, timeout time.Duration) (authResult, error) {
 	conn, err := net.DialTimeout("tcp", target, timeout)
@@ -375,14 +396,17 @@ func sendAuthNewConn(spec *iso8583.MessageSpec, target, pan, stan, termID string
 // sendAuthOnConn sends one 0200 on an existing connection and reads its reply.
 func sendAuthOnConn(conn net.Conn, spec *iso8583.MessageSpec, pan, stan, amount, termID string, timeout time.Duration) (authResult, error) {
 	req := iso8583.NewMessage(spec)
-	set(req, 0, "0200")
+	set(req, 0, *authMTI)
 	set(req, 2, pan)
 	set(req, 3, "000000")
 	set(req, 4, amount)
 	set(req, 7, time.Now().UTC().Format("0102150405"))
 	set(req, 11, stan)
 	set(req, 41, termID)
-	set(req, 49, "840")
+	if *authDE43 != "" {
+		set(req, 43, fitField(spec, 43, *authDE43))
+	}
+	set(req, 49, "858") // ISO 4217 UYU, matching the load generator and the UY scenario
 	packed, err := req.Pack()
 	if err != nil {
 		return authResult{}, fmt.Errorf("pack: %w", err)
@@ -399,7 +423,7 @@ func sendAuthOnConn(conn net.Conn, spec *iso8583.MessageSpec, pan, stan, amount,
 	if err := resp.Unpack(respBytes); err != nil {
 		return authResult{}, fmt.Errorf("unpack: %w", err)
 	}
-	return authResult{mti: fieldStr(resp, 0), de39: fieldStr(resp, 39), stan: fieldStr(resp, 11)}, nil
+	return authResult{mti: fieldStr(resp, 0), de39: fieldStr(resp, 39), stan: fieldStr(resp, 11), de42: fieldStr(resp, 42)}, nil
 }
 
 func set(m *iso8583.Message, id int, v string) {

@@ -1,0 +1,28 @@
+# Copyright (c) 2026 JAAB Tech SAS, Uruguay
+# SPDX-License-Identifier: Apache-2.0
+[logging]
+level = "info"
+filename = "logs/mixer.log"
+
+[api]
+port = 8090
+
+[store]
+dir = "data"
+database_file = "fluxrig.duckdb"
+cluster_key_file = "cluster.key"
+
+[snake]
+port = 4222
+url = "nats://localhost:4222"
+cluster_name = "flux"
+store_dir = "data/js"
+stream_name = "flux-msg"
+stream_subjects = ["flux.msg.>", "flux.agent.>", "flux.rack.>", "flux.ctrl.>"]
+
+[observability]
+enabled = true
+tier = "embedded"
+
+[enrollment]
+auto_adopt = true

@@ -4,6 +4,7 @@
 package bento
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 
@@ -16,6 +17,10 @@ import (
 // normalizeMap recursively converts map[any]any (from a CBOR round trip) into
 // map[string]any so Bento's structured handling recognizes nested objects.
 // Non-string keys are rendered with a plain string form; scalars pass through.
+// metaRawPayload carries a FluxMsg's wire bytes through a Bento pipeline, which
+// has no place of its own for them.
+const metaRawPayload = "__flux_raw_payload"
+
 func normalizeMap(m map[string]any) map[string]any {
 	out := make(map[string]any, len(m))
 	for k, v := range m {
@@ -67,6 +72,13 @@ func ToBentoMessage(fm *fluxmsg.FluxMsg) *service.Message {
 		// to map[string]any so Bento treats nested fields as objects; without
 		// this, a Bloblang mapping sees `this.iso8583` as a non-object.
 		m.SetStructured(normalizeMap(fm.Data))
+		// Carry the wire bytes across as metadata when the message has both.
+		// Bento works on the structured view, so a gear that only reads fields
+		// would otherwise drop the payload it never touched, and a downstream
+		// io gear relaying a message verbatim would have nothing to write.
+		if len(fm.RawPayload) > 0 {
+			m.MetaSet(metaRawPayload, base64.StdEncoding.EncodeToString(fm.RawPayload))
+		}
 	} else {
 		m = service.NewMessage(fm.RawPayload)
 	}
@@ -121,6 +133,15 @@ func FromBentoMessage(bm *service.Message) (*fluxmsg.FluxMsg, error) {
 		}
 		return nil
 	})
+
+	// Recover the wire bytes stashed on the way in, and keep the carrier out of
+	// the message's own metadata: it is a bridge detail, not a message field.
+	if enc, ok := bm.MetaGet(metaRawPayload); ok {
+		if raw, decErr := base64.StdEncoding.DecodeString(enc); decErr == nil {
+			fm.RawPayload = raw
+		}
+		delete(fm.Metadata, metaRawPayload)
+	}
 
 	// 2. Recover Data (Payload)
 	// Try structured first

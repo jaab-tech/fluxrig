@@ -84,6 +84,18 @@ type zone struct {
 // socket: every io_* gear bridges exactly one bidirectional socket, and the
 // scenario config knows the address, so the model can show where traffic
 // enters and leaves each Rack.
+// socketEdge is a socket whose two ends are both in this scenario: a client
+// gear dialling an address a server gear in the same file listens on.
+//
+// Without this, each end produced its own "external" box and the same socket was
+// drawn twice, once per side, with the counterparty shown as an anonymous
+// outsider. In a multi-rack scenario that is most of the diagram.
+type socketEdge struct {
+	from  string // client gear name
+	to    string // server gear name
+	label string
+}
+
 type extNode struct {
 	id      string
 	title   string
@@ -102,9 +114,10 @@ type model struct {
 	order        []string             // gear names in declaration order
 	wires        []wireEdge
 	externals    []extNode
-	mixerID      string   // "" when the scenario declares no racks
-	mixerZone    string   // zone id hosting the Mixer, "" = outside every zone
-	problems     []string // human-readable validation notes
+	sockets      []socketEdge // client gear -> server gear, both in this scenario
+	mixerID      string       // "" when the scenario declares no racks
+	mixerZone    string       // zone id hosting the Mixer, "" = outside every zone
+	problems     []string     // human-readable validation notes
 }
 
 const (
@@ -212,6 +225,12 @@ func buildModel(sc *Scenario, manifestFor ManifestLookup) *model {
 		if title == "" {
 			title, desc = r.Group, "Rack group"
 		}
+		// A rack's name says which process it is; its role says what it does
+		// there. In a scenario with several, the second is what a reader is
+		// actually trying to tell apart.
+		if role := r.Labels["role"]; role != "" {
+			desc += ": " + strings.ReplaceAll(role, "-", " ")
+		}
 		if title == "" {
 			continue // defaults-only entry; contributes no container
 		}
@@ -233,6 +252,7 @@ func buildModel(sc *Scenario, manifestFor ManifestLookup) *model {
 	needMissing := false
 
 	// Gears in declaration order.
+	var ioGears []Gear
 	for _, g := range sc.Gears {
 		if g.Name == "" {
 			m.problems = append(m.problems, "gear with empty name skipped")
@@ -277,13 +297,14 @@ func buildModel(sc *Scenario, manifestFor ManifestLookup) *model {
 		m.gears[g.Name] = node
 		m.order = append(m.order, g.Name)
 
-		// An I/O gear bridges one external socket; surface its far side.
+		// An I/O gear bridges one socket. Whether its far side is external is
+		// decided below, once every gear's address is known.
 		if node.isIO {
-			if ext, ok := externalFor(g, ids); ok {
-				m.externals = append(m.externals, ext)
-			}
+			ioGears = append(ioGears, g)
 		}
 	}
+
+	m.resolveSockets(ioGears, ids)
 
 	// Wires; unknown endpoints become placeholders under "unresolved".
 	ensure := func(gearName string) {
@@ -373,11 +394,85 @@ func labelTags(labels map[string]string) []string {
 	return tags
 }
 
+// peerDesc says who stands in for a counterparty, when something does. A reader
+// deciding whether a suite proves anything needs to know which participants are
+// real and which are simulated, and that belongs on the box rather than in
+// prose somewhere else.
+func peerDesc(playedBy, how string) string {
+	if playedBy == "" {
+		return how
+	}
+	return "Played by " + playedBy + ". " + how + "."
+}
+
+// resolveSockets decides, for every I/O gear, whether the far side of its
+// socket is another gear in this scenario or a genuine outsider.
+//
+// A client whose `connect` matches a server's `bind` is talking to that server,
+// and drawing both as strangers hides the one relationship a reader is looking
+// for. A server keeps its external box only when nothing here dials it, because
+// something still must: the traffic has to come from somewhere.
+func (m *model) resolveSockets(ioGears []Gear, ids *idSet) {
+	servers := map[string]string{} // normalized bind address -> gear name
+	for _, g := range ioGears {
+		if mode, _ := g.Config["mode"].(string); mode == "server" {
+			if addr := configAddr(g.Config, "bind", "listen"); addr != "" {
+				servers[normalizeAddr(addr)] = g.Name
+			}
+		}
+	}
+
+	dialed := map[string]bool{}
+	external := make([]Gear, 0, len(ioGears))
+	for _, g := range ioGears {
+		mode, _ := g.Config["mode"].(string)
+		if mode == "client" {
+			addr := configAddr(g.Config, "connect")
+			if server, ok := servers[normalizeAddr(addr)]; ok && server != g.Name {
+				m.sockets = append(m.sockets, socketEdge{from: g.Name, to: server, label: socketLabel(addr)})
+				dialed[server] = true
+				continue
+			}
+		}
+		external = append(external, g)
+	}
+
+	for _, g := range external {
+		if dialed[g.Name] {
+			continue
+		}
+		if ext, ok := externalFor(g, ids); ok {
+			m.externals = append(m.externals, ext)
+		}
+	}
+}
+
+// normalizeAddr makes ":8586" and "127.0.0.1:8586" the same address, since a
+// server that binds every interface is reached on the loopback like any other.
+func normalizeAddr(addr string) string {
+	host, port, found := strings.Cut(addr, ":")
+	if !found {
+		return addr
+	}
+	switch host {
+	case "", "0.0.0.0", "localhost", "[::]":
+		host = "127.0.0.1"
+	}
+	return host + ":" + port
+}
+
 // externalFor derives the external socket endpoint of an I/O gear from its
 // config (mode + bind/connect). Gears with no recognizable mode get none:
 // the generator does not guess connection direction.
 func externalFor(g Gear, ids *idSet) (extNode, bool) {
 	mode, _ := g.Config["mode"].(string)
+
+	// A counterparty the scenario names is drawn by that name. "External
+	// clients (:8586)" describes a socket; "Card scheme" describes who is on
+	// the other end of it, and only the second is what a reader came for.
+	peer := g.Labels["peer"]
+	playedBy := g.Labels["peer_played_by"]
+
 	switch mode {
 	case "server":
 		addr := configAddr(g.Config, "bind", "listen")
@@ -385,10 +480,14 @@ func externalFor(g Gear, ids *idSet) (extNode, bool) {
 		if addr != "" {
 			title = "External clients (" + addr + ")"
 		}
+		desc := "Dial " + g.Name + " over one bidirectional socket each"
+		if peer != "" {
+			title, desc = peer, peerDesc(playedBy, "Dials "+g.Name+" and waits for the reply on the same socket")
+		}
 		return extNode{
 			id:      ids.claim("ext_" + g.Name),
 			title:   title,
-			desc:    "Dial " + g.Name + " over one bidirectional socket each",
+			desc:    desc,
 			gear:    g.Name,
 			inbound: true,
 			label:   socketLabel(addr),
@@ -399,10 +498,14 @@ func externalFor(g Gear, ids *idSet) (extNode, bool) {
 		if addr != "" {
 			title = "External endpoint (" + addr + ")"
 		}
+		desc := g.Name + " dials out over one bidirectional socket"
+		if peer != "" {
+			title, desc = peer, peerDesc(playedBy, g.Name+" dials it and reads the reply on the same socket")
+		}
 		return extNode{
 			id:      ids.claim("ext_" + g.Name),
 			title:   title,
-			desc:    g.Name + " dials out over one bidirectional socket",
+			desc:    desc,
 			gear:    g.Name,
 			inbound: false,
 			label:   socketLabel(addr),
@@ -688,6 +791,11 @@ func writeModel(b *strings.Builder, m *model) {
 	}
 	// Sockets are bidirectional: drawn double-headed (data flows both ways);
 	// the edge direction records only who establishes the connection.
+	for _, sk := range m.sockets {
+		fmt.Fprintf(b, "  %s -[socket]-> %s %s %s\n",
+			m.path(sk.from), m.path(sk.to), quote(sk.label),
+			quote("One bidirectional socket; "+sk.from+" dials "+sk.to+", data flows both ways"))
+	}
 	for _, e := range m.externals {
 		if e.inbound {
 			fmt.Fprintf(b, "  %s -[socket]-> %s %s %s\n",

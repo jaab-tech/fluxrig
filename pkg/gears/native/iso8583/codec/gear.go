@@ -177,6 +177,18 @@ func (g *Gear) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.Flux
 	msg.Metadata["codec.protocol"] = g.meta.Protocol
 	if mti != "" {
 		msg.Metadata["iso8583.mti"] = mti
+		if len(mti) >= mtiClassLen {
+			// The first two digits are the version and the message class, which
+			// a request and its reply share: 0100 and 0110 both yield "01",
+			// while a reversal pair yields "04". The last two digits are the
+			// function and origin, and those are exactly what differs between
+			// the two, so the full MTI cannot correlate them.
+			//
+			// This exists so a correlation key can be scoped by message class.
+			// Without it, an authorization and a reversal carrying the same
+			// trace number collide in a correlation store.
+			msg.Metadata["iso8583.mti_class"] = mti[:mtiClassLen]
+		}
 	}
 
 	g.logger.Info("Codec message processed",
@@ -195,6 +207,10 @@ func (g *Gear) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.Flux
 
 	return msg, nil
 }
+
+// mtiClassLen is the number of leading MTI digits that a request and its reply
+// have in common: the version and the message class.
+const mtiClassLen = 2
 
 func (g *Gear) decode(msg *fluxmsg.FluxMsg) (string, []int, error) {
 	isoMsg := iso8583.NewMessage(g.moovSpec)
