@@ -139,7 +139,27 @@ type ScenarioPayload struct {
 	MachineID uuid.UUID `cbor:"machine_id"` // Target machine ID
 	Scenario  []byte    `cbor:"scenario"`   // YAML-encoded scenario (projected for this rack)
 	Timestamp int64     `cbor:"timestamp"`  // Unix timestamp
+
+	// Specs are the spec artefacts this scenario names, carried with it.
+	//
+	// They travel in the same message rather than in one of their own so that a
+	// rack never holds a scenario naming a spec it does not have: the scenario is
+	// applied the moment it arrives, and a separate delivery would leave a window
+	// where the reference does not resolve.
+	Specs []SpecArtifact `cbor:"specs,omitempty"`
 }
+
+// SpecArtifact is one spec travelling with the scenario that names it. Name and
+// tag come from the Mixer's store, so the rack files it under the same reference
+// the scenario uses.
+type SpecArtifact struct {
+	Name    string `cbor:"name"`
+	Tag     string `cbor:"tag"`
+	Content []byte `cbor:"content"`
+}
+
+// URN is how a scenario refers to this artefact.
+func (a SpecArtifact) URN() string { return a.Name + ":" + a.Tag }
 
 func (s *ScenarioPayload) ToData() (map[string]any, error) {
 	return toMap(s)

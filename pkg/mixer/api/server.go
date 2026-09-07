@@ -27,6 +27,7 @@ import (
 	"github.com/jaab-tech/fluxrig/pkg/controller"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/jaab-tech/fluxrig/pkg/gears"
+	"github.com/jaab-tech/fluxrig/pkg/manager"
 	"github.com/jaab-tech/fluxrig/pkg/mixer/api/docs" // Swagger docs
 	"github.com/jaab-tech/fluxrig/pkg/pki"
 	"github.com/jaab-tech/fluxrig/pkg/registry"
@@ -53,6 +54,16 @@ type Server struct {
 	cfg           *config.MixerConfig
 	wasmCatalog   WasmCatalog
 	gearFactory   *gears.Factory
+	specs         manager.Manager
+}
+
+// WithSpecStore gives the API the content-addressed store, so a spec that was
+// imported can be fetched and its protocol reference rendered. Without one those
+// routes answer 503 rather than disappearing: an endpoint that is documented and
+// missing is harder to diagnose than one that says why it cannot serve.
+func (s *Server) WithSpecStore(m manager.Manager) *Server {
+	s.specs = m
+	return s
 }
 
 // WasmCatalog defines the interface for the Wasm Catalog to avoid circular imports if needed.
@@ -95,6 +106,10 @@ func (s *Server) Start(addr string) error {
 	mux.HandleFunc("GET /api/v1/wasm/catalog", s.handleWasmCatalog)
 	mux.HandleFunc("GET /api/v1/gears", s.handleGears)
 	mux.HandleFunc("GET /api/v1/gears/{type}", s.handleGearManifest)
+	mux.HandleFunc("GET /api/v1/specs", s.handleSpecs)
+	mux.HandleFunc("GET /api/v1/specs/{name}", s.handleSpecHistory)
+	mux.HandleFunc("GET /api/v1/specs/{name}/{tag}", s.handleSpecSource)
+	mux.HandleFunc("GET /api/v1/specs/{name}/{tag}/doc", s.handleSpecDoc)
 
 	// Swagger UI
 	mux.Handle("/swagger/", httpSwagger.WrapHandler)

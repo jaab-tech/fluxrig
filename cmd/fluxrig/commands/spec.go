@@ -70,11 +70,38 @@ var specListCmd = &cobra.Command{
 			return err
 		}
 
-		fmt.Println("NAME\tTAG\tHASH")
-		for _, a := range list {
-			fmt.Printf("%s\t%s\t%s\n", a.Name, a.Tag, a.Hash)
+		asJSON, _ := cmd.Flags().GetBool("json")
+		return printArtifacts(cmd.OutOrStdout(), list, manager.KindSpec, asJSON)
+	},
+}
+
+var specHistoryCmd = &cobra.Command{
+	Use:   "history <name>",
+	Short: "Every stored version of one spec",
+	Long: `Every version of one spec the store holds, newest first.
+
+Newest means the highest version, not the last imported: a patch to an older
+branch arrives after a newer release and is not newer than it.`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		storePath, _ := cmd.Flags().GetString("store-dir")
+		if storePath == "" {
+			home, _ := os.UserHomeDir()
+			storePath = filepath.Join(home, ".fluxrig", "store")
 		}
-		return nil
+
+		mgr, err := manager.NewManager(storePath)
+		if err != nil {
+			return err
+		}
+
+		list, err := mgr.History(context.Background(), manager.KindSpec, args[0])
+		if err != nil {
+			return err
+		}
+
+		asJSON, _ := cmd.Flags().GetBool("json")
+		return printArtifacts(cmd.OutOrStdout(), list, manager.KindSpec, asJSON)
 	},
 }
 
@@ -113,8 +140,12 @@ func init() {
 	specImportCmd.Flags().String("name", "", "Logical name of the spec")
 	specImportCmd.Flags().String("tag", "", "Version tag (e.g. v1.0.0)")
 
+	specListCmd.Flags().Bool("json", false, "Machine-readable output")
+	specHistoryCmd.Flags().Bool("json", false, "Machine-readable output")
+
 	specCmd.AddCommand(specImportCmd)
 	specCmd.AddCommand(specListCmd)
+	specCmd.AddCommand(specHistoryCmd)
 	specCmd.AddCommand(specExportCmd)
 
 	rootCmd.AddCommand(specCmd)

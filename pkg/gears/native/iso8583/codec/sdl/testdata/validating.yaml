@@ -1,0 +1,69 @@
+# Copyright (c) 2026 JAAB Tech SAS, Uruguay
+# SPDX-License-Identifier: Apache-2.0
+#
+# A spec with rules, for testing what the codec does with them. The wire layer
+# is the named 1987 ASCII base, so this document is only the semantic half.
+spec:
+  id: validating
+  name: Validating
+  version: 1.0.0
+  protocol: iso8583
+  wire:
+    format: moov
+    source: "moov:spec87ascii"
+
+  messages:
+    catalog:
+      "0200":
+        name: Financial Request
+        flow: request
+        pairs_with: "0210"
+      "0210":
+        name: Financial Response
+        flow: response
+        pairs_with: "0200"
+
+  enums:
+    response_code:
+      closed: true
+      values:
+        "00": {name: Approved, category: approved}
+        "05": {name: Do not honour, category: declined}
+        "91": {name: Issuer unavailable, category: unavailable}
+
+  fields:
+    2:
+      name: Primary Account Number
+      alias: card.pan
+      log_mask: true
+      messages:
+        - {mti: "0200", usage: mandatory}
+    4:
+      name: Amount, Transaction
+      alias: amount
+      messages:
+        - {mti: ["0200", "0210"], usage: mandatory}
+    11:
+      name: Systems Trace Audit Number
+      alias: stan
+      messages:
+        - {mti: ["0200", "0210"], usage: mandatory}
+    39:
+      name: Response Code
+      alias: response_code
+      values_ref: response_code
+      messages:
+        - {mti: "0200", usage: forbidden}
+        - {mti: "0210", usage: mandatory, response_value: new}
+    41:
+      name: Card Acceptor Terminal Identification
+      alias: terminal_id
+      messages:
+        - {mti: "0200", usage: optional}
+
+  checks:
+    - mti: ["0200"]
+      name: "Amount is positive"
+      assert: "field(4) > 0"
+      severity: warn
+      note: "A zero-amount financial request is almost always a defect upstream."

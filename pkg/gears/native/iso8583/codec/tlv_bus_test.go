@@ -24,48 +24,45 @@ import (
 // emvTLVSpec declares DE 55 as a BER-TLV composite holding three EMV tags.
 // Anything else inside DE 55 is unknown to the spec.
 const emvTLVSpec = `
-meta:
+spec:
+  id: "emv-bus"
   name: "emv_bus"
   version: "1.0.0"
-fields:
-  0:
-    label: "MTI"
-    type: "numeric"
-    length: 4
-    enc: "ascii"
-  1:
-    label: "Bitmap"
-    type: "binary"
-    length: 8
-    enc: "binary"
-  2:
-    label: "PAN"
-    type: "llvar_n"
-    length: 19
-    alias: "card.pan"
-    enc: "ascii"
-  55:
-    label: "ICC Data"
-    type: "lllvar"
-    length: 999
-    # Aliased on purpose: an alias is a second path into Data, and a value that
-    # travels correctly under iso8583.field.55 can still be written as a Go
-    # string under its alias and lose the whole message on the bus.
-    alias: "icc_data"
-    enc: "binary"
-    len_enc: "ascii"
-    structure: "tlv"
-    tlv_tag_encoding: "hex"
-    tlv_len_encoding: "binary"
-    subfields:
-      "9F02":
-        label: "Amount, Authorized"
-        type: "binary"
-        enc: "binary"
-      "5F2A":
-        label: "Transaction Currency Code"
-        type: "binary"
-        enc: "binary"
+  wire:
+    format: moov
+    fields:
+      0: {description: MTI, type: String, length: 4, enc: ASCII, prefix: ASCII.Fixed}
+      1: {description: Bitmap, type: Bitmap, length: 8, enc: Binary, prefix: Binary.Fixed}
+      2: {description: PAN, type: String, length: 19, enc: ASCII, prefix: ASCII.LL}
+      55:
+        description: ICC Data
+        type: Composite
+        length: 999
+        prefix: ASCII.LLL
+        tag:
+          enc: BerTLVTag
+          sort: StringsByHex
+          skipUnknownTLVTags: true
+          storeUnknownTLVTags: true
+          prefUnknownTLV: BerTLV
+        subfields:
+          "9F02": {description: "Amount, Authorized", type: Binary, enc: Binary, prefix: BerTLV}
+          "5F2A": {description: "Transaction Currency Code", type: Binary, enc: Binary, prefix: BerTLV}
+  fields:
+    0: {name: MTI}
+    1: {name: Bitmap}
+    2: {name: PAN, alias: "card.pan"}
+    55:
+      name: "ICC Data"
+      # Aliased on purpose: an alias is a second path into Data, and a value that
+      # travels correctly under iso8583.field.55 can still be written as a Go
+      # string under its alias and lose the whole message on the bus.
+      alias: "icc_data"
+      subfields:
+        layout: tlv
+        parts:
+        - {tag: "9F02", name: "Amount, Authorized"}
+        - {tag: "5F2A", name: "Transaction Currency Code"}
 `
 
 func writeSpec(t *testing.T, body string) string {

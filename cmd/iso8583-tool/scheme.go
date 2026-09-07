@@ -19,13 +19,30 @@ import (
 	"github.com/jaab-tech/fluxrig/pkg/gears/native/iso8583/codec/sdl"
 )
 
-// runSchemeMode is a scheme-host simulator for payment-switch validation. It
-// listens for authorization requests, and for each one replies with an
-// authorization response: the MTI advanced to a response (0200 -> 0210), the
-// correlation fields (STAN, transmission date/time) echoed, and DE39 set to a
-// configured value. With -sink it accepts requests and never answers, to drive
-// the switch's timeout path. The wire format comes from the same SDL spec the
-// codec gears load, so alignment is guaranteed.
+// runSchemeMode is a test fixture, not a simulator, and the distinction is the
+// point rather than modesty.
+//
+// It exists so the payment-switch and Conductor suites have a counterparty that
+// answers: the MTI advanced to a response (0200 -> 0210), the correlation fields
+// echoed, DE 39 stamped from a flag, and three ways to be difficult on purpose —
+// never answering, answering late, and reporting one field back inside another.
+// Those are the switch's timeout path, the correlation store's expiry path, and
+// a way to see which value arrived without echoing a private field to a
+// counterparty whose dialect need not declare it.
+//
+// What it is not is a scheme simulator. It reads only the wire layer — it
+// discards the spec's semantic metadata, addresses fields by number, and derives
+// the response MTI by arithmetic on the string rather than from the message
+// catalog's `pairs_with`. A spec-driven responder would read that catalog, the
+// per-message matrix (`source: echo` states exactly which fields a response
+// admits) and the value domains; all of that is the semantic layer, and this
+// tool is wire-only by contract.
+//
+// It is therefore frozen. It grows only to keep the suites it serves working,
+// and a spec-driven responder is a separate thing that lives elsewhere. Anyone
+// reading this looking for the simulator has the wrong file — and the suites
+// here must stay runnable by someone who cloned this repository and nothing
+// else, which is the reason this fixture stays rather than being replaced.
 var (
 	schemePort = flag.String("scheme-port", "10001", "Port to listen on")
 	schemeSpec = flag.String("scheme-spec", "", "Path to the SDL spec (required)")

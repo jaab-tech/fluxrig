@@ -10,7 +10,7 @@ import (
 )
 
 var (
-	mode = flag.String("mode", "load", "Operation mode: load | echo | auth (terminal) | scheme (host)")
+	mode = flag.String("mode", "load", "Operation mode: load | echo | auth (terminal) | scheme (host fixture)")
 )
 
 func main() {
@@ -27,6 +27,6 @@ func main() {
 		runSchemeMode()
 	default:
 		log.SetOutput(os.Stderr)
-		log.Fatalf("Unknown mode: %s. Use 'load' or 'echo'", *mode)
+		log.Fatalf("Unknown mode: %s. Use one of: load, echo, auth, scheme", *mode)
 	}
 }

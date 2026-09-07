@@ -14,7 +14,7 @@ func (g *Gear) Manifest() sdk.Manifest {
 		Type:     "bento",
 		Category: sdk.CategoryLogic,
 		Status:   sdk.StatusStable,
-		Summary:  "Wraps the Bento stream processor (100+ inputs/outputs, Bloblang mapping) as a gear.",
+		Summary:  "Wraps the Bento stream processor (file, socket, websocket and HTTP I/O, Bloblang mapping) as a gear.",
 		DocSlug:  "bento",
 		Terminus: sdk.TerminusOpaque,
 		Ports: []sdk.Port{
@@ -33,7 +33,7 @@ func (g *Gear) Manifest() sdk.Manifest {
         "outputs": { "type": "array", "items": { "type": "string" }, "description": "Named output ports this gear emits on." }
       }
     },
-    "bento": { "type": "object", "description": "Embedded Bento/Benthos config (input/pipeline/output), validated by Bento." },
+    "bento": { "type": "object", "description": "Embedded Bento config (input/pipeline/output), validated by Bento." },
     "log_level": { "type": "string", "description": "override the log level for this gear only (e.g. TRACE, DEBUG, INFO, WARN, ERROR)." }
   }
 }`,

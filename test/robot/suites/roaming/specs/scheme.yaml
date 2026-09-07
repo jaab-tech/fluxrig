@@ -3,84 +3,150 @@
 #
 # The dialect spoken towards the card scheme. It carries no private field: the
 # enrichment outcome is for the issuer's authorizer and must not travel back out.
-meta:
-  name: "roaming_scheme"
-  version: "1.0.0"
-fields:
-  0:
-    label: "MTI"
-    type: "numeric"
-    length: 4
-    enc: "ascii"
-    pad: "none"
-  1:
-    label: "Bitmap"
-    type: "binary"
-    length: 8
-    enc: "binary"
-  2:
-    label: "PAN"
-    type: "llvar_n"
-    length: 19
-    alias: "card.pan"
-    log_mask: true
-    enc: "ascii"
-  3:
-    label: "Processing Code"
-    type: "numeric"
-    length: 6
-    enc: "ascii"
-  4:
-    label: "Amount"
-    type: "numeric"
-    length: 12
-    enc: "ascii"
-  7:
-    label: "Transmission Date & Time"
-    type: "numeric"
-    length: 10
-    enc: "ascii"
-  11:
-    label: "STAN"
-    type: "numeric"
-    length: 6
-    alias: "stan"
-    enc: "ascii"
-  18:
-    label: "Merchant Category Code"
-    type: "numeric"
-    length: 4
-    enc: "ascii"
-  22:
-    label: "POS Entry Mode"
-    type: "numeric"
-    length: 3
-    enc: "ascii"
-  39:
-    label: "Response Code"
-    type: "alpha"
-    length: 2
-    enc: "ascii"
-  41:
-    label: "Card Acceptor Terminal ID"
-    type: "alpha"
-    length: 8
-    enc: "ascii"
-  42:
-    label: "Card Acceptor ID"
-    type: "alpha"
-    length: 15
-    enc: "ascii"
-  43:
-    # The last two characters are the acceptor's country as ISO 3166 alpha-2.
-    # This is the field the enrichment compares against, rather than DE 19,
-    # because every dialect carries it.
-    label: "Card Acceptor Name/Location"
-    type: "alpha"
-    length: 40
-    enc: "ascii"
-  49:
-    label: "Currency Code"
-    type: "numeric"
-    length: 3
-    enc: "ascii"
+spec:
+  id: roaming-scheme
+  name: roaming_scheme
+  version: 1.0.0
+  wire:
+    format: moov
+    fields:
+      0:
+        type: String
+        length: 4
+        enc: ASCII
+        prefix: ASCII.Fixed
+        description: MTI
+      1:
+        type: Bitmap
+        length: 8
+        enc: Binary
+        prefix: Binary.Fixed
+        description: Bitmap
+      2:
+        type: String
+        length: 19
+        enc: ASCII
+        prefix: ASCII.LL
+        padding:
+          pad: "0"
+          type: Left
+        description: PAN
+      3:
+        type: String
+        length: 6
+        enc: ASCII
+        prefix: ASCII.Fixed
+        padding:
+          pad: "0"
+          type: Left
+        description: Processing Code
+      4:
+        type: String
+        length: 12
+        enc: ASCII
+        prefix: ASCII.Fixed
+        padding:
+          pad: "0"
+          type: Left
+        description: Amount
+      7:
+        type: String
+        length: 10
+        enc: ASCII
+        prefix: ASCII.Fixed
+        padding:
+          pad: "0"
+          type: Left
+        description: Transmission Date & Time
+      11:
+        type: String
+        length: 6
+        enc: ASCII
+        prefix: ASCII.Fixed
+        padding:
+          pad: "0"
+          type: Left
+        description: STAN
+      18:
+        type: String
+        length: 4
+        enc: ASCII
+        prefix: ASCII.Fixed
+        padding:
+          pad: "0"
+          type: Left
+        description: Merchant Category Code
+      22:
+        type: String
+        length: 3
+        enc: ASCII
+        prefix: ASCII.Fixed
+        padding:
+          pad: "0"
+          type: Left
+        description: POS Entry Mode
+      39:
+        type: String
+        length: 2
+        enc: ASCII
+        prefix: ASCII.Fixed
+        description: Response Code
+      41:
+        type: String
+        length: 8
+        enc: ASCII
+        prefix: ASCII.Fixed
+        description: Card Acceptor Terminal ID
+      42:
+        type: String
+        length: 15
+        enc: ASCII
+        prefix: ASCII.Fixed
+        description: Card Acceptor ID
+      43:
+        type: String
+        length: 40
+        enc: ASCII
+        prefix: ASCII.Fixed
+        description: Card Acceptor Name/Location
+      49:
+        type: String
+        length: 3
+        enc: ASCII
+        prefix: ASCII.Fixed
+        padding:
+          pad: "0"
+          type: Left
+        description: Currency Code
+  fields:
+    0:
+      name: MTI
+    1:
+      name: Bitmap
+    2:
+      name: PAN
+      alias: card.pan
+      log_mask: true
+    3:
+      name: Processing Code
+    4:
+      name: Amount
+    7:
+      name: Transmission Date & Time
+    11:
+      name: STAN
+      alias: stan
+    18:
+      name: Merchant Category Code
+    22:
+      name: POS Entry Mode
+    39:
+      name: Response Code
+    41:
+      name: Card Acceptor Terminal ID
+    42:
+      name: Card Acceptor ID
+    43:
+      name: Card Acceptor Name/Location
+    49:
+      name: Currency Code

@@ -1,127 +1,311 @@
-meta:
-  name: "payment_switch_auth"
-  version: "1.0.0"
 spec:
-fields:
-  0:
-    label: "MTI"
-    type: "numeric"
-    length: 4
-    enc: "ascii"
-    pad: "none"
-  1:
-    label: "Bitmap"
-    type: "binary"
-    length: 8
-    enc: "binary"
-  2:
-    label: "PAN"
-    type: "llvar_n"
-    length: 19
-    alias: "card.pan"
-    log_mask: true
-    enc: "ascii"
-  3:
-    label: "Processing Code"
-    type: "numeric"
-    length: 6
-    enc: "ascii"
-  4:
-    label: "Amount"
-    type: "numeric"
-    length: 12
-    enc: "ascii"
-  7:
-    label: "Transmission Date & Time"
-    type: "numeric"
-    length: 10
-    enc: "ascii"
-  11:
-    label: "STAN"
-    type: "numeric"
-    length: 6
-    alias: "stan"
-    enc: "ascii"
-  12:
-    label: "Time, Local Transaction"
-    type: "numeric"
-    length: 6
-    enc: "ascii"
-  13:
-    label: "Date, Local Transaction"
-    type: "numeric"
-    length: 4
-    enc: "ascii"
-  14:
-    label: "Date, Expiration"
-    type: "numeric"
-    length: 4
-    enc: "ascii"
-  22:
-    label: "POS Entry Mode"
-    type: "numeric"
-    length: 3
-    enc: "ascii"
-  23:
-    label: "Card Sequence Number"
-    type: "numeric"
-    length: 3
-    enc: "ascii"
-  25:
-    label: "POS Condition Code"
-    type: "numeric"
-    length: 2
-    enc: "ascii"
-  26:
-    label: "POS Capture Code"
-    type: "numeric"
-    length: 2
-    enc: "ascii"
-  35:
-    label: "Track 2 Data"
-    type: "llvar"
-    length: 37
-    enc: "ascii"
-  37:
-    label: "Retrieval Reference Number"
-    type: "alpha"
-    length: 12
-    enc: "ascii"
-  38:
-    label: "Authorization ID"
-    type: "alpha"
-    length: 6
-    alias: "auth_id"
-    enc: "ascii"
-  39:
-    label: "Response Code"
-    type: "alpha"
-    length: 2
-    alias: "response_code"
-    enc: "ascii"
-  41:
-    label: "Terminal ID"
-    type: "alpha"
-    length: 8
-    alias: "terminal_id"
-    enc: "ascii"
-  42:
-    label: "Card Acceptor ID"
-    type: "alpha"
-    length: 15
-    enc: "ascii"
-  43:
-    label: "Card Acceptor Name/Location"
-    type: "alpha"
-    length: 40
-    enc: "ascii"
-  49:
-    label: "Currency Code"
-    type: "numeric"
-    length: 3
-    enc: "ascii"
-  70:
-    label: "Network Management Information Code"
-    type: "numeric"
-    length: 3
-    enc: "ascii"
+  id: payment-switch-auth
+  name: payment_switch_auth
+  version: 1.0.0
+  wire:
+    format: moov
+    fields:
+      0:
+        type: String
+        length: 4
+        enc: ASCII
+        prefix: ASCII.Fixed
+        description: MTI
+      1:
+        type: Bitmap
+        length: 8
+        enc: Binary
+        prefix: Binary.Fixed
+        description: Bitmap
+      2:
+        type: String
+        length: 19
+        enc: ASCII
+        prefix: ASCII.LL
+        padding:
+          pad: "0"
+          type: Left
+        description: PAN
+      3:
+        type: String
+        length: 6
+        enc: ASCII
+        prefix: ASCII.Fixed
+        padding:
+          pad: "0"
+          type: Left
+        description: Processing Code
+      4:
+        type: String
+        length: 12
+        enc: ASCII
+        prefix: ASCII.Fixed
+        padding:
+          pad: "0"
+          type: Left
+        description: Amount
+      7:
+        type: String
+        length: 10
+        enc: ASCII
+        prefix: ASCII.Fixed
+        padding:
+          pad: "0"
+          type: Left
+        description: Transmission Date & Time
+      11:
+        type: String
+        length: 6
+        enc: ASCII
+        prefix: ASCII.Fixed
+        padding:
+          pad: "0"
+          type: Left
+        description: STAN
+      12:
+        type: String
+        length: 6
+        enc: ASCII
+        prefix: ASCII.Fixed
+        padding:
+          pad: "0"
+          type: Left
+        description: Time, Local Transaction
+      13:
+        type: String
+        length: 4
+        enc: ASCII
+        prefix: ASCII.Fixed
+        padding:
+          pad: "0"
+          type: Left
+        description: Date, Local Transaction
+      14:
+        type: String
+        length: 4
+        enc: ASCII
+        prefix: ASCII.Fixed
+        padding:
+          pad: "0"
+          type: Left
+        description: Date, Expiration
+      22:
+        type: String
+        length: 3
+        enc: ASCII
+        prefix: ASCII.Fixed
+        padding:
+          pad: "0"
+          type: Left
+        description: POS Entry Mode
+      23:
+        type: String
+        length: 3
+        enc: ASCII
+        prefix: ASCII.Fixed
+        padding:
+          pad: "0"
+          type: Left
+        description: Card Sequence Number
+      25:
+        type: String
+        length: 2
+        enc: ASCII
+        prefix: ASCII.Fixed
+        padding:
+          pad: "0"
+          type: Left
+        description: POS Condition Code
+      26:
+        type: String
+        length: 2
+        enc: ASCII
+        prefix: ASCII.Fixed
+        padding:
+          pad: "0"
+          type: Left
+        description: POS Capture Code
+      35:
+        type: String
+        length: 37
+        enc: ASCII
+        prefix: ASCII.LL
+        description: Track 2 Data
+      37:
+        type: String
+        length: 12
+        enc: ASCII
+        prefix: ASCII.Fixed
+        description: Retrieval Reference Number
+      38:
+        type: String
+        length: 6
+        enc: ASCII
+        prefix: ASCII.Fixed
+        description: Authorization ID
+      39:
+        type: String
+        length: 2
+        enc: ASCII
+        prefix: ASCII.Fixed
+        description: Response Code
+      41:
+        type: String
+        length: 8
+        enc: ASCII
+        prefix: ASCII.Fixed
+        description: Terminal ID
+      42:
+        type: String
+        length: 15
+        enc: ASCII
+        prefix: ASCII.Fixed
+        description: Card Acceptor ID
+      43:
+        type: String
+        length: 40
+        enc: ASCII
+        prefix: ASCII.Fixed
+        description: Card Acceptor Name/Location
+      49:
+        type: String
+        length: 3
+        enc: ASCII
+        prefix: ASCII.Fixed
+        padding:
+          pad: "0"
+          type: Left
+        description: Currency Code
+      70:
+        type: String
+        length: 3
+        enc: ASCII
+        prefix: ASCII.Fixed
+        padding:
+          pad: "0"
+          type: Left
+        description: Network Management Information Code
+  messages:
+    catalog:
+      "0100":
+        name: Authorization Request
+        flow: request
+        pairs_with: "0110"
+      "0110":
+        name: Authorization Response
+        flow: response
+        pairs_with: "0100"
+      "0200":
+        name: Financial Request
+        flow: request
+        pairs_with: "0210"
+      "0210":
+        name: Financial Response
+        flow: response
+        pairs_with: "0200"
+  enums:
+    response_code:
+      closed: false
+      values:
+        "00":
+          name: Approved
+        "05":
+          name: Do not honour
+        "91":
+          name: Issuer or switch inoperative
+  fields:
+    0:
+      name: MTI
+      values_ref: "@messages"
+    1:
+      name: Bitmap
+    2:
+      name: PAN
+      messages:
+        - mti: ["0100", "0200"]
+          usage: mandatory
+      alias: card.pan
+      log_mask: true
+    3:
+      name: Processing Code
+      messages:
+        - mti: ["0100", "0200"]
+          usage: mandatory
+    4:
+      name: Amount
+      messages:
+        - mti: ["0100", "0200"]
+          usage: mandatory
+    7:
+      name: Transmission Date & Time
+      messages:
+        - mti: ["0100", "0200"]
+          usage: mandatory
+        - mti: ["0110", "0210"]
+          usage: mandatory
+          response_value: "echo"
+          note: "Echoed with the STAN; the pair is what correlates a reply to its request."
+    11:
+      name: STAN
+      messages:
+        - mti: ["0100", "0200"]
+          usage: mandatory
+        - mti: ["0110", "0210"]
+          usage: mandatory
+          response_value: "echo"
+          note: "Echoed unchanged. The suite drives thousands of concurrent authorizations and this is what tells their replies apart."
+      alias: stan
+    12:
+      name: Time, Local Transaction
+    13:
+      name: Date, Local Transaction
+    14:
+      name: Date, Expiration
+    22:
+      name: POS Entry Mode
+    23:
+      name: Card Sequence Number
+    25:
+      name: POS Condition Code
+    26:
+      name: POS Capture Code
+    35:
+      name: Track 2 Data
+    37:
+      name: Retrieval Reference Number
+    38:
+      name: Authorization ID
+      alias: auth_id
+    39:
+      name: Response Code
+      messages:
+        - mti: ["0110", "0210"]
+          usage: mandatory
+          response_value: "new"
+          note: "The disposition the scheme host stamps: 00, 05 or 91 in this suite."
+        - mti: ["0100", "0200"]
+          usage: forbidden
+          note: "A request asks; it carries no answer."
+      alias: response_code
+      values_ref: "response_code"
+    41:
+      name: Terminal ID
+      messages:
+        - mti: ["0100", "0200"]
+          usage: mandatory
+      alias: terminal_id
+    42:
+      name: Card Acceptor ID
+    43:
+      name: Card Acceptor Name/Location
+      messages:
+        - mti: ["0100", "0200"]
+          usage: optional
+          note: "Set only by the tests that exercise a long field."
+    49:
+      name: Currency Code
+      messages:
+        - mti: ["0100", "0200"]
+          usage: mandatory
+    70:
+      name: Network Management Information Code

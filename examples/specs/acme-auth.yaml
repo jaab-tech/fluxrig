@@ -1,0 +1,90 @@
+# Copyright (c) 2026 JAAB Tech SAS, Uruguay
+# SPDX-License-Identifier: Apache-2.0
+#
+# A small, complete spec. It exists so the documentation can show a spec's shape
+# without inventing one: every snippet in the SDL reference is an excerpt of a
+# file that loads, and this is that file for the introductory examples.
+#
+# Render it:   fluxrig spec doc examples/specs/acme-auth.yaml
+# Load it:     fluxrig spec import examples/specs/acme-auth.yaml
+#
+# The full protocol, with all sixty-odd elements and their rules, is
+# iso8583-v87-ascii.yaml beside this one.
+spec:
+  id: "acme-auth"
+  name: "ACME authorization dialect"
+  version: "1.0.0"
+  protocol: iso8583
+
+  # Wire layer. `source` names where the byte layout comes from and `fields` is
+  # merged over it, so a dialect states only its differences.
+  wire:
+    source: "moov:spec87ascii"
+    fields:
+      # The base leaves padding to the caller on most numerics. A STAN of "42"
+      # in a six-digit fixed field has to become "000042" to pack at all.
+      11: { padding: { type: Left, pad: "0" } }
+
+  messages:
+    catalog:
+      "0100":
+        name: "Authorization Request"
+        flow: request
+        pairs_with: "0110"
+        class: business
+      "0110":
+        name: "Authorization Response"
+        flow: response
+        pairs_with: "0100"
+        class: business
+
+  enums:
+    currency_iso4217:
+      # Not the whole of ISO 4217. Enough of it that an amount has a currency to
+      # be denominated in, which binding `format.currency_field` requires.
+      values:
+        "858": { name: "Uruguayan peso" }
+        "840": { name: "US dollar" }
+        "978": { name: "Euro" }
+    response_code:
+      closed: true
+      values:
+        "00": { name: "Approved", category: approved }
+        "05": { name: "Do not honour", category: declined }
+        "91": { name: "Issuer unavailable", category: unavailable }
+
+  # Semantic layer. Wire attributes are not accepted here: a spec that sets
+  # `length` or `enc` under `fields` fails to load, naming the key and where it
+  # belongs. Neither is `description`, which is the wire layer's word for a
+  # label; say `name` to override one, and `meaning` for the prose.
+  fields:
+    2:
+      # No `name`: the label comes from the wire layer, which already carries
+      # "Primary Account Number" for this element.
+      alias: "card.pan"
+      sensitivity: pan          # masked in logs; never persisted in the clear
+      messages:
+        - { mti: "0100", usage: mandatory }
+    4:
+      name: "Amount, Transaction"   # overrides the base's "Transaction Amount"
+      alias: "amount"
+      format: { kind: amount, currency_field: 49 }
+      messages:
+        - { mti: ["0100", "0110"], usage: mandatory }
+    11:
+      alias: "stan"
+      meaning: "Assigned by the acquirer and echoed unchanged, which is what pairs a response with its request."
+      messages:
+        - { mti: "0100", usage: mandatory }
+        - { mti: "0110", usage: mandatory, response_value: echo }
+    39:
+      alias: "resp_code"
+      values_ref: "response_code"
+      messages:
+        - { mti: "0110", usage: mandatory, response_value: new }
+        - { mti: "0100", usage: forbidden, note: "A request carries no disposition." }
+    49:
+      alias: "currency"
+      values_ref: "currency_iso4217"
+      messages:
+        - { mti: ["0100", "0110"], usage: mandatory }

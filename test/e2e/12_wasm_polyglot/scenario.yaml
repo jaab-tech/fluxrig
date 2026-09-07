@@ -6,8 +6,10 @@ gears:
   - name: my-wasm-gear
     type: wasm
     config:
-      # Use absolute file path for testing since Rack runs in a /tmp workdir
-      source: "file:///Users/andresa/git/fluxrig/test/e2e/12_wasm_polyglot/build/polyglot.wasm"
+      # A placeholder, not a path. The suite replaces it with the catalog
+      # URN once the module is imported and hashed, and a literal path here
+      # made one developer's home directory load-bearing in a test.
+      source: "file://WASM_MODULE_PATH"
       entrypoint: "process"
       memory_limit_pages: 16
 

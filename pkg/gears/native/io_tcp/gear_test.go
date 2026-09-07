@@ -175,3 +175,57 @@ func TestGear_E2E_RoundTrip(t *testing.T) {
 		t.Fatal("Timeout waiting for pong")
 	}
 }
+
+// A drain that reports failure on every orderly shutdown is worse than no
+// drain: the runtime logs "Drain Gear Failed" and collects an error for what
+// was a clean stop. This asserts the three properties that were wrong.
+func TestServerDrain(t *testing.T) {
+	t.Run("returns nil when nothing is connected", func(t *testing.T) {
+		s := NewServer(&Config{Bind: "127.0.0.1:0"}, slog.Default(), func(*fluxmsg.FluxMsg) {}, nil)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := s.Start(ctx); err != nil {
+			t.Fatalf("start: %v", err)
+		}
+		defer func() { _ = s.Stop() }()
+
+		if err := s.Drain(ctx); err != nil {
+			t.Fatalf("drain of an idle server reported failure: %v", err)
+		}
+	})
+
+	t.Run("stops accepting once drained", func(t *testing.T) {
+		s := NewServer(&Config{Bind: "127.0.0.1:0"}, slog.Default(), func(*fluxmsg.FluxMsg) {}, nil)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := s.Start(ctx); err != nil {
+			t.Fatalf("start: %v", err)
+		}
+		addr := s.listener.Addr().String()
+		defer func() { _ = s.Stop() }()
+
+		if err := s.Drain(ctx); err != nil {
+			t.Fatalf("drain: %v", err)
+		}
+		if c, err := net.DialTimeout("tcp", addr, 300*time.Millisecond); err == nil {
+			_ = c.Close()
+			t.Fatal("the listener still accepted a connection after Drain")
+		}
+	})
+
+	t.Run("Stop is idempotent", func(t *testing.T) {
+		s := NewServer(&Config{Bind: "127.0.0.1:0"}, slog.Default(), func(*fluxmsg.FluxMsg) {}, nil)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := s.Start(ctx); err != nil {
+			t.Fatalf("start: %v", err)
+		}
+		if err := s.Stop(); err != nil {
+			t.Fatalf("first stop: %v", err)
+		}
+		// Before sync.Once this closed an already-closed channel and panicked.
+		if err := s.Stop(); err != nil {
+			t.Fatalf("second stop: %v", err)
+		}
+	})
+}

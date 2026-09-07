@@ -1,21 +1,36 @@
-meta:
-  name: "minimal"
-  version: "1.0.0"
 spec:
-fields:
-  0:
-    label: "MTI"
-    type: "numeric"
-    length: 4
-    enc: "bcd"
-  1:
-    label: "Bitmap"
-    type: "binary"
-    length: 8
-    enc: "binary"
-  39:
-    label: "Response Code"
-    type: "alpha"
-    length: 2
-    alias: "response_code"
-    enc: "ascii"
+  id: minimal
+  name: minimal
+  version: 1.0.0
+  wire:
+    format: moov
+    fields:
+      0:
+        type: String
+        length: 4
+        enc: BCD
+        prefix: BCD.Fixed
+        padding:
+          pad: "0"
+          type: Left
+        description: MTI
+      1:
+        type: Bitmap
+        length: 8
+        enc: Binary
+        prefix: Binary.Fixed
+        description: Bitmap
+      39:
+        type: String
+        length: 2
+        enc: ASCII
+        prefix: ASCII.Fixed
+        description: Response Code
+  fields:
+    0:
+      name: MTI
+    1:
+      name: Bitmap
+    39:
+      name: Response Code
+      alias: response_code

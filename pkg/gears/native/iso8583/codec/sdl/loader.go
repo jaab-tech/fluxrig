@@ -9,263 +9,74 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"regexp"
+	"strings"
 
 	"github.com/moov-io/iso8583"
-	"github.com/moov-io/iso8583/encoding"
-	"github.com/moov-io/iso8583/field"
-	"github.com/moov-io/iso8583/padding"
-	"github.com/moov-io/iso8583/prefix"
-	"gopkg.in/yaml.v3"
 )
 
-// SDLSpec represents our YAML Spec Definition Language.
-type SDLSpec struct {
-	Meta struct {
-		Name     string `yaml:"name"`
-		Version  string `yaml:"version"`
-		Protocol string `yaml:"protocol"` // e.g., "iso8583"
-	} `yaml:"meta"`
-	Spec struct {
-	} `yaml:"spec"`
-	Fields map[int]SDLField `yaml:"fields"`
-}
-
-// SDLField defines the layout and semantics of a single ISO8583 field.
-type SDLField struct {
-	Label   string              `yaml:"label"`
-	Type    string              `yaml:"type"`
-	Length  int                 `yaml:"length"`
-	Alias   string              `yaml:"alias"`
-	Enc     string              `yaml:"enc"`
-	LenEnc  string              `yaml:"len_enc"`
-	Pad     string              `yaml:"pad"`
-	Storage string              `yaml:"storage"`
-	Mask    bool                `yaml:"log_mask"`
-	Sub     map[string]SDLField `yaml:"subfields"` // Recursive definition
-
-	// Enhanced Structure Support
-	Structure string `yaml:"structure"`        // "fixed", "tlv", "dataset"
-	TLVTagEnc string `yaml:"tlv_tag_encoding"` // "hex", "int", "ascii"
-	TLVLenEnc string `yaml:"tlv_len_encoding"` // "int", "bcd", "binary"
-}
-
-// FieldMeta stores pre-computed metadata for the gear to use during Process().
 type FieldMeta struct {
-	SpecHash   string
-	Protocol   string
-	Aliases    map[int]string
-	SubAliases map[int]map[string]string // Field ID -> SubKey -> Alias
-	IDByAlias  map[string]int
-	SecureIDs  map[int]bool
+	// SpecHash proves which file; SpecID and SpecVersion state which contract.
+	// Both are wanted and neither substitutes for the other: the hash is
+	// unforgeable but changes when a comment does, and it says nothing to a
+	// human reading a trace.
+	SpecHash    string
+	SpecID      string
+	SpecVersion string
+	Protocol    string
+	Aliases     map[int]string
+	SubAliases  map[int]map[string]string // Field ID -> SubKey -> Alias
+	IDByAlias   map[string]int
+	SecureIDs   map[int]bool
 }
 
-// LoadSpec reads a YAML SDL file and returns a moov-io MessageSpec
-// along with the extracted metadata.
+// LoadSpec reads a spec file and returns the Moov MessageSpec it describes,
+// along with the semantic metadata the pipeline addresses fields by.
+//
+// One vocabulary reaches here. The wire half is Moov's own, consumed rather than
+// restated; the semantic half is fluxrig's. Where the wire layer comes from — a
+// named Moov base, a wire document beside the spec, or the spec's own
+// `wire.fields` — is resolved by WireDocument, and the three compose.
 func LoadSpec(path string) (*iso8583.MessageSpec, *FieldMeta, error) {
 	data, err := os.ReadFile(filepath.Clean(path))
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to read spec file: %w", err)
 	}
+	return LoadSpecContent(data, filepath.Dir(path))
+}
 
-	// 1. Compute Hash (12 hex chars)
+// LoadSpecContent compiles a spec that is already in hand — resolved from the
+// content-addressed store rather than read from a path.
+//
+// baseDir is what a file wire source resolves against, and a spec that arrived
+// as content has no directory: pass "" and a relative wire source is refused
+// with that reason, rather than resolving against whatever the process happens
+// to have as its working directory.
+func LoadSpecContent(data []byte, baseDir string) (*iso8583.MessageSpec, *FieldMeta, error) {
 	hash := sha256.Sum256(data)
-	specHash := hex.EncodeToString(hash[:])[:12]
-
-	// 2. Parse YAML
-	var sdl SDLSpec
-	if err := yaml.Unmarshal(data, &sdl); err != nil {
-		return nil, nil, fmt.Errorf("failed to parse SDL: %w", err)
-	}
-
-	// 3. Build Moov MessageSpec
-	moovSpec := &iso8583.MessageSpec{
-		Name:   sdl.Meta.Name,
-		Fields: make(map[int]field.Field),
-	}
-
-	// Default protocol if missing (backward compatibility)
-	if sdl.Meta.Protocol == "" {
-		sdl.Meta.Protocol = "iso8583"
-	}
-
-	// meta setup
-	meta := &FieldMeta{
-		SpecHash:   specHash,
-		Protocol:   sdl.Meta.Protocol,
-		Aliases:    make(map[int]string),
-		SubAliases: make(map[int]map[string]string),
-		IDByAlias:  make(map[string]int),
-		SecureIDs:  make(map[int]bool),
-	}
-
-	// Iterate field IDs in order
-	ids := make([]int, 0, len(sdl.Fields))
-	for id := range sdl.Fields {
-		ids = append(ids, id)
-	}
-	sort.Ints(ids)
-
-	for _, id := range ids {
-		f := sdl.Fields[id]
-
-		// Map moov-io field
-		moovField, err := buildMoovField(id, f)
-		if err != nil {
-			return nil, nil, fmt.Errorf("field %d: %w", id, err)
-		}
-		if moovField == nil {
-			return nil, nil, fmt.Errorf("unsupported field type '%s' for field %d", f.Type, id)
-		}
-		moovSpec.Fields[id] = moovField
-
-		// Populate Meta
-		if f.Alias != "" {
-			meta.Aliases[id] = f.Alias
-			meta.IDByAlias[f.Alias] = id
-		}
-		if f.Mask {
-			meta.SecureIDs[id] = true
-		}
-
-		// Helper to collect subfield aliases
-		if f.Structure != "" && len(f.Sub) > 0 {
-			subMap := make(map[string]string)
-			for k, sub := range f.Sub {
-				if sub.Alias != "" {
-					subMap[k] = sub.Alias
-				}
-			}
-			if len(subMap) > 0 {
-				meta.SubAliases[id] = subMap
-			}
-		}
-	}
-
-	// Ensure field 1 (Bitmap) exists if not defined, using moov-io's default if needed
-	// But our SDL typically defines it.
-	if _, ok := moovSpec.Fields[1]; !ok {
-		// Use standard Bitmap for moov-io
-		moovSpec.Fields[1] = field.NewBitmap(&field.Spec{
-			Description: "Bitmap",
-			Enc:         encoding.Binary, // Default for many
-			Pref:        prefix.Binary.Fixed,
-		})
-	}
-
-	return moovSpec, meta, nil
+	return load(data, baseDir, hex.EncodeToString(hash[:])[:12])
 }
 
-func buildMoovField(id int, f SDLField) (field.Field, error) {
-	// 1. Resolve Encoders
-	enc, err := resolveEncoding(f.Enc)
-	if err != nil {
-		return nil, err
-	}
-	lenEnc, _ := resolveEncoding(f.LenEnc) // lenEnc can fallback to enc
-	if lenEnc == nil {
-		lenEnc = enc
-	}
+// specVersionRe is semver without the build metadata and with an optional
+// leading v, matching what the CAS orders tags by and what the schema declares.
+// A spec is not a Go module, so the pre-release tail is allowed but not parsed:
+// `2.2.0-rc1` is a version a team will genuinely deploy.
+var specVersionRe = regexp.MustCompile(`^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z.-]+)?$`)
 
-	// 2. Create Spec
-	spec := &field.Spec{
-		Length:      f.Length,
-		Description: f.Label,
-		Enc:         enc,
-		Pref:        resolvePrefix(f.Type, lenEnc),
-		Pad:         resolvePadding(f.Type, f.Pad),
+// validateSpecVersion refuses a spec that cannot be referred to.
+//
+// The identity is checked alongside it because a version alone does not name a
+// contract: a Rack running two codecs sees two specs both calling themselves
+// 1.0.0, and a trace saying only "1.0.0" cannot tell them apart.
+func validateSpecVersion(id, version string) error {
+	if strings.TrimSpace(id) == "" {
+		return fmt.Errorf("spec.id is required: a version is meaningless without the identity it versions")
 	}
-
-	// 3. Create moov-io field by type
-	// A structured field becomes a native moov Composite; see buildComposite.
-	if f.Structure != "" {
-		return buildComposite(f, spec)
+	if strings.TrimSpace(version) == "" {
+		return fmt.Errorf("spec %q: spec.version is required", id)
 	}
-
-	var res field.Field
-	switch f.Type {
-	case "numeric", "n", "llvar_n", "lllvar_n":
-		// We use NewString instead of NewNumeric to preserve leading zeros
-		// which is critical for byte transparency in E2E round-trips.
-		res = field.NewString(spec)
-	case "alpha", "ans", "an", "llvar", "lllvar":
-		res = field.NewString(spec)
-	case "binary", "b":
-		if id == 1 {
-			res = field.NewBitmap(spec)
-		} else {
-			res = field.NewBinary(spec)
-		}
-	default:
-		return nil, nil
-	}
-	return res, nil
-}
-
-func resolveEncoding(name string) (encoding.Encoder, error) {
-	if name == "" {
-		return nil, fmt.Errorf("missing explicit 'enc'")
-	}
-	switch name {
-	case "ascii":
-		return encoding.ASCII, nil
-	case "ebcdic":
-		return encoding.EBCDIC, nil
-	case "bcd":
-		return encoding.BCD, nil
-	case "binary":
-		return encoding.Binary, nil
-	default:
-		return encoding.ASCII, nil
-	}
-}
-
-func resolvePrefix(typ string, lenEnc encoding.Encoder) prefix.Prefixer {
-	// If it's a fixed length field
-	switch typ {
-	case "llvar", "llvar_n":
-		switch lenEnc {
-		case encoding.BCD:
-			return prefix.BCD.LL
-		case encoding.EBCDIC:
-			return prefix.EBCDIC.LL
-		case encoding.Binary:
-			return prefix.Binary.LL
-		default:
-			return prefix.ASCII.LL
-		}
-	case "lllvar", "lllvar_n":
-		switch lenEnc {
-		case encoding.BCD:
-			return prefix.BCD.LLL
-		case encoding.Binary:
-			return prefix.Binary.Fixed // 2 bytes?
-		default:
-			return prefix.ASCII.LLL
-		}
-	}
-
-	// Fixed length
-	switch lenEnc {
-	case encoding.BCD:
-		return prefix.BCD.Fixed
-	case encoding.Binary:
-		return prefix.Binary.Fixed
-	case encoding.EBCDIC:
-		return prefix.EBCDIC.Fixed
-	default:
-		return prefix.ASCII.Fixed
-	}
-}
-
-func resolvePadding(typ string, pad string) padding.Padder {
-	if pad == "none" {
-		return nil
-	}
-	// Default: ISO-8583 numeric fields are often left-padded with '0'
-	switch typ {
-	case "numeric", "n", "llvar_n", "lllvar_n":
-		return padding.Left('0')
+	if !specVersionRe.MatchString(version) {
+		return fmt.Errorf("spec %q: spec.version %q is not a semantic version (expected MAJOR.MINOR.PATCH)", id, version)
 	}
 	return nil
 }

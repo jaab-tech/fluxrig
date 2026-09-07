@@ -38,6 +38,9 @@ type mockManager struct {
 func (m *mockManager) Import(ctx context.Context, filePath, name, tag string) (string, string, string, error) {
 	return "", "", "", nil
 }
+func (m *mockManager) ImportContent(ctx context.Context, content []byte, name, tag string) (string, string, string, error) {
+	return "", "", "", nil
+}
 func (m *mockManager) Load(ctx context.Context, urn string) ([]byte, error)     { return nil, nil }
 func (m *mockManager) Export(ctx context.Context, urn, outputPath string) error { return nil }
 func (m *mockManager) List(ctx context.Context) ([]manager.ArtifactInfo, error) { return nil, nil }

@@ -16,6 +16,7 @@ import (
 type ModeImpl interface {
 	Start(ctx context.Context) error
 	Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.FluxMsg, error)
+	Drain(ctx context.Context) error
 	Stop() error
 }
 
@@ -98,16 +99,11 @@ func (g *Gear) Stop() error {
 	return nil
 }
 
-// Drain signals the gear to stop accepting new input.
+// Drain signals the gear to stop accepting new input and to let what is in
+// flight finish. It returns nil when there is nothing left to wait for.
 func (g *Gear) Drain(ctx context.Context) error {
-	// Simple implementation: Just stop accepting (if server)
-	// For io_tcp, we can reuse Stop() or just close listener.
-	// Reusing Stop() is imperfect as it kills connections, but for this reference gear it's acceptable fallback.
-	// Ideally we would implement proper Drain in io_tcp server too.
-	// For now, satisfy interface:
-	if g.impl != nil { // Changed from g.server to g.impl
-		// Just wait for context
-		<-ctx.Done()
+	if g.impl == nil {
+		return nil
 	}
-	return ctx.Err()
+	return g.impl.Drain(ctx)
 }

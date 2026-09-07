@@ -1,0 +1,163 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fluxrig.org/schemas/spec.fluxrig.schema.json",
+  "title": "Protocol spec — fluxrig profile (core + x-fluxrig extensions)",
+  "description": "The semantic core plus fluxrig's vendor extensions. Extensions are behavioural (they drive engines) and live under x-fluxrig-* keys, so a document valid here is also valid against the core alone and remains portable to other tooling. See ADR 0049.",
+  "allOf": [
+    { "$ref": "https://fluxrig.org/schemas/spec.core.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "spec": {
+          "type": "object",
+          "properties": {
+            "x-fluxrig-simulation": { "$ref": "#/$defs/simulation" },
+            "x-fluxrig-observability": { "$ref": "#/$defs/observability" }
+          },
+          "patternProperties": {
+            "^x-": true
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "mti": { "type": "string", "pattern": "^[0-9]{4}$" },
+    "duration": { "type": "string", "pattern": "^[0-9]+(ms|s|m|h)$" },
+    "whenExpr": { "type": "string", "minLength": 1 },
+    "fieldValueMap": {
+      "description": "What a generator puts in each field. A value is a literal, a macro, or a choice drawn from a set — the last of which needs a shape a scalar cannot carry.",
+      "type": "object",
+      "propertyNames": { "pattern": "^[0-9]+$" },
+      "additionalProperties": { "$ref": "#/$defs/fieldValue" }
+    },
+
+    "fieldValue": {
+      "oneOf": [
+        {
+          "description": "A literal, or a macro. Macros are part of the spec contract and every one is deterministic under the run's seed, so a failing suite replays exactly: $PAN(prefix,len) (Luhn-valid), $STAN, $RRN, $SEQ(start) (monotonic within the run), $RAND(min,max), $UUID, $NOW (rendered in the target field's declared format), $ENUM (a valid value from the field's own value set) and $INVALID (deliberately outside it, for negative generation).",
+          "type": ["string", "integer"]
+        },
+        {
+          "description": "A choice. Weights are relative, not percentages: a generator normalises them, so adding a case does not mean rewriting the others.",
+          "type": "object",
+          "required": ["choose"],
+          "additionalProperties": false,
+          "properties": {
+            "choose": {
+              "oneOf": [
+                {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "object",
+                    "required": ["value"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "value": { "type": ["string", "integer"] },
+                      "weight": { "type": "integer", "minimum": 1 },
+                      "note": { "type": "string" }
+                    }
+                  }
+                },
+                {
+                  "description": "Draw from a value set the spec already declares, rather than restating its codes here — where they would drift from it.",
+                  "type": "object",
+                  "required": ["from"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "from": { "$ref": "#/$defs/valuesRefName" },
+                    "weights": {
+                      "description": "Relative weights for particular codes; anything unlisted is drawn evenly.",
+                      "type": "object",
+                      "additionalProperties": { "type": "integer", "minimum": 1 }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+
+    "valuesRefName": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+
+
+    "simulation": {
+      "description": "Traffic generation and scheme-responder behaviour. fluxrig extension.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mix": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["use", "weight"],
+            "additionalProperties": false,
+            "properties": {
+              "use": { "$ref": "#/$defs/mti" },
+              "weight": { "type": "integer", "minimum": 1 }
+            }
+          }
+        },
+        "defaults": { "$ref": "#/$defs/fieldValueMap" },
+        "responder": {
+          "type": "object",
+          "required": ["default"],
+          "additionalProperties": false,
+          "properties": {
+            "echo": {
+              "oneOf": [
+                { "enum": ["valid_in_response", "none"] },
+                { "type": "array", "items": { "type": ["string", "integer"] } }
+              ]
+            },
+            "delay": { "$ref": "#/$defs/duration" },
+            "default": { "$ref": "#/$defs/fieldValueMap" },
+            "rules": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["name", "when", "set"],
+                "additionalProperties": false,
+                "properties": {
+                  "name": { "type": "string" },
+                  "when": { "$ref": "#/$defs/whenExpr" },
+                  "set": { "$ref": "#/$defs/fieldValueMap" },
+                  "delay": { "$ref": "#/$defs/duration" }
+                }
+              }
+            }
+          }
+        }
+      },
+      "patternProperties": {
+        "^[0-9]{4}$": { "$ref": "#/$defs/fieldValueMap" }
+      }
+    },
+
+    "observability": {
+      "description": "Telemetry derivation: which fields may become metric labels, and which are measured. fluxrig extension.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "dimensions": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+        "histograms": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["field"],
+            "additionalProperties": false,
+            "properties": {
+              "field": { "type": "string" },
+              "by": { "type": "string" },
+              "unit": { "type": "string" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

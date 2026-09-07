@@ -29,9 +29,14 @@ type Server struct {
 	emit   func(*fluxmsg.FluxMsg)
 	idGen  sdk.IDGenerator
 
-	listener    net.Listener
-	conns       sync.Map // map[string]*Connection
-	done        chan struct{}
+	listener net.Listener
+	conns    sync.Map // map[string]*Connection
+	done     chan struct{}
+	// draining is closed before done: it stops the accept loop without
+	// closing the connections that are still finishing their work.
+	draining    chan struct{}
+	drainOnce   sync.Once
+	stopOnce    sync.Once
 	activeConns atomic.Int64
 
 	// Telemetry
@@ -65,6 +70,7 @@ func NewServer(cfg *Config, log *slog.Logger, emit func(*fluxmsg.FluxMsg), idGen
 		emit:        emit,
 		idGen:       idGen,
 		done:        make(chan struct{}),
+		draining:    make(chan struct{}),
 		meter:       meter,
 		msgsIn:      msgsIn,
 		msgsOut:     msgsOut,
@@ -111,6 +117,11 @@ func (s *Server) acceptLoop(ctx context.Context) {
 	for {
 		conn, err := s.listener.Accept()
 		if err != nil {
+			if !isActive(s.draining) || !isActive(s.done) {
+				// The listener was closed on purpose. Retrying would spin on a
+				// dead socket for as long as the process lives.
+				return
+			}
 			if isActive(s.done) {
 				s.log.Error("accept failed", "error", err)
 				// Backoff to prevent spin loop on persistent errors (e.g. EMFILE)
@@ -276,14 +287,49 @@ func (s *Server) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.Fl
 	return nil, nil
 }
 
-func (s *Server) Stop() error {
-	close(s.done)
-	if s.listener != nil {
-		_ = s.listener.Close()
+// drainPollInterval is how often Drain re-checks whether the last connection
+// has finished. The deadline itself comes from the caller's context.
+const drainPollInterval = 25 * time.Millisecond
+
+// Drain stops accepting new connections and waits for the ones in flight to
+// finish. It does not close them: that is Stop's job, and doing it here would
+// make a graceful shutdown indistinguishable from a hard one.
+func (s *Server) Drain(ctx context.Context) error {
+	s.drainOnce.Do(func() {
+		close(s.draining)
+		if s.listener != nil {
+			_ = s.listener.Close()
+		}
+	})
+
+	ticker := time.NewTicker(drainPollInterval)
+	defer ticker.Stop()
+	for {
+		if s.activeConns.Load() == 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("io_tcp: %d connection(s) still active at the drain deadline: %w",
+				s.activeConns.Load(), ctx.Err())
+		case <-ticker.C:
+		}
 	}
-	s.conns.Range(func(key, value any) bool {
-		_ = value.(*Connection).conn.Close()
-		return true
+}
+
+// Stop releases the listener and every connection. It is safe to call more than
+// once, and on a server that never started.
+func (s *Server) Stop() error {
+	s.stopOnce.Do(func() {
+		s.drainOnce.Do(func() { close(s.draining) })
+		close(s.done)
+		if s.listener != nil {
+			_ = s.listener.Close()
+		}
+		s.conns.Range(func(key, value any) bool {
+			_ = value.(*Connection).conn.Close()
+			return true
+		})
 	})
 	return nil
 }

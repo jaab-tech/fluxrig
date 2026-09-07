@@ -114,6 +114,9 @@ func (m *MockManager) Import(ctx context.Context, filePath, name, tag string) (s
 func (m *MockManager) ImportScenario(ctx context.Context, filePath, name, tag string) (string, string, string, error) {
 	return "", "", "", nil
 }
+func (m *MockManager) ImportContent(ctx context.Context, content []byte, name, tag string) (string, string, string, error) {
+	return "", "", "", nil
+}
 
 func (m *MockManager) Load(ctx context.Context, u string) ([]byte, error) {
 	return nil, nil
@@ -122,6 +125,10 @@ func (m *MockManager) Export(ctx context.Context, u, outputPath string) error {
 	return nil
 }
 func (m *MockManager) List(ctx context.Context) ([]manager.ArtifactInfo, error) {
+	return nil, nil
+}
+
+func (m *MockManager) History(ctx context.Context, kind manager.Kind, name string) ([]manager.ArtifactInfo, error) {
 	return nil, nil
 }
 

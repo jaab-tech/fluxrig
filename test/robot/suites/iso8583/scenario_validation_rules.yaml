@@ -1,0 +1,134 @@
+# Copyright (c) 2026 JAAB Tech SAS, Uruguay
+# SPDX-License-Identifier: Apache-2.0
+#
+# What the spec's semantic rules do to real traffic.
+#
+# Three ports, three modes, one Rack. A scenario is applied whole, so testing
+# off/warn/enforce by redeploying would mean three deployments and three windows
+# where the suite is asserting against a Rack that is still changing. Three
+# gateways cost one deployment and let the three answers be compared in the same
+# run, against the same spec and the same messages.
+#
+# Each port loops back through a decode/encode pair, so a message that survives
+# its rules comes back and one that does not never returns.
+meta:
+  name: "iso8583_validation_rules"
+  version: "1.0.0"
+
+racks:
+  - name: "iso-node-01"
+    labels:
+      tier: "edge"
+
+gears:
+  # ── off: the rules are documentation ────────────────────────────────────────
+  - name: "gw-off"
+    type: "io_iso8583"
+    deploy: "iso-node-01"
+    config:
+      mode: "server"
+      bind: ":8601"
+      frame_length_size: 2
+      frame_length_endian: "big"
+      encoding: "ascii"
+      preserve_headers: false
+      strict_connection_routing: true
+
+  - name: "decode-off"
+    type: "codec_iso8583"
+    deploy: "iso-node-01"
+    config:
+      spec_path: "specs/rules.yaml"
+      direction: "decode"
+      on_error: "drop"
+      validation: "off"
+
+  - name: "encode-off"
+    type: "codec_iso8583"
+    deploy: "iso-node-01"
+    config:
+      spec_path: "specs/rules.yaml"
+      direction: "encode"
+      on_error: "drop"
+
+  # ── warn: the rules are recorded and the traffic is untouched ───────────────
+  - name: "gw-warn"
+    type: "io_iso8583"
+    deploy: "iso-node-01"
+    config:
+      mode: "server"
+      bind: ":8602"
+      frame_length_size: 2
+      frame_length_endian: "big"
+      encoding: "ascii"
+      preserve_headers: false
+      strict_connection_routing: true
+
+  - name: "decode-warn"
+    type: "codec_iso8583"
+    deploy: "iso-node-01"
+    config:
+      spec_path: "specs/rules.yaml"
+      direction: "decode"
+      on_error: "drop"
+      validation: "warn"
+
+  - name: "encode-warn"
+    type: "codec_iso8583"
+    deploy: "iso-node-01"
+    config:
+      spec_path: "specs/rules.yaml"
+      direction: "encode"
+      on_error: "drop"
+
+  # ── enforce: a rejecting rule fails the message ─────────────────────────────
+  - name: "gw-enforce"
+    type: "io_iso8583"
+    deploy: "iso-node-01"
+    config:
+      mode: "server"
+      bind: ":8603"
+      frame_length_size: 2
+      frame_length_endian: "big"
+      encoding: "ascii"
+      preserve_headers: false
+      strict_connection_routing: true
+
+  - name: "decode-enforce"
+    type: "codec_iso8583"
+    deploy: "iso-node-01"
+    config:
+      spec_path: "specs/rules.yaml"
+      direction: "decode"
+      on_error: "drop"
+      validation: "enforce"
+
+  - name: "encode-enforce"
+    type: "codec_iso8583"
+    deploy: "iso-node-01"
+    config:
+      spec_path: "specs/rules.yaml"
+      direction: "encode"
+      on_error: "drop"
+
+wires:
+  - from: "gw-off.out"
+    to: "decode-off.in"
+  - from: "decode-off.out"
+    to: "encode-off.in"
+  - from: "encode-off.out"
+    to: "gw-off.in"
+
+  - from: "gw-warn.out"
+    to: "decode-warn.in"
+  - from: "decode-warn.out"
+    to: "encode-warn.in"
+  - from: "encode-warn.out"
+    to: "gw-warn.in"
+
+  - from: "gw-enforce.out"
+    to: "decode-enforce.in"
+  - from: "decode-enforce.out"
+    to: "encode-enforce.in"
+  - from: "encode-enforce.out"
+    to: "gw-enforce.in"

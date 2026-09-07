@@ -1,0 +1,146 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   width="1250"
+   height="450"
+   viewBox="0 0 1250 450"
+   fill="none"
+   version="1.1"
+   id="svg9"
+   sodipodi:docname="fluxrig_logo.svg"
+   inkscape:version="1.4.2 (ebf0e940, 2025-05-08)"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <sodipodi:namedview
+     id="namedview9"
+     pagecolor="#ffffff"
+     bordercolor="#000000"
+     borderopacity="0.25"
+     inkscape:showpageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:pagecheckerboard="0"
+     inkscape:deskcolor="#d1d1d1"
+     inkscape:zoom="0.49729587"
+     inkscape:cx="576.11579"
+     inkscape:cy="147.79934"
+     inkscape:window-width="1472"
+     inkscape:window-height="894"
+     inkscape:window-x="0"
+     inkscape:window-y="34"
+     inkscape:window-maximized="1"
+     inkscape:current-layer="svg9" />
+  <defs
+     id="defs4">
+    <linearGradient
+       id="paint0_linear_flux"
+       x1="246.737"
+       y1="243.645"
+       x2="86.2575"
+       y2="-121.82"
+       gradientUnits="userSpaceOnUse">
+      <stop
+         offset="0.401007"
+         stop-color="#1A5B89"
+         id="stop1" />
+      <stop
+         offset="0.584705"
+         stop-color="#06838B"
+         id="stop2" />
+      <stop
+         offset="0.690178"
+         stop-color="#0EA69A"
+         id="stop3" />
+      <stop
+         offset="0.830319"
+         stop-color="#DDF280"
+         id="stop4" />
+    </linearGradient>
+  </defs>
+  <!-- Isotype Base Shape (Height ~202px) -->
+  <!-- Shifted down by 60px (Original Top 50 -> 110) -->
+  <g
+     transform="translate(0, 110)"
+     id="g6">
+    <mask
+       id="mask_isotype"
+       style="mask-type:alpha"
+       maskUnits="userSpaceOnUse"
+       x="0"
+       y="1"
+       width="194"
+       height="202">
+      <path
+         d="M192.22 174.16C191.902 187.407 179.785 202.541 165.581 202.838H22.4361L0 138.739H135.651L0 1.85701L88.3684 1.85679C93.4409 1.75084 99.4827 3.51571 103.45 7.21552L188.744 86.7593C192.711 90.4592 194.106 95.631 193.994 100.362L192.22 174.16Z"
+         fill="white"
+         id="path4" />
+    </mask>
+  </g>
+  <!-- Text "fluxrig"
+     Font Size: 280px
+     Baseline: 312 (Original 252 + 60)
+     Positions derived from measurement with -10 spacing.
+-->
+  <!-- Dotless i -->
+  <!-- Custom Dot for 'i' (Yellow1: #D5EB74)
+     cx: 822 (Calculated center of 'i')
+     cy: 30 (Above stem, safe margin from 0)
+-->
+  <g
+     id="g9"
+     transform="translate(125.4375,-14.539063)">
+    <g
+       mask="url(#mask_isotype)"
+       id="g5"
+       transform="translate(0,110)">
+      <path
+         d="m 192.22,174.16 c -0.318,13.247 -12.435,28.381 -26.639,28.678 H 22.4361 L 0,138.739 H 135.651 L 0,1.85701 88.3684,1.85679 C 93.4409,1.75084 99.4827,3.51571 103.45,7.21552 l 85.294,79.54378 c 3.967,3.6999 5.362,8.8717 5.25,13.6027 z"
+         fill="url(#paint0_linear_flux)"
+         id="path5"
+         style="fill:url(#paint0_linear_flux)" />
+    </g>
+    <text
+       x="230"
+       y="312"
+       font-family="Arial, Helvetica, sans-serif"
+       font-weight="bold"
+       font-size="280px"
+       letter-spacing="-10"
+       fill="#2f627d"
+       id="text6">flux</text>
+    <text
+       x="685"
+       y="312"
+       font-family="Arial, Helvetica, sans-serif"
+       font-weight="bold"
+       font-size="280px"
+       letter-spacing="-10"
+       fill="#2cb2a7"
+       id="text7">r</text>
+    <text
+       x="788"
+       y="312"
+       font-family="Arial, Helvetica, sans-serif"
+       font-weight="bold"
+       font-size="280px"
+       letter-spacing="-10"
+       fill="#2cb2a7"
+       id="text8">ı</text>
+    <text
+       x="846"
+       y="312"
+       font-family="Arial, Helvetica, sans-serif"
+       font-weight="bold"
+       font-size="280px"
+       letter-spacing="-10"
+       fill="#2cb2a7"
+       id="text9">g</text>
+    <circle
+       cx="827.30664"
+       cy="133.59572"
+       fill="#d5eb74"
+       id="circle9"
+       r="19.208973"
+       style="stroke-width:0.686034" />
+  </g>
+</svg>

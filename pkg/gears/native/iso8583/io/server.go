@@ -544,10 +544,28 @@ func (s *Server) Drain(ctx context.Context) error {
 		return true
 	})
 
-	// Wait for context
-	<-ctx.Done()
-	return ctx.Err()
+	// Wait for the connections that are still finishing, not for the deadline.
+	// Returning ctx.Err() unconditionally made every orderly shutdown arrive at
+	// the runtime as "Drain Gear Failed".
+	ticker := time.NewTicker(drainPollInterval)
+	defer ticker.Stop()
+	for {
+		if s.activeConns.Load() == 0 {
+			s.log.Info("Server drained")
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("io_iso8583: %d connection(s) still active at the drain deadline: %w",
+				s.activeConns.Load(), ctx.Err())
+		case <-ticker.C:
+		}
+	}
 }
+
+// drainPollInterval is how often Drain re-checks whether the last connection has
+// finished. The deadline itself comes from the caller's context.
+const drainPollInterval = 25 * time.Millisecond
 
 // inspect performs heuristic validation (Layer 1.5) and returns frame info.
 func (s *Server) inspect(ctx context.Context, payload []byte, connID string, meta map[string]string) FrameInfo {

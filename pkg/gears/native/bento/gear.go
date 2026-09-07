@@ -271,9 +271,11 @@ func (g *Gear) Drain(ctx context.Context) error {
 	// Given Bento's design, stopping the engine is the safest way to ensure no more traffic.
 	// However, Stop() is immediate. Drain implies "finish in-flight".
 	// Since Bento manages its own lifecycle, we will just wait for context or log.
-	g.logger.Info("Draining Bento Gear (No-op wrapper)") // Changed g.log to g.logger
-	<-ctx.Done()
-	return ctx.Err()
+	// A no-op wrapper has nothing in flight of its own: the Bento stream owns
+	// its lifecycle and is torn down in Stop. Waiting out the deadline here
+	// delayed every shutdown and reported it as a failed drain.
+	g.logger.Info("Draining Bento Gear (no-op wrapper)")
+	return nil
 }
 
 // --- Plugins ---

@@ -35,6 +35,33 @@ and scanned for license compliance.
 
 ================================================================================
 
+THIRD-PARTY SOFTWARE
+
+The fluxrig binaries link third-party Go modules. Their licences are permissive
+(Apache-2.0, MIT, BSD) with the exception noted below, and each module carries
+its own licence text in its source distribution. `go list -m all` from the
+repository root enumerates the complete set with versions.
+
+Mozilla Public License 2.0:
+
+  * github.com/hashicorp/golang-lru/v2       https://github.com/hashicorp/golang-lru
+  * github.com/hashicorp/golang-lru/arc/v2   https://github.com/hashicorp/golang-lru
+
+    Reached through the Bento stream processor. MPL-2.0 is file-level copyleft:
+    it permits distribution as part of a larger work under other terms, and
+    requires that the covered source stay available. It is unmodified here, and
+    the upstream repository above is the source.
+
+    A build that does not need Bento excludes it entirely, and with it the only
+    MPL-2.0 code in either binary:
+
+        make build-lite        # or: go build -tags nobento ./cmd/fluxrig
+
+    That build links 61 modules and every one of them is permissive. The tag
+    applies to both the Rack and the Mixer.
+
+================================================================================
+
 DISCLAIMER OF WARRANTY
 Unless required by applicable law or agreed to in writing, the Software (fluxrig), source code, binaries, configuration files, and associated documentation are provided on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied, including, without limitation, any warranties or conditions of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A PARTICULAR PURPOSE.
 

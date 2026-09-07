@@ -434,7 +434,7 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 					}
 
 					if errSave := env.Save(statePath); errSave != nil {
-						logger.Error("Failed to save state.flux", "error", errSave)
+						logger.Error("Failed to save passport", "path", statePath, "error", errSave)
 						return errSave
 					}
 					logger.Info("Passport Saved", "path", statePath)
@@ -561,9 +561,14 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 							logger.Error("Adoption: Passport invalid", "error", errVerify)
 						} else {
 							// Save
-							statePath := filepath.Join(cfg.Base.StateDir, "rack.flux")
+							// The name is base.state_file, the same field the boot
+							// path reads. Hardcoding it here wrote the passport
+							// somewhere the next boot does not look, so a Rack
+							// configured with any other name re-enrolled forever
+							// and never came up offline.
+							statePath := filepath.Join(cfg.Base.StateDir, cfg.Base.StateFile)
 							if errSave := env.Save(statePath); errSave != nil {
-								logger.Error("Adoption: Failed to save state.flux", "error", errSave)
+								logger.Error("Adoption: Failed to save passport", "path", statePath, "error", errSave)
 							} else {
 								logger.Info("Received Updated Passport via Heartbeat", "id", state.MachineID, "name", state.Name)
 								logger.Info("Adoption: Passport Saved", "path", statePath)
@@ -631,6 +636,19 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 				"version", payload.Version,
 				"rack", payload.RackName,
 			)
+
+			// File the specs the scenario names before applying it. A gear
+			// resolves its spec against this rack's own store, so the artefacts
+			// have to be there first; doing it after would mean the first apply
+			// fails and only a retry succeeds.
+			for _, artifact := range payload.Specs {
+				if _, _, _, errSpec := specMgr.ImportContent(ctx, artifact.Content, artifact.Name, artifact.Tag); errSpec != nil {
+					logger.Error("Failed to store spec sent with the scenario",
+						"spec", artifact.URN(), "error", errSpec)
+					return
+				}
+				logger.Info("Stored spec sent with the scenario", "spec", artifact.URN())
+			}
 
 			// Parse and apply the scenario
 			var sc registry.Scenario
@@ -857,7 +875,7 @@ var configPath string
 
 var runCmd = &cobra.Command{
 	Use:   "run",
-	Short: "Start the fluxrig Agent",
+	Short: "Start a Rack (same runtime as `rack`)",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		var cfg *config.RackConfig
 		var err error

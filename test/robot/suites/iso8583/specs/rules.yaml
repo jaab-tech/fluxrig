@@ -1,0 +1,100 @@
+# Copyright (c) 2026 JAAB Tech SAS, Uruguay
+# SPDX-License-Identifier: Apache-2.0
+#
+# A spec with rules, for the suite that proves the codec applies them to real
+# traffic. The wire layer is the named 1987 ASCII base, so this document is only
+# the semantic half.
+#
+# DE 4 declares kind: amount, which is what makes the "Amount is positive" check
+# read a padded "000000000000" as the number it is rather than as characters.
+spec:
+  id: validating
+  name: Validating
+  version: 1.0.0
+  protocol: iso8583
+  wire:
+    format: moov
+    source: "moov:spec87ascii"
+    # The named base writes the bitmap as hex characters; every message this
+    # suite builds writes it as eight binary bytes, which is what the other
+    # ISO 8583 suites and their terminals do. Overriding one element rather than
+    # restating the whole layout is what `wire.fields` over a `source` is for.
+    fields:
+      1:
+        type: Bitmap
+        length: 8
+        enc: Binary
+        prefix: Binary.Fixed
+        description: Bitmap
+
+  messages:
+    catalog:
+      "0200":
+        name: Financial Request
+        flow: request
+        pairs_with: "0210"
+      "0210":
+        name: Financial Response
+        flow: response
+        pairs_with: "0200"
+
+  enums:
+    currency_iso4217:
+      # Not the whole of ISO 4217: enough of it that a currency field has a
+      # domain to belong to, which is what binding an amount to one requires.
+      values:
+        "858": {name: Uruguayan peso}
+        "840": {name: US dollar}
+        "978": {name: Euro}
+    response_code:
+      closed: true
+      values:
+        "00": {name: Approved, category: approved}
+        "05": {name: Do not honour, category: declined}
+        "91": {name: Issuer unavailable, category: unavailable}
+
+  fields:
+    2:
+      name: Primary Account Number
+      alias: card.pan
+      log_mask: true
+      messages:
+        - {mti: "0200", usage: mandatory}
+    4:
+      name: Amount, Transaction
+      alias: amount
+      format:
+        kind: amount
+        currency_field: 49
+      messages:
+        - {mti: ["0200", "0210"], usage: mandatory}
+    11:
+      name: Systems Trace Audit Number
+      alias: stan
+      messages:
+        - {mti: ["0200", "0210"], usage: mandatory}
+    39:
+      name: Response Code
+      alias: response_code
+      values_ref: response_code
+      messages:
+        - {mti: "0200", usage: forbidden}
+        - {mti: "0210", usage: mandatory, response_value: new}
+    49:
+      name: Currency Code, Transaction
+      alias: currency
+      values_ref: currency_iso4217
+      messages:
+        - {mti: ["0200", "0210"], usage: optional}
+    41:
+      name: Card Acceptor Terminal Identification
+      alias: terminal_id
+      messages:
+        - {mti: "0200", usage: optional}
+
+  checks:
+    - mti: ["0200"]
+      name: "Amount is positive"
+      assert: "field(4) > 0"
+      severity: warn
+      note: "A zero-amount financial request is almost always a defect upstream."

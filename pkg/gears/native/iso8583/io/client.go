@@ -454,9 +454,11 @@ func (c *Client) Stop() error {
 // For Client, this implies we stop initiating new connections but keep existing ones open
 // to receive pending responses. Upstream components (Bus) should stop calling Process.
 func (c *Client) Drain(ctx context.Context) error {
+	// The connection stays open until Stop, which is what keeping it open for
+	// responses means. Blocking here only delayed shutdown by the whole
+	// deadline and then reported the clean stop as a failure.
 	c.log.Info("Draining Client (Keep Open for Responses)")
-	<-ctx.Done()
-	return ctx.Err()
+	return nil
 }
 
 // inspect performs heuristic validation (Layer 1.5) and returns frame info.

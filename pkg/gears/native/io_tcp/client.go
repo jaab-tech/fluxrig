@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -28,8 +29,9 @@ type Client struct {
 	emit   func(*fluxmsg.FluxMsg)
 	idGen  sdk.IDGenerator
 
-	connPtr atomic.Pointer[Connection]
-	done    chan struct{}
+	connPtr  atomic.Pointer[Connection]
+	done     chan struct{}
+	stopOnce sync.Once
 
 	// Telemetry
 	meter       metric.Meter
@@ -242,11 +244,22 @@ func (c *Client) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.Fl
 	return nil, nil
 }
 
+// Drain has nothing to stop accepting: a client dials out and does not hold a
+// listener. It returns immediately so a shutdown is not delayed waiting for
+// something that will never happen.
+func (c *Client) Drain(_ context.Context) error {
+	return nil
+}
+
+// Stop closes the connection. It is safe to call more than once, and on a
+// client that never dialled.
 func (c *Client) Stop() error {
-	close(c.done)
-	conn := c.connPtr.Load()
-	if conn != nil {
-		_ = conn.conn.Close()
-	}
+	c.stopOnce.Do(func() {
+		close(c.done)
+		conn := c.connPtr.Load()
+		if conn != nil {
+			_ = conn.conn.Close()
+		}
+	})
 	return nil
 }

@@ -296,6 +296,175 @@ const docTemplate = `{
                 }
             }
         },
+        "/specs": {
+            "get": {
+                "description": "Every spec in the content-addressed store, by name, version tag and content hash.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "specs"
+                ],
+                "summary": "List stored specs",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/api.SpecSummary"
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/specs/{name}": {
+            "get": {
+                "description": "Each version the store holds for this spec, newest first — newest meaning the highest version, not the last imported, since a patch to an older branch arrives after a newer release.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "specs"
+                ],
+                "summary": "Every version of one spec",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Spec name",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/api.SpecSummary"
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/specs/{name}/{tag}": {
+            "get": {
+                "description": "The spec document as imported, byte for byte.",
+                "produces": [
+                    "text/plain"
+                ],
+                "tags": [
+                    "specs"
+                ],
+                "summary": "Fetch a stored spec",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Spec name",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Version tag, or 'latest'",
+                        "name": "tag",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "the spec document",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/specs/{name}/{tag}/doc": {
+            "get": {
+                "description": "The messages, what each carries, and what every data element means — derived from the spec on each request. Defaults to the public variant, which omits fields the spec marks ` + "`" + `scope: private` + "`" + `.",
+                "produces": [
+                    "text/html"
+                ],
+                "tags": [
+                    "specs"
+                ],
+                "summary": "Render a spec's protocol reference",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Spec name",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Version tag, or 'latest'",
+                        "name": "tag",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "public (default) or complete",
+                        "name": "scope",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "html (default) or markdown",
+                        "name": "format",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "the rendered reference",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
         "/telemetry/{type}": {
             "get": {
                 "description": "Query Logs or Metrics from DuckDB",
@@ -536,7 +705,7 @@ const docTemplate = `{
                     "example": "45612378"
                 },
                 "ip": {
-                    "description": "IP address of the rack agent.",
+                    "description": "IP address of the Rack.",
                     "type": "string",
                     "example": "192.168.1.50"
                 },
@@ -556,7 +725,7 @@ const docTemplate = `{
                     "example": "rack-01"
                 },
                 "port": {
-                    "description": "Port number of the rack agent.",
+                    "description": "Port the Rack listens on.",
                     "type": "integer",
                     "example": 4222
                 },
@@ -612,6 +781,57 @@ const docTemplate = `{
                     "description": "Status of the import.",
                     "type": "string",
                     "example": "imported_and_activated"
+                }
+            }
+        },
+        "api.SpecSummary": {
+            "type": "object",
+            "properties": {
+                "doc": {
+                    "description": "Doc is where this version's protocol reference is served.",
+                    "type": "string",
+                    "example": "/api/v1/specs/iso8583-v87-ascii/v2.2.0/doc"
+                },
+                "hash": {
+                    "type": "string",
+                    "example": "1c8831d23bdd8458feafe6a506c5d3730605b78fd22b5d5c7f1c147043ef71af"
+                },
+                "imported_at": {
+                    "description": "ImportedAt is absent for anything filed before the store kept dates.",
+                    "type": "string",
+                    "example": "2026-09-06T18:47:26Z"
+                },
+                "latest": {
+                    "description": "Latest reports whether a reference without a tag resolves here.",
+                    "type": "boolean",
+                    "example": true
+                },
+                "name": {
+                    "type": "string",
+                    "example": "iso8583-v87-ascii"
+                },
+                "protocol": {
+                    "description": "Protocol is what the spec declares it speaks; empty when it declares none\nand relies on the loader's default.",
+                    "type": "string",
+                    "example": "iso8583"
+                },
+                "size": {
+                    "description": "Size of the stored document in bytes.",
+                    "type": "integer",
+                    "example": 34441
+                },
+                "tag": {
+                    "type": "string",
+                    "example": "v2.2.0"
+                },
+                "title": {
+                    "description": "Title is the human name the document declares, which is not the reference\nit is filed under.",
+                    "type": "string",
+                    "example": "ISO 8583:1987 (ASCII)"
+                },
+                "urn": {
+                    "type": "string",
+                    "example": "iso8583-v87-ascii:v2.2.0"
                 }
             }
         },
