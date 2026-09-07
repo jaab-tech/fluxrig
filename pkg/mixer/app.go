@@ -25,6 +25,7 @@ import (
 	"github.com/jaab-tech/fluxrig/pkg/ingest"
 	loggerPkg "github.com/jaab-tech/fluxrig/pkg/logger"
 	"github.com/jaab-tech/fluxrig/pkg/logger/rotator"
+	"github.com/jaab-tech/fluxrig/pkg/manager"
 	"github.com/jaab-tech/fluxrig/pkg/mixer/api"
 	"github.com/jaab-tech/fluxrig/pkg/netutil"
 	"github.com/jaab-tech/fluxrig/pkg/pki"
@@ -309,6 +310,14 @@ func (a *App) Run(ctx context.Context) error {
 	}
 	scenarioCtrl := controller.NewScenarioController(a.log, a.cfg.Store.Dir, store, idGen, mixerState.MachineID, scenarioWait)
 	scenarioCtrl.SetBus(managedBus)
+
+	// The store the Mixer resolves a scenario's spec references against, so the
+	// artefacts travel to the racks with the scenario that names them.
+	if specMgr, errSpec := manager.NewManager(filepath.Join(a.cfg.Store.Dir, "store")); errSpec != nil {
+		a.log.Warn("spec store unavailable; scenarios will ship without the specs they name", "error", errSpec)
+	} else {
+		scenarioCtrl.WithSpecStore(specMgr)
+	}
 	enrollCtrl.SetScenario(scenarioCtrl)
 
 	// Metrics Cache
@@ -410,6 +419,9 @@ func (a *App) Run(ctx context.Context) error {
 
 	// 9. API Server
 	apiSrv := api.NewServer(store, r.Pub, clusterKey, scenarioCtrl, mCache, mixerState.MachineID, mixerEntityID, a.cfg, wasmCat)
+	if specMgr, errSpec := manager.NewManager(filepath.Join(a.cfg.Store.Dir, "store")); errSpec == nil {
+		apiSrv.WithSpecStore(specMgr)
+	}
 	go func() {
 		addr := fmt.Sprintf(":%d", a.cfg.API.Port)
 		if errSrv := apiSrv.Start(addr); errSrv != nil {

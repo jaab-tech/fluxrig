@@ -18,11 +18,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 | Version | Date | Status | Summary |
 | :--- | :--- | :--- | :--- |
+| [v0.10.0](#v0100) | 2026-09-07 | Delivered | The semantic layer stops being documentation: a spec's rules are enforced on traffic |
 | [v0.9.0](#v090) | 2026-09-03 | Delivered | Enrichment from outside the message, and correlation keys that survive a bus hop |
 | [v0.8.0](#v080) | 2026-08-24 | Delivered | EMV chip data: BER-TLV parsing with unknown-tag preservation |
 | [v0.7.1](#v071) | 2026-08-10 | Delivered | ISO 8583 TLV length hardening |
 | [v0.7.0](#v070) | 2026-08-01 | Delivered | Payment switch: Conductor gear, gear manifests, ISO 8583 TLS |
 
+
+## [v0.10.0] - 2026-09-07 {#v0100}
+
+The semantic layer stops being documentation: a spec could state its rules and
+nothing applied them.
+
+**Before upgrading.** Two changes refuse specs that used to load, and both are
+about a spec declaring what it is. Every spec must carry `spec.id` and
+`spec.version`, and every spec must carry a `wire` block saying where its wire
+layer comes from. A spec missing either is refused at boot, with a message naming
+it, never per transaction. Every spec shipped in this repository is already in
+that shape; both entries under **Changed** say what one that is not needs. New
+behaviour is off by default: `validation` starts at `off`, so a message accepted
+yesterday is not rejected today because the code was upgraded.
+
+### Added
+
+- **The spec's rules can be enforced on traffic.** `codec_iso8583` gains `validation`: `off` (default), `warn` or `enforce`. Per-MTI field usage, the conditions that decide whether a rule applies, closed value sets and cross-field `checks` are answered against every message the codec decodes or encodes. A rejection follows `on_error`, exactly as a decode failure does; violations travel on the message as `codec.violations` and are counted on `flux.iso8583.violations` by severity, kind and MTI.
+  - The default is `off` deliberately: a message accepted yesterday must not be rejected today because the code was upgraded. `warn` is how you find out whether your spec matches your traffic before enforcing it.
+- **A spec can state when a rule applies, and what a message must satisfy.** Fields carry a per-MTI matrix (`usage`, `when`, `values_ref`) and a spec carries `checks`, written in a total, side-effect-free expression language over the message being validated.
+  - A `check` carries a severity: `reject` fails the message, `warn` records it and lets it through, which is what makes a rule deployable to a live fleet before it is enforced on one.
+  - An element compares the way its `format.kind` says it does. `amount`, `date`, `time`, `datetime` and the new `numeric` kind compare as numbers on every operator, so a rule can write `field(4) == 1000` rather than the element's own zero padding. Every other kind compares as the characters it carries, which is what a response code needs: `"00"` is not `"0"`. `pan` is deliberately excluded, because a leading zero makes it a different card.
+- **`fluxrig spec doc` renders the protocol reference from the spec.** The Mixer serves it too, at `GET /api/v1/specs/{name}/{tag}/doc`, and every entry in the spec listing carries the path to its own. Markdown for a repository or a docs site, HTML for a page that is read, printed or mailed. The HTML is self-contained: no scripts, stylesheets or fonts are fetched, so it opens offline. `--scope public` omits every field marked `scope: private` and states how many it withheld; `--scope complete` is the internal view. The per-message tables are derived on every render from the rules stored on the fields, so the two cannot drift.
+- **`format.kind: numeric`.** A value that is a number rather than a code (a trace number, a sequence, a count), which had no way to be declared.
+- **A stored spec's versions can be listed.** `fluxrig spec history <name>` and `GET /api/v1/specs/{name}` return every version of one spec, newest first by version rather than by arrival. `fluxrig spec list` and the `/specs` listing now carry when each version was filed, its size, the document's title and which version `latest` reaches; `--json` on both.
+
+### Changed
+
+- **BREAKING: a spec declares where its wire layer comes from.** Every spec now carries a `wire` block: `source` names a Moov base (`moov:<name>`) or a wire document beside the spec, `fields` states what the dialect changes, and each is valid alone. Specs in the legacy vocabulary (`meta:` with a top-level `fields:` fusing both layers, `llvar_n`-style type tokens) no longer load. Every spec shipped in this repository is already in the new shape; the [SDL reference](https://fluxrig.org/docs/reference/protocol/iso8583) describes what a spec that is not needs.
+- **BREAKING: a spec must declare `spec.id` and `spec.version`.** The schema has required them all along and the loader never read them, so a spec with no version at all loaded clean and its traffic carried a content hash that says which *file* ran and not which *contract*. A spec missing either is now refused at load: at boot, with a message naming the spec, never per transaction. Every spec shipped in this repository already declares both; a spec that does not needs the two fields added before upgrading.
+- **`codec_iso8583` manifest: `on_error` is documented as defaulting to `drop`.** It has always defaulted to `drop`; the manifest said `reject`, so an operator reading the published contract configured for one behaviour and got the other.
+
+### Fixed
+
+- **`unknown_tags: drop` rejected instead of dropping.** The policy documented three behaviours and implemented two: anything that was not `preserve` took the same branch, so a spec asking to drop an unknown TLV tag had the whole message rejected, which is the opposite of what it asked for.
+- **`VerifyConnectivity` could report convergence on a cancelled context.** The bus delivers to its handlers without consulting the caller's context, so a probe could land after cancellation and Go picked at random between the two ready cases. A caller shutting down was told the telemetry plane is ready.
 
 ## [v0.9.0] - 2026-09-03 {#v090}
 

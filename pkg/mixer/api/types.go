@@ -31,9 +31,9 @@ type RackResponse struct {
 	Name string `json:"name" example:"rack-01"`
 	// Status of the rack (active, inactive, pending).
 	Status string `json:"status" example:"active"`
-	// IP address of the rack agent.
+	// IP address of the Rack.
 	IP string `json:"ip" example:"192.168.1.50"`
-	// Port number of the rack agent.
+	// Port the Rack listens on.
 	Port int `json:"port" example:"4222"`
 	// LastSeen timestamp.
 	LastSeen time.Time `json:"last_seen" example:"2023-10-27T10:00:00Z"`

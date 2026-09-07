@@ -23,10 +23,11 @@ func (g *Gear) Manifest() sdk.Manifest {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
   "properties": {
-    "spec_path": { "type": "string", "description": "Path or URN of the ISO 8583 SDL spec." },
+    "spec_path": { "type": "string", "description": "The ISO 8583 SDL spec: a path to a file, or a store reference as name:tag (e.g. acme-auth:v2.2.0) or a content hash." },
     "spec": { "type": "string", "description": "Legacy alias of spec_path." },
     "direction": { "type": "string", "enum": ["auto", "encode", "decode"], "default": "auto", "description": "encode, decode, or auto (infer from the message)." },
-    "on_error": { "type": "string", "enum": ["reject", "drop", "kill"], "default": "reject", "description": "on a decode/encode failure: reject (emit on the error path), drop (discard), or kill (fail the gear)." }
+    "on_error": { "type": "string", "enum": ["reject", "drop", "kill"], "default": "drop", "description": "on a decode/encode failure, or on a message a rule rejects: reject (emit on the error path), drop (discard), or kill (fail the gear)." },
+    "validation": { "type": "string", "enum": ["off", "warn", "enforce"], "default": "off", "description": "what the spec's semantic rules do to traffic: off (they document), warn (violations are recorded and the message goes on), or enforce (a rejecting rule fails the message, which then follows on_error)." }
   },
   "anyOf": [
     { "required": ["spec_path"] },

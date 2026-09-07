@@ -1,0 +1,22 @@
+[logging]
+level = "debug"
+filename = "logs/mixer.log"
+
+[api]
+port = 8095
+
+[store]
+dir = "data"
+database_file = "fluxrig.duckdb"
+cluster_key_file = "cluster.key"
+
+[snake]
+port = 4232
+url = "nats://localhost:4232"
+cluster_name = "flux"
+store_dir = "data/js"
+
+
+[observability]
+enabled = true
+tier = "embedded"

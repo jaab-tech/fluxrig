@@ -19,6 +19,7 @@ import (
 
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/jaab-tech/fluxrig/pkg/idgen"
+	"github.com/jaab-tech/fluxrig/pkg/manager"
 	"github.com/jaab-tech/fluxrig/pkg/registry"
 	"github.com/jaab-tech/fluxrig/pkg/store/duckdb"
 )
@@ -50,6 +51,16 @@ type ScenarioController struct {
 	repoReady   bool               // Whether the scenarios repo has been initialized
 	mixerID     uuid.UUID
 	waitTimeout time.Duration
+	specs       manager.Manager // resolves the spec artefacts a scenario names
+}
+
+// WithSpecStore gives the controller the store it resolves spec references
+// against. Without one, a scenario naming a stored spec is still pushed: the
+// rack will fail to resolve it and say so, which is a better failure than a
+// scenario silently shipped without the protocol it speaks.
+func (c *ScenarioController) WithSpecStore(m manager.Manager) *ScenarioController {
+	c.specs = m
+	return c
 }
 
 func NewScenarioController(log *slog.Logger, dataPath string, store *duckdb.Store, ig *idgen.IDGenerator, mixerID uuid.UUID, waitTimeout time.Duration) *ScenarioController {
@@ -511,6 +522,8 @@ func (c *ScenarioController) pushScenarioToRacks(ctx context.Context, s *registr
 			payload.Scenario = content
 		}
 
+		payload.Specs = c.collectSpecs(ctx, s)
+
 		data, err := payload.ToData()
 		if err != nil {
 			c.log.Warn("failed to serialize scenario payload", "rack", rackName, "error", err)
@@ -550,4 +563,62 @@ func (c *ScenarioController) waitForRack(ctx context.Context, name string) (uuid
 		}
 	}
 	return uuid.Nil, fmt.Errorf("timeout waiting for rack registration")
+}
+
+// specRefFromConfig reads the spec a gear config names, under either the current
+// key or the legacy alias the codec still accepts.
+func specRefFromConfig(cfg map[string]any) string {
+	for _, key := range []string{"spec_path", "spec"} {
+		if v, ok := cfg[key].(string); ok && v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// storeRef splits a `name:tag` reference. A path is not one, and neither is a
+// bare hash — a hash needs no name to be resolved, so it is already portable and
+// nothing has to travel for it.
+func storeRef(ref string) (name, tag string, ok bool) {
+	if strings.ContainsAny(ref, `/\`) || strings.HasSuffix(ref, ".yaml") || strings.HasSuffix(ref, ".yml") {
+		return "", "", false
+	}
+	i := strings.LastIndex(ref, ":")
+	if i <= 0 || i == len(ref)-1 {
+		return "", "", false
+	}
+	return ref[:i], ref[i+1:], true
+}
+
+// collectSpecs gathers the spec artefacts a scenario names so they travel with
+// it. A rack resolves a spec against its own store, and until now nothing put
+// anything there: a scenario could name a protocol the rack had never seen, or —
+// worse — a different file that happened to sit at the same path.
+func (c *ScenarioController) collectSpecs(ctx context.Context, s *registry.Scenario) []fluxmsg.SpecArtifact {
+	if c.specs == nil {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var out []fluxmsg.SpecArtifact
+	for _, g := range s.Gears {
+		ref := specRefFromConfig(g.Config)
+		if ref == "" {
+			continue
+		}
+		name, tag, ok := storeRef(ref)
+		if !ok || seen[ref] {
+			continue
+		}
+		seen[ref] = true
+		content, err := c.specs.Load(ctx, ref)
+		if err != nil {
+			// Pushing anyway is deliberate: the rack reports an unresolvable spec
+			// against the reference the scenario actually names, which is more use
+			// than the Mixer refusing to deploy over a spec it cannot find.
+			c.log.Warn("spec named by scenario is not in the store", "ref", ref, "gear", g.Name, "error", err)
+			continue
+		}
+		out = append(out, fluxmsg.SpecArtifact{Name: name, Tag: tag, Content: content})
+	}
+	return out
 }

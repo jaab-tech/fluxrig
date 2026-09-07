@@ -86,7 +86,7 @@ Verify Wasm Gear Loads And Processes
     # 3. Create active scenario with the hash and import it
     Log    Creating runtime scenario...
     ${scenario_content}=    Get File    ${SCENARIO}
-    ${scenario_content}=    Replace String    ${scenario_content}    file:///Users/andresa/git/fluxrig/test/e2e/12_wasm_polyglot/build/polyglot.wasm    snake://wasm_catalog/${hash}.wasm
+    ${scenario_content}=    Replace String    ${scenario_content}    file://WASM_MODULE_PATH    snake://wasm_catalog/${hash}.wasm
     Create File    ${WORK_DIR}/scenario_active.yaml    ${scenario_content}
     
     Log    Importing Scenario...

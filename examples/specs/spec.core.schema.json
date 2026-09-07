@@ -1,0 +1,884 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fluxrig.org/schemas/spec.core.schema.json",
+  "title": "Protocol spec — semantic core",
+  "description": "Open semantic layer over a wire spec. Layer 1 (wire) uses the moov-io/iso8583 declarative vocabulary verbatim; layer 2 (this) adds what the packager cannot express: message catalog, valid values, per-message usage, declarative conditions, cardinality, and data classification. Vendor extensions use x- prefixed keys and are ignored here. Scope: this describes the two-layer shape, where `spec.wire` names a base and `spec.fields` carries semantics only. The loader also accepts an inline shape that fuses both layers into one field entry, by design, for specs with no wire document; that shape has a different `subfields` form and is not described here. See ADR 0049.",
+  "type": "object",
+  "required": [
+    "spec"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "spec": {
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "version",
+        "wire",
+        "fields"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]*$"
+        },
+        "protocol": {
+          "type": "string",
+          "default": "iso8583",
+          "description": "What the spec describes. Read by the loader and stamped on every message as codec.protocol; defaults to iso8583."
+        },
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^v?(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$"
+        },
+        "encoding": {
+          "type": "string"
+        },
+        "references": {
+          "description": "The documents this spec was written from. A protocol reference that cannot be traced to a normative source is an assertion. The sources for most payment protocols are sold by a standards body or issued under a scheme's terms, so a spec cites them and says how to obtain one, and does not carry them.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "title"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "title": {
+                "type": "string"
+              },
+              "publisher": {
+                "type": "string"
+              },
+              "note": {
+                "type": "string",
+                "description": "How a reader obtains it, which for a paid standard or a scheme manual is the part they need."
+              },
+              "url": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "overview": {
+          "description": "The protocol's own primer, in Markdown, for the generated reference. A reference explains the vocabulary it uses and cannot explain the protocol itself; this is where a spec says what its reader needs to know before the tables mean anything. Keep it to what the document cannot derive: never restate a rule the spec already carries, or the two drift apart.",
+          "type": "string"
+        },
+        "wire": {
+          "description": "The wire layer: where it comes from, and what this spec changes about it. `source` names a Moov base (`moov:<name>`) or a wire document beside the spec (a relative path); `fields` is merged over whatever the source produced. All three combinations are valid: source alone uses a base as-is, source plus fields is a dialect stating only its differences, and fields alone is a spec with no upstream base carrying its whole wire layer here — which is why no spec has to fuse the two layers into one field entry.",
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": false,
+          "properties": {
+            "source": {
+              "type": "string",
+              "minLength": 1
+            },
+            "format": {
+              "const": "moov"
+            },
+            "fields": {
+              "description": "Wire vocabulary only; semantic keys belong on spec.fields.",
+              "type": "object",
+              "minProperties": 1,
+              "propertyNames": {
+                "pattern": "^[0-9]+$"
+              },
+              "additionalProperties": {
+                "$ref": "#/$defs/wireField"
+              }
+            }
+          },
+          "anyOf": [
+            {
+              "required": [
+                "source"
+              ]
+            },
+            {
+              "required": [
+                "fields"
+              ]
+            }
+          ]
+        },
+        "extends": {
+          "type": "string",
+          "description": "Base spec this document extends."
+        },
+        "messages": {
+          "$ref": "#/$defs/messages"
+        },
+        "enums": {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^[a-z][a-z0-9_]*$"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/valueSet"
+          }
+        },
+        "fields": {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^[0-9]+$"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/field"
+          }
+        },
+        "validation_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "unlisted": {
+              "enum": [
+                "optional",
+                "forbidden"
+              ]
+            }
+          }
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/check"
+          }
+        }
+      },
+      "patternProperties": {
+        "^x-": true
+      },
+      "additionalProperties": false
+    }
+  },
+  "$defs": {
+    "mti": {
+      "type": "string",
+      "pattern": "^[0-9]{4}$"
+    },
+    "duration": {
+      "type": "string",
+      "pattern": "^[0-9]+(ms|s|m|h)$"
+    },
+    "whenExpr": {
+      "type": "string",
+      "minLength": 1
+    },
+    "messages": {
+      "type": "object",
+      "required": [
+        "catalog"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "catalog": {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^[0-9]{4}$"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "name",
+              "flow"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "flow": {
+                "enum": [
+                  "request",
+                  "response"
+                ]
+              },
+              "pairs_with": {
+                "$ref": "#/$defs/mti"
+              },
+              "response_timeout": {
+                "$ref": "#/$defs/duration"
+              },
+              "class": {
+                "enum": [
+                  "business",
+                  "network"
+                ]
+              },
+              "meaning": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "transitions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "from",
+              "to",
+              "trigger"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "from": {
+                "$ref": "#/$defs/mti"
+              },
+              "to": {
+                "$ref": "#/$defs/mti"
+              },
+              "trigger": {
+                "type": "string"
+              },
+              "meaning": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "correlate_on": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        }
+      }
+    },
+    "valueSet": {
+      "description": "A value domain. `closed` says whether a value outside it is a violation or merely undocumented — two different claims that a bare list cannot tell apart, and the difference a validator has to know before it can act. Open is the default because refusing a value for being unrecognised is the expensive mistake in a payment switch: schemes add proprietary codes and a strict reader would reject live traffic. A closed set is the deliberate case, and says so.",
+      "type": "object",
+      "required": [
+        "values"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "closed": {
+          "description": "true: a value outside `values` is invalid. false or absent: the listed values are what is documented, not what is permitted.",
+          "type": "boolean"
+        },
+        "values": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "category": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_]*$"
+              },
+              "meaning": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "format": {
+      "type": "object",
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "pan",
+            "amount",
+            "date",
+            "time",
+            "datetime",
+            "numeric"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "amount"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "currency_field"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "kind": true,
+              "currency_field": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "date",
+                  "time",
+                  "datetime"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "layout"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "kind": true,
+              "layout": {
+                "type": "string"
+              },
+              "tz": {
+                "enum": [
+                  "utc",
+                  "local"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "pan"
+              }
+            }
+          },
+          "then": {
+            "additionalProperties": false,
+            "properties": {
+              "kind": true
+            }
+          }
+        }
+      ]
+    },
+    "positionalPart": {
+      "description": "Semantic description of one positional part. Carries no byte range: parts are bound to the wire layer's parts by position, which is how the loader keys them.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "alias": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*(\\.[a-z0-9_]+)*$"
+        },
+        "values_ref": {
+          "$ref": "#/$defs/valuesRef"
+        },
+        "validValues": {
+          "$ref": "#/$defs/valueSet"
+        },
+        "meaning": {
+          "type": "string"
+        }
+      }
+    },
+    "tlvPart": {
+      "description": "Semantic description of one TLV part, bound to the wire layer's part by tag.",
+      "type": "object",
+      "required": [
+        "tag",
+        "name"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "tag": {
+          "type": "string",
+          "pattern": "^[0-9A-Fa-f]+$"
+        },
+        "name": {
+          "type": "string"
+        },
+        "alias": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*(\\.[a-z0-9_]+)*$"
+        },
+        "values_ref": {
+          "$ref": "#/$defs/valuesRef"
+        },
+        "validValues": {
+          "$ref": "#/$defs/valueSet"
+        },
+        "meaning": {
+          "type": "string"
+        }
+      }
+    },
+    "wirePositionalPart": {
+      "type": "object",
+      "required": [
+        "from",
+        "to"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "from": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "to": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "wireTlvPart": {
+      "type": "object",
+      "required": [
+        "tag"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "tag": {
+          "type": "string",
+          "pattern": "^[0-9A-Fa-f]+$"
+        },
+        "type": {
+          "$ref": "#/$defs/moovType"
+        },
+        "length": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "wireSubfields": {
+      "type": "object",
+      "required": [
+        "layout",
+        "parts"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "layout": {
+          "enum": [
+            "positional",
+            "tlv",
+            "bitmapped"
+          ]
+        },
+        "unknown_tags": {
+          "enum": [
+            "preserve",
+            "reject",
+            "drop"
+          ]
+        },
+        "repeat": {
+          "type": "object",
+          "required": [
+            "length",
+            "max"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "length": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "max": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "parts": {
+          "type": "array",
+          "minItems": 1
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "layout": {
+                "const": "tlv"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "parts": {
+                "items": {
+                  "$ref": "#/$defs/wireTlvPart"
+                }
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "parts": {
+                "items": {
+                  "$ref": "#/$defs/wirePositionalPart"
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "layout": {
+                "enum": [
+                  "positional",
+                  "bitmapped"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "unknown_tags": false
+            }
+          }
+        }
+      ]
+    },
+    "subfields": {
+      "description": "What the parts of a composite mean. How they are framed on the wire — ranges, tags, repetition, unknown-tag policy — belongs to the wire layer.",
+      "type": "object",
+      "required": [
+        "layout",
+        "parts"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "layout": {
+          "enum": [
+            "positional",
+            "tlv",
+            "bitmapped"
+          ]
+        },
+        "parts": {
+          "type": "array",
+          "minItems": 1
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "layout": {
+                "const": "tlv"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "parts": {
+                "items": {
+                  "$ref": "#/$defs/tlvPart"
+                }
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "parts": {
+                "items": {
+                  "$ref": "#/$defs/positionalPart"
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "layout": {
+                "enum": [
+                  "positional",
+                  "bitmapped"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "unknown_tags": false
+            }
+          }
+        }
+      ]
+    },
+    "moovType": {
+      "enum": [
+        "String",
+        "Numeric",
+        "Binary",
+        "Bitmap",
+        "Composite",
+        "Hex",
+        "Track1",
+        "Track2",
+        "Track3"
+      ]
+    },
+    "moovEnc": {
+      "enum": [
+        "ASCII",
+        "BCD",
+        "EBCDIC",
+        "Binary",
+        "HexToASCII",
+        "ASCIIToHex",
+        "LBCD",
+        "BerTLVTag"
+      ]
+    },
+    "moovPrefix": {
+      "type": "string",
+      "pattern": "^((ASCII|BCD|Binary|EBCDIC|Hex)\\.(Fixed|L{1,6})|BerTLV)$"
+    },
+    "valuesRef": {
+      "type": "string",
+      "pattern": "^(@messages|[a-z][a-z0-9_]*)$"
+    },
+    "field": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "alias": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*(\\.[a-z0-9_]+)*$"
+        },
+        "messages": {
+          "description": "What this field means in each message it has a rule for. Entries are evaluated in order and the first match wins; an entry without `when` matches its whole MTI and is therefore the default, so it must come last within that MTI.",
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/messageRule"
+          }
+        },
+        "scope": {
+          "enum": [
+            "public",
+            "private"
+          ]
+        },
+        "note": {
+          "description": "What a reader has to know that is not the definition: a caveat, a consequence, a mistake that gets made. `description` says what the element is; a note says what will bite you about it.",
+          "type": "string"
+        },
+        "values_ref": {
+          "$ref": "#/$defs/valuesRef"
+        },
+        "validValues": {
+          "$ref": "#/$defs/valueSet"
+        },
+        "log_mask": {
+          "type": "boolean"
+        },
+        "sensitivity": {
+          "enum": [
+            "pan",
+            "chd",
+            "sad",
+            "pii",
+            "none"
+          ]
+        },
+        "crypto": {
+          "type": "object",
+          "required": [
+            "role"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "role": {
+              "enum": [
+                "pin_block",
+                "mac",
+                "kcv"
+              ]
+            }
+          }
+        },
+        "format": {
+          "$ref": "#/$defs/format"
+        },
+        "subfields": {
+          "$ref": "#/$defs/subfields"
+        },
+        "meaning": {
+          "type": "string"
+        }
+      },
+      "patternProperties": {
+        "^x-": true
+      },
+      "additionalProperties": false
+    },
+    "usage": {
+      "description": "What the field is once its entry matches. There is no \"conditional\": the entry's `when` carries the condition, so a usage that only restates that one exists would say nothing about the field.",
+      "enum": [
+        "mandatory",
+        "optional",
+        "forbidden"
+      ]
+    },
+    "messageRule": {
+      "description": "What this field means in one message, or in one named case within it. Everything that varies by message lives here: presence, value domain, how a response's value relates to the request's, and a note scoped to that pairing.",
+      "type": "object",
+      "required": [
+        "mti",
+        "usage"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "mti": {
+          "description": "The message, or the messages that share this rule. A list because repeating an identical entry per message is how a matrix rots.",
+          "oneOf": [
+            {
+              "$ref": "#/$defs/mti"
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/mti"
+              },
+              "minItems": 1
+            }
+          ]
+        },
+        "usage": {
+          "$ref": "#/$defs/usage"
+        },
+        "when": {
+          "$ref": "#/$defs/whenExpr"
+        },
+        "values_ref": {
+          "$ref": "#/$defs/valuesRef"
+        },
+        "validValues": {
+          "$ref": "#/$defs/valueSet"
+        },
+        "response_value": {
+          "description": "How this field's value in a response relates to the request's. `echo`: it must be equal, and a difference is a fault. `new`: the responder originated it; there was nothing to echo. `modified`: it derives from the request's value and may legitimately differ — a partial approval returns less than the amount asked for — so a validator must not compare for equality. Whether the field is there at all is a separate question, answered by `usage`. Meaningless on a request, where there is nothing prior to relate to.",
+          "enum": [
+            "echo",
+            "new",
+            "modified"
+          ]
+        },
+        "severity": {
+          "enum": [
+            "reject",
+            "warn"
+          ]
+        },
+        "note": {
+          "type": "string"
+        }
+      }
+    },
+    "check": {
+      "description": "A cross-field assertion. Presence and value domains belong on the fields; what lives here is what no single field can state.",
+      "type": "object",
+      "required": [
+        "mti",
+        "name",
+        "assert"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "mti": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/mti"
+          },
+          "minItems": 1
+        },
+        "name": {
+          "type": "string"
+        },
+        "assert": {
+          "$ref": "#/$defs/whenExpr"
+        },
+        "severity": {
+          "enum": [
+            "reject",
+            "warn"
+          ]
+        },
+        "note": {
+          "type": "string"
+        }
+      }
+    },
+    "wireField": {
+      "description": "One field's wire delta over the named base. Moov vocabulary only.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "$ref": "#/$defs/moovType"
+        },
+        "length": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "enc": {
+          "$ref": "#/$defs/moovEnc"
+        },
+        "prefix": {
+          "$ref": "#/$defs/moovPrefix"
+        },
+        "padding": {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "enum": [
+                "Left",
+                "Right",
+                "None"
+              ]
+            },
+            "pad": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1
+            }
+          }
+        },
+        "subfields": {
+          "$ref": "#/$defs/wireSubfields"
+        },
+        "description": {
+          "type": "string",
+          "description": "The element's label, in Moov's vocabulary. A named base carries one for every field it declares; the semantic `name` overrides it."
+        }
+      }
+    }
+  }
+}

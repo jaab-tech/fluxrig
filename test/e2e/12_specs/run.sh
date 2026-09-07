@@ -168,6 +168,37 @@ test_cli_spec_lifecycle() {
         log_error "List missing visa:v1.0.0"
         return 1
     fi
+
+    # 6. A spec names itself. Every case above passes --name and --tag, so none
+    # of them exercise the path a deployed spec actually takes: no flags, the
+    # reference derived from what the document declares.
+    log_info "Importing a spec with no flags..."
+    run_fluxrig_spec import "${SCENARIO_DIR}/self_named.yaml" > "${OUTPUT}" 2>&1
+    if grep -q "Imported acme-auth:v2.2.0" "${OUTPUT}"; then
+        log_success "Filed under its declared id and version"
+    else
+        log_error "Expected acme-auth:v2.2.0 from the document itself"
+        cat "${OUTPUT}"
+        return 1
+    fi
+
+    # The title carries spaces, parentheses and a colon; none of it may leak into
+    # the reference, because a reference is parsed as name:tag.
+    if grep -qE "Imported (ACME|.*\(1987\))" "${OUTPUT}"; then
+        log_error "The human title was used as the reference"
+        return 1
+    else
+        log_success "Title kept out of the reference"
+    fi
+
+    # Same bytes, second time: one artefact, not two versions of itself.
+    run_fluxrig_spec import "${SCENARIO_DIR}/self_named.yaml" > "${OUTPUT}" 2>&1
+    if grep -q "Imported acme-auth:v2.2.0" "${OUTPUT}"; then
+        log_success "Re-import is idempotent without flags"
+    else
+        log_error "Re-import minted a different reference: $(cat ${OUTPUT})"
+        return 1
+    fi
 }
 
 # ==============================================================================

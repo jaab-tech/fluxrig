@@ -6,6 +6,26 @@ This suite contains the Robot Framework tests for verifying the **fluxrig ISO858
 
 ---
 
+## `validation_rules.robot` — what a spec's rules do to traffic
+
+Three ports carry the three validation modes against one spec and one Rack:
+`off` on 8601, `warn` on 8602, `enforce` on 8603. A scenario is applied whole, so
+testing the modes by redeploying would mean three deployments and three windows
+where the suite asserts against a Rack that is still changing.
+
+Each port loops back through a decode/encode pair, so a message that survives its
+rules comes back and one that does not never returns. That silence is the whole
+signal for `enforce`, which is why the suite opens with an acceptance case: if a
+valid message did not come back either, "no reply" would prove nothing. It has
+already caught that — the first run had every port timing out, and the enforce
+case passed for the wrong reason.
+
+The spec (`specs/rules.yaml`) names `moov:spec87ascii` and overrides only DE 1,
+because the named base writes the bitmap as hex characters and every message this
+suite builds writes it as eight binary bytes. Overriding one element rather than
+restating the whole layout is what `wire.fields` over a `source` is for.
+
+
 ## 📂 Suite Composition
 
 The suite is composed of two primary test definitions:

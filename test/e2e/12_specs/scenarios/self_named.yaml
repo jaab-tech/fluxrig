@@ -1,0 +1,21 @@
+# Copyright (c) 2026 JAAB Tech SAS, Uruguay
+# SPDX-License-Identifier: Apache-2.0
+#
+# A spec that names itself. The store files it under `spec.id` and `spec.version`
+# with no flags given, which is how a spec referenced from a scenario gets its
+# reference in the first place.
+#
+# The title is deliberately awkward — spaces, parentheses and a colon, like the
+# reference spec's "ISO 8583:1987 (ASCII)". A title is prose and cannot be half
+# of a name:tag; the id is the slug that can.
+spec:
+  id: "acme-auth"
+  name: "ACME Auth: dialect (1987)"
+  version: "2.2.0"
+  wire:
+    fields:
+      0: {type: String, length: 4, enc: ASCII, prefix: ASCII.Fixed}
+      11: {type: String, length: 6, enc: ASCII, prefix: ASCII.Fixed}
+  fields:
+    0: {name: "Message Type Indicator"}
+    11: {name: "STAN", alias: stan}

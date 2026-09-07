@@ -123,7 +123,10 @@ test: ## Run unit tests with race detection and coverage
 check-no-binaries: ## Fail if a compiled executable is tracked in git
 	@./scripts/check_no_binaries.sh
 
-lint: check-no-binaries ## Run golangci-lint
+check-no-internal-leaks: ## Fail if a mirrored file names internal-only infrastructure
+	@./scripts/check_no_internal_leaks.sh
+
+lint: check-no-binaries check-no-internal-leaks ## Run golangci-lint
 	@echo "Linting..."
 	@if command -v golangci-lint >/dev/null; then \
 		golangci-lint run ./...; \
@@ -142,6 +145,18 @@ verify: build ## Run quick E2E verification script
 
 regression: build ## Run full E2E regression suite (Unified Runner)
 	@echo "--------------------------------------------------"
+# The suites shell out to three tools. Without them they fail on their own terms:
+# a missing duckdb reports "Rack not found in DB snapshot", which reads as a Rack
+# that never registered rather than as a missing tool. Say what is absent first.
+	@missing=""; \
+	command -v duckdb  >/dev/null || missing="$$missing\n  duckdb   reads the Mixer store        (01_simple, 02_telemetry, 03_registry, 10_iso8583)  https://duckdb.org/docs/installation/"; \
+	command -v zig     >/dev/null || missing="$$missing\n  zig      builds the Wasm payload      (12_wasm_polyglot)                                https://ziglang.org/download/"; \
+	command -v tshark  >/dev/null || missing="$$missing\n  tshark   replays the PCAP samples     (10_iso8583)                                      apt install tshark"; \
+	if [ -n "$$missing" ]; then \
+		echo "Missing prerequisites for the regression suite:"; \
+		printf "$$missing\n"; \
+		exit 1; \
+	fi
 	@echo "Running Regression Suite (Unified)..."
 	@test/e2e/run_all.sh
 
@@ -297,6 +312,10 @@ test-robot-iso: build-bin iso8583-tool ## Run Robot ISO8583 Suite
 	@echo "Running Robot ISO8583 Suite (Validation)..."
 	@./test/robot/run.sh test/robot/suites/iso8583/server_validation.robot
 
+test-robot-validation-rules: robot-prep build-bin ## Run Robot Spec Validation Suite (what a spec's rules do to real traffic)
+	@echo "Running Spec Validation Rules Suite..."
+	@cd test/robot && ./run.sh suites/iso8583/validation_rules.robot
+
 test-robot-tlv: build-bin iso8583-tool ## Run Robot ISO8583 TLV Fidelity Suite
 	@echo "Running Robot ISO8583 TLV Fidelity Suite..."
 	@./test/robot/run.sh test/robot/suites/iso8583/tlv_fidelity.robot
@@ -308,6 +327,10 @@ test-robot-coatcheck: build-bin ## Run Robot Coatcheck Suite
 test-robot-topology: robot-prep build-bin ## Run Robot Topology Suite
 	@echo "Running Topology Test..."
 	@cd test/robot && ./run.sh suites/topology/cross_rack.robot
+
+test-robot-specs: robot-prep build-bin ## Run Robot Spec Suite (the contract a spec states, and the documents derived from it)
+	@echo "Running Spec Suite..."
+	@cd test/robot && ./run.sh suites/specs
 
 test-robot-telemetry: robot-prep build-bin ## Run Robot Telemetry Suite
 	@echo "Running Telemetry Coverage Test..."
@@ -329,14 +352,14 @@ test-robot-conductor: robot-prep build-bin iso8583-tool ## Run Robot Conductor S
 # it is green tells a reader nothing about whether the suite is green.
 robot-publish: ## Pin the latest Robot run into the docs site (usage: make robot-publish SUITE=roaming [REPLACE=1])
 	@if [ -z "$(SUITE)" ]; then echo "SUITE is required, e.g. make robot-publish SUITE=roaming"; exit 1; fi
-	@if [ -z "$(ROBOT_REPORTS_STATIC)" ] || [ -z "$(ROBOT_REPORTS_GENERATED)" ]; then \
-		echo "Skipping (ROBOT_REPORTS_STATIC / ROBOT_REPORTS_GENERATED not set - configure .env.local)"; \
+	@if [ -z "$(ROBOT_REPORTS_STATIC)" ] || [ -z "$(ROBOT_REPORTS_GENERATED)" ] || [ -z "$(ROBOT_PUBLISH_PYTHON)" ] || [ -z "$(ROBOT_PUBLISH_SCRIPT)" ]; then \
+		echo "Skipping (ROBOT_REPORTS_* / ROBOT_PUBLISH_* not set - configure .env.local)"; \
 	else \
 		latest=$$(ls -dt /tmp/fluxrig/robot_run_*/results 2>/dev/null | head -1); \
 		if [ -z "$$latest" ]; then echo "No Robot run found under /tmp/fluxrig"; exit 1; fi; \
 		echo "Publishing $$latest as '$(SUITE)'..."; \
 		flag=""; [ -n "$(REPLACE)" ] && flag="--replace"; \
-		../fluxrig-ops/.venv/bin/python ../fluxrig-ops/scripts/publish_robot_report.py \
+		$(ROBOT_PUBLISH_PYTHON) $(ROBOT_PUBLISH_SCRIPT) \
 			$$flag "$(SUITE)" "$$latest" "$(ROBOT_REPORTS_STATIC)" "$(ROBOT_REPORTS_GENERATED)"; \
 	fi
 
@@ -348,7 +371,7 @@ test-robot-roaming-stress: robot-prep build-bin ## Run Robot Roaming Stress Suit
 	@echo "Running Roaming Stress Suite..."
 	@cd test/robot && ./run.sh suites/roaming/stress_load.robot
 
-test-robot: test-robot-iso test-robot-tlv test-robot-coatcheck test-robot-topology test-robot-telemetry test-robot-roaming ## Run the functional Robot suites (the performance and chaos suites run on their own)
+test-robot: test-robot-iso test-robot-tlv test-robot-coatcheck test-robot-topology test-robot-telemetry test-robot-roaming test-robot-specs test-robot-validation-rules ## Run the functional Robot suites (the performance and chaos suites run on their own)
 
 test-robot-staged: robot-prep build-bin ## Run Robot Staged Load Suite (QoS Validation)
 	@echo "Running Staged Load Test..."

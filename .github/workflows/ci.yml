@@ -15,10 +15,12 @@
 name: CI
 
 on:
+  # Globs rather than an explicit list: this file is published, and an enumerated
+  # branch name says more about how the project is organised than CI needs to.
   push:
-    branches: [main, main-internal, feat/*]
+    branches: ['main*', 'feat/*']
   pull_request:
-    branches: [main, main-internal]
+    branches: ['main*']
 
 jobs:
   lint:
@@ -27,6 +29,12 @@ jobs:
       - uses: actions/checkout@v7
       - name: Check no compiled binaries are tracked
         run: ./scripts/check_no_binaries.sh
+      # This repository is mirrored wholesale from the release tag, so a tracked
+      # file is a published file. The guard existed and ran only under `make
+      # lint`, which CI does not call -- so the one check that protects the
+      # showroom was the one CI did not run.
+      - name: Check no internal-only references reach the mirror
+        run: ./scripts/check_no_internal_leaks.sh
       - name: Set up Go
         uses: actions/setup-go@v7
         with:

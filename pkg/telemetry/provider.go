@@ -440,6 +440,18 @@ func VerifyConnectivity(ctx context.Context, b bus.Bus, nodeName string, handsha
 	for {
 		select {
 		case <-hotCh:
+			// A probe can arrive after the context is already cancelled -- the
+			// bus delivers to its handlers on their own goroutines and does not
+			// consult the caller's context. Both this case and ctx.Done() are
+			// then ready, and Go picks between ready cases at random, so half
+			// the time a cancelled wait reported convergence.
+			//
+			// Cancellation wins. Convergence observed after the caller gave up
+			// is not convergence: whoever cancelled is shutting down, and
+			// telling them the telemetry plane is ready sends them on.
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			slog.Info("telemetry-plane convergence confirmed")
 			return nil
 		case <-ticker.C:

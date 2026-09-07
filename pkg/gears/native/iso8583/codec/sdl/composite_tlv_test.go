@@ -18,43 +18,47 @@ import (
 
 // emvSDL declares DE 55 as a BER-TLV composite with three EMV tags. Anything
 // else arriving inside DE 55 is unknown to the spec and must survive anyway.
+//
+// It carries its whole wire layer under `wire.fields` — there is no upstream base
+// for a spec invented for a test — while `spec.fields` stays semantic. That is
+// the shape a spec takes when it has no base to overlay.
 const emvSDL = `
-meta:
+spec:
+  id: "emv-tlv"
   name: "emv_tlv"
   version: "1.0.0"
-fields:
-  0:
-    label: "MTI"
-    type: "numeric"
-    length: 4
-    enc: "ascii"
-  1:
-    label: "Bitmap"
-    type: "binary"
-    length: 8
-    enc: "binary"
-  55:
-    label: "ICC Data"
-    type: "lllvar"
-    length: 999
-    enc: "binary"
-    len_enc: "ascii"
-    structure: "tlv"
-    tlv_tag_encoding: "hex"
-    tlv_len_encoding: "binary"
-    subfields:
-      "9F02":
-        label: "Amount, Authorized"
-        type: "binary"
-        enc: "binary"
-      "5F2A":
-        label: "Transaction Currency Code"
-        type: "binary"
-        enc: "binary"
-      "9F36":
-        label: "Application Transaction Counter"
-        type: "binary"
-        enc: "binary"
+  wire:
+    format: moov
+    fields:
+      0: {description: MTI, type: String, length: 4, enc: ASCII, prefix: ASCII.Fixed}
+      1: {description: Bitmap, type: Bitmap, length: 8, enc: Binary, prefix: Binary.Fixed}
+      55:
+        description: ICC Data
+        type: Composite
+        length: 999
+        prefix: ASCII.LLL
+        tag:
+          enc: BerTLVTag
+          sort: StringsByHex
+          skipUnknownTLVTags: true
+          storeUnknownTLVTags: true
+          prefUnknownTLV: BerTLV
+        subfields:
+          "9F02": {description: "Amount, Authorized", type: Binary, enc: Binary, prefix: BerTLV}
+          "5F2A": {description: "Transaction Currency Code", type: Binary, enc: Binary, prefix: BerTLV}
+          "9F36": {description: "Application Transaction Counter", type: Binary, enc: Binary, prefix: BerTLV}
+  fields:
+    0: {name: MTI}
+    1: {name: Bitmap}
+    55:
+      name: "ICC Data"
+      alias: icc_data
+      subfields:
+        layout: tlv
+        parts:
+        - {tag: "9F02", name: "Amount, Authorized"}
+        - {tag: "5F2A", name: "Transaction Currency Code"}
+        - {tag: "9F36", name: "Application Transaction Counter"}
 `
 
 func loadEMVSpec(t *testing.T) *iso8583.MessageSpec {

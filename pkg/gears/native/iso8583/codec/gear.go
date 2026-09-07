@@ -7,6 +7,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -20,6 +22,7 @@ import (
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/jaab-tech/fluxrig/pkg/gears/native/iso8583/codec/sdl"
 	"github.com/jaab-tech/fluxrig/pkg/logger"
+	"github.com/jaab-tech/fluxrig/pkg/manager"
 	"github.com/jaab-tech/fluxrig/pkg/sdk"
 )
 
@@ -29,7 +32,22 @@ type Config struct {
 	SpecPath  string `json:"spec_path"`
 	Direction string `json:"direction"`
 	OnError   string `json:"on_error"`
+	// Validation decides what the spec's semantic rules do to traffic:
+	// "off" (default), "warn" or "enforce". See validation constants.
+	Validation string `json:"validation"`
 }
+
+// What the spec's semantic rules do to traffic.
+//
+// The default is off, and deliberately: a message accepted yesterday must not be
+// rejected today because the code was upgraded, and warning on every message is
+// a cost an operator did not ask for. "warn" is how you find out whether your
+// spec matches your traffic; "enforce" is the decision you make afterwards.
+const (
+	ValidationOff     = "off"
+	ValidationWarn    = "warn"
+	ValidationEnforce = "enforce"
+)
 
 // Gear implements the NativeGear interface for the ISO8583 Codec.
 type Gear struct {
@@ -42,12 +60,18 @@ type Gear struct {
 	direction string // "auto", "encode", "decode"
 	onError   string // "drop", "reject", "kill"
 
+	// validation is off, warn or enforce; validator is nil when off, so the
+	// hot path costs a nil check rather than a decision.
+	validation string
+	validator  *sdl.Validator
+
 	// Telemetry
 	meter       metric.Meter
 	msgTotal    metric.Int64Counter
 	latency     metric.Float64Histogram
 	fieldsCount metric.Int64Histogram
 	errTotal    metric.Int64Counter
+	violations  metric.Int64Counter
 }
 
 // Init loads configuration and prepares the gear.
@@ -67,7 +91,7 @@ func (g *Gear) Init(ctx sdk.GearContext) error {
 		return fmt.Errorf("missing 'spec_path' in configuration")
 	}
 
-	moovSpec, meta, err := sdl.LoadSpec(specPath)
+	moovSpec, meta, specContent, err := loadConfiguredSpec(ctx, specPath)
 	if err != nil {
 		return fmt.Errorf("failed to load SDL spec from %s: %w", specPath, err)
 	}
@@ -85,17 +109,45 @@ func (g *Gear) Init(ctx sdk.GearContext) error {
 		g.onError = "drop"
 	}
 
+	g.validation, _ = config["validation"].(string)
+	if g.validation == "" {
+		g.validation = ValidationOff
+	}
+	switch g.validation {
+	case ValidationOff:
+	case ValidationWarn, ValidationEnforce:
+		// Compiled once, at boot. A spec whose rules cannot compile must fail
+		// here and not per transaction: a Rack that started has already told the
+		// Mixer it is serving this protocol.
+		spec, errS := sdl.ParseSemantic(specContent)
+		if errS != nil {
+			return fmt.Errorf("validation is %q but the spec cannot be read for it: %w", g.validation, errS)
+		}
+		v, errV := sdl.NewValidator(spec)
+		if errV != nil {
+			return fmt.Errorf("validation is %q but the spec's rules do not compile: %w", g.validation, errV)
+		}
+		g.validator = v
+	default:
+		return fmt.Errorf("unknown validation %q; use %q, %q or %q",
+			g.validation, ValidationOff, ValidationWarn, ValidationEnforce)
+	}
+
 	// 3. Telemetry
 	g.meter = otel.GetMeterProvider().Meter("fluxrig/gears/codec_iso8583")
 	g.msgTotal, _ = g.meter.Int64Counter("flux.gear.messages_in", metric.WithDescription("Total messages processed by gear"))
 	g.latency, _ = g.meter.Float64Histogram("flux.gear.processing_time_ms", metric.WithDescription("Gear processing latency"), metric.WithUnit("ms"))
 	g.fieldsCount, _ = g.meter.Int64Histogram("flux.codec.iso8583.fields_count", metric.WithDescription("Number of fields processed per message"))
 	g.errTotal, _ = g.meter.Int64Counter("flux.gear.errors", metric.WithDescription("Total gear errors"))
+	g.violations, _ = g.meter.Int64Counter("flux.iso8583.violations",
+		metric.WithDescription("Semantic rules broken by messages, by severity and kind"))
 
 	g.logger.Info("Initialized ISO8583 Codec",
 		"spec", specPath,
 		"hash", meta.SpecHash,
+		"spec_version", meta.SpecVersion,
 		"direction", g.direction,
+		"validation", g.validation,
 	)
 
 	return nil
@@ -136,15 +188,18 @@ func (g *Gear) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.Flux
 		mti, fields, err = g.encode(msg)
 	}
 
+	// The spec's own rules, applied to the message the codec just made sense of.
+	// Only after a successful decode or encode: there is nothing to judge about
+	// bytes that did not parse, and the parse error is the more useful one.
+	if err == nil && g.validator != nil {
+		err = g.applyRules(ctx, msg, mti, dir, gearAttrsFor(g.name, dir))
+	}
+
 	duration := time.Since(start)
 
 	// 2. Telemetry
 	status := "ok"
-	gearAttrs := []attribute.KeyValue{
-		attribute.String("gear_type", "iso8583.codec"),
-		attribute.String("gear_name", g.name),
-		attribute.String("direction", dir),
-	}
+	gearAttrs := gearAttrsFor(g.name, dir)
 
 	if err != nil {
 		g.errTotal.Add(ctx, 1, metric.WithAttributes(append(gearAttrs,
@@ -155,6 +210,7 @@ func (g *Gear) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.Flux
 			"direction", dir,
 			"error", err,
 			"spec_hash", g.meta.SpecHash,
+			"spec_version", g.meta.SpecVersion,
 		)
 
 		if g.onError == "drop" {
@@ -174,6 +230,12 @@ func (g *Gear) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.Flux
 
 	// Persist metadata
 	msg.Metadata["codec.spec_hash"] = g.meta.SpecHash
+	// The hash proves which bytes; the id and version state which contract. A
+	// trace carrying only the hash tells whoever reads it nothing they can act
+	// on -- they cannot tell a comment change from a rule change, and they
+	// cannot name the spec to whoever owns it.
+	msg.Metadata["codec.spec_id"] = g.meta.SpecID
+	msg.Metadata["codec.spec_version"] = g.meta.SpecVersion
 	msg.Metadata["codec.protocol"] = g.meta.Protocol
 	if mti != "" {
 		msg.Metadata["iso8583.mti"] = mti
@@ -198,6 +260,7 @@ func (g *Gear) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.Flux
 		"fields", fields,
 		"duration_us", duration.Microseconds(),
 		"spec_hash", g.meta.SpecHash,
+		"spec_version", g.meta.SpecVersion,
 	)
 
 	// TRACE: Per-field dump
@@ -442,6 +505,7 @@ func (g *Gear) traceFields(ctx context.Context, dir, mti string, msg *fluxmsg.Fl
 		"direction", dir,
 		"mti", mti,
 		"spec_hash", g.meta.SpecHash,
+		"spec_version", g.meta.SpecVersion,
 		"field_count", len(fields),
 		"fields", strings.Join(fields, " | "),
 	)
@@ -464,4 +528,146 @@ func (g *Gear) Drain(ctx context.Context) error {
 func (g *Gear) Stop() error {
 	g.logger.Info("Stopping ISO8583 Codec Gear")
 	return nil
+}
+
+// isSpecURN reports whether a spec reference names a store artefact rather than
+// a file. The store's vocabulary is `name:tag` or a bare content hash, and
+// neither can be confused with a path: a path to a spec has a separator or an
+// extension and no colon.
+func isSpecURN(ref string) bool {
+	if strings.ContainsAny(ref, `/\`) || strings.HasSuffix(ref, ".yaml") || strings.HasSuffix(ref, ".yml") {
+		return false
+	}
+	return strings.Contains(ref, ":") || isHex(ref)
+}
+
+func isHex(s string) bool {
+	if len(s) < 32 {
+		return false
+	}
+	for _, r := range s {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
+// loadConfiguredSpec compiles the spec a scenario named. A path is read
+// directly: reaching into the gear context for a store the reference does not
+// need would make a plain file spec depend on plumbing it never uses.
+// It returns the document as well as the compiled form. Anything built from the
+// spec's semantic half -- the validator, and the generator after it -- needs the
+// document, and a spec resolved from the store has no path to read it back from.
+func loadConfiguredSpec(ctx sdk.GearContext, ref string) (*iso8583.MessageSpec, *sdl.FieldMeta, []byte, error) {
+	// A path is read without touching the gear context at all. Reaching into it
+	// for a store the reference does not need would make a plain file spec
+	// depend on plumbing it never uses -- which it briefly did, and every test
+	// with a context that has no store crashed.
+	if !isSpecURN(ref) {
+		return readSpecFile(ref)
+	}
+	return resolveSpec(ctx.Context(), ctx.Manager(), ref)
+}
+
+// readSpecFile loads a spec from disk, returning the document alongside the
+// compiled form.
+func readSpecFile(ref string) (*iso8583.MessageSpec, *sdl.FieldMeta, []byte, error) {
+	content, err := os.ReadFile(filepath.Clean(ref))
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to read spec file: %w", err)
+	}
+	moovSpec, meta, err := sdl.LoadSpecContent(content, filepath.Dir(ref))
+	return moovSpec, meta, content, err
+}
+
+// resolveSpec turns a scenario's spec reference into a compiled spec. A URN is
+// resolved through the content-addressed store, which is what makes a spec a
+// deployed artefact rather than a file the Rack was assumed to already hold: two
+// Racks given the same reference compile the same bytes, and the store says so.
+//
+// A path still works, because a spec being developed is a file on disk and
+// iterating on it should not require an import.
+func resolveSpec(ctx context.Context, mgr manager.Manager, ref string) (*iso8583.MessageSpec, *sdl.FieldMeta, []byte, error) {
+	if !isSpecURN(ref) {
+		return readSpecFile(ref)
+	}
+	if mgr == nil {
+		return nil, nil, nil, fmt.Errorf("spec %q names a store artefact, but this gear has no store to resolve it against", ref)
+	}
+	content, err := mgr.Load(ctx, ref)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("resolve %q from the store: %w", ref, err)
+	}
+	moovSpec, meta, err := sdl.LoadSpecContent(content, "")
+	return moovSpec, meta, content, err
+}
+
+// gearAttrsFor is the attribute set every measurement from this gear carries.
+func gearAttrsFor(name, dir string) []attribute.KeyValue {
+	return []attribute.KeyValue{
+		attribute.String("gear_type", "iso8583.codec"),
+		attribute.String("gear_name", name),
+		attribute.String("direction", dir),
+	}
+}
+
+// applyRules answers the message against the spec's semantic rules.
+//
+// Warnings are recorded and the message goes on; that is what makes a rule
+// deployable to a live fleet before it is enforced on one. A rejection returns
+// an error, so it takes the same path as a decode failure and honours on_error
+// -- an operator who chose to drop bad messages does not get a different answer
+// because this one was well formed and wrong rather than malformed.
+func (g *Gear) applyRules(ctx context.Context, msg *fluxmsg.FluxMsg, mti, dir string, gearAttrs []attribute.KeyValue) error {
+	violations := g.validator.Validate(subject{mti: mti, msg: msg})
+	if len(violations) == 0 {
+		return nil
+	}
+
+	enforcing := g.validation == ValidationEnforce
+	for _, v := range violations {
+		severity := v.Severity
+		if !enforcing {
+			// In warn mode nothing rejects, and the record says so rather than
+			// reporting a rejection that did not happen.
+			severity = sdl.SeverityWarn
+		}
+		g.violations.Add(ctx, 1, metric.WithAttributes(append(gearAttrs,
+			attribute.String("severity", severity),
+			attribute.String("kind", v.Kind),
+			attribute.String("mti", mti),
+		)...))
+		g.logger.Warn("Message breaks a spec rule",
+			"flux_id", fmt.Sprintf("0x%x", msg.FluxID),
+			"direction", dir,
+			"mti", mti,
+			"severity", severity,
+			"kind", v.Kind,
+			"rule", v.String(),
+			"spec_id", g.meta.SpecID,
+			"spec_version", g.meta.SpecVersion,
+		)
+	}
+
+	// What was found travels with the message, so a downstream gear can route on
+	// it and an operator reading a trace sees it without the logs.
+	msg.Metadata["codec.violations"] = fmt.Sprint(len(violations))
+
+	if enforcing && sdl.Rejects(violations) {
+		return fmt.Errorf("message does not satisfy spec %s %s: %s",
+			g.meta.SpecID, g.meta.SpecVersion, firstRejection(violations))
+	}
+	return nil
+}
+
+// firstRejection names one violation for the error. All of them are logged; an
+// error string that carried a dozen would be unreadable where it surfaces.
+func firstRejection(vs []sdl.Violation) string {
+	for _, v := range vs {
+		if v.Severity == sdl.SeverityReject {
+			return v.String()
+		}
+	}
+	return vs[0].String()
 }

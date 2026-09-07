@@ -437,3 +437,36 @@ func TestMaskValue(t *testing.T) {
 	assert.Equal(t, "**********", maskValue("1234567890"))
 	assert.Equal(t, "411111******1111", maskValue("4111111111111111"))
 }
+
+// A trace carrying only the hash tells whoever reads it nothing they can act
+// on: they cannot tell a comment change from a rule change, and they cannot
+// name the spec to whoever owns it. The contract travels with the bytes.
+func TestMetadata_MessageCarriesTheContractNotOnlyTheBytes(t *testing.T) {
+	g := initGear(t, "generic_ascii.yaml")
+
+	moovMsg := iso8583.NewMessage(g.moovSpec)
+	_ = moovMsg.Field(0, "0200")
+	packed, _ := moovMsg.Pack()
+
+	msg := fluxmsg.New()
+	msg.RawPayload = packed
+
+	res, err := g.Process(context.Background(), msg)
+	require.NoError(t, err)
+
+	assert.Equal(t, "generic-ascii", res.Metadata["codec.spec_id"])
+	assert.Equal(t, "1.0.0", res.Metadata["codec.spec_version"])
+	// Still there, and still not the version.
+	assert.Equal(t, g.meta.SpecHash, res.Metadata["codec.spec_hash"])
+	assert.NotEqual(t, res.Metadata["codec.spec_version"], res.Metadata["codec.spec_hash"])
+}
+
+// Two specs at the same version are the ordinary case -- a suite ships several
+// at 1.0.0 -- so the identity is what tells a trace which one ran.
+func TestMetadata_IdentityDistinguishesSpecsAtTheSameVersion(t *testing.T) {
+	g1 := initGear(t, "generic_ascii.yaml")
+	g2 := initGear(t, "minimal.yaml")
+
+	require.Equal(t, g1.meta.SpecVersion, g2.meta.SpecVersion, "the case this test exists for is gone")
+	assert.NotEqual(t, g1.meta.SpecID, g2.meta.SpecID)
+}

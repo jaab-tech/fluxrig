@@ -1,7 +1,9 @@
 import os
 
 def main():
-    pkg_dir = "/Users/andresa/git/fluxrig/pkg"
+    # Relative to this script, so it runs wherever the repository is checked
+    # out rather than only where it was written.
+    pkg_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "pkg")
     for root, dirs, files in os.walk(pkg_dir):
         # check if there are .go files
         if any(f.endswith(".go") for f in files):

@@ -6,48 +6,84 @@
 # MTI + primary bitmap + fields 7, 11, 70, all ASCII, numeric fields left-
 # padded with '0'. Response-side fields 39 (response code) and 41 (terminal id)
 # are added so the processor simulator can author a reply.
-meta:
-  name: "payment_switch"
-  version: "1.0.0"
 spec:
-fields:
-  0:
-    label: "MTI"
-    type: "numeric"
-    length: 4
-    enc: "ascii"
-  1:
-    label: "Bitmap"
-    type: "binary"
-    length: 8
-    enc: "binary"
-  7:
-    label: "Transmission Date & Time"
-    type: "numeric"
-    length: 10
-    alias: "trans_datetime"
-    enc: "ascii"
-  11:
-    label: "STAN"
-    type: "numeric"
-    length: 6
-    alias: "stan"
-    enc: "ascii"
-  39:
-    label: "Response Code"
-    type: "alpha"
-    length: 2
-    alias: "response_code"
-    enc: "ascii"
-  41:
-    label: "Terminal ID"
-    type: "alpha"
-    length: 8
-    alias: "terminal_id"
-    enc: "ascii"
-  70:
-    label: "Network Management Information Code"
-    type: "numeric"
-    length: 3
-    alias: "network_code"
-    enc: "ascii"
+  id: payment-switch
+  name: payment_switch
+  version: 1.0.0
+  wire:
+    format: moov
+    fields:
+      0:
+        type: String
+        length: 4
+        enc: ASCII
+        prefix: ASCII.Fixed
+        padding:
+          pad: "0"
+          type: Left
+        description: MTI
+      1:
+        type: Bitmap
+        length: 8
+        enc: Binary
+        prefix: Binary.Fixed
+        description: Bitmap
+      7:
+        type: String
+        length: 10
+        enc: ASCII
+        prefix: ASCII.Fixed
+        padding:
+          pad: "0"
+          type: Left
+        description: Transmission Date & Time
+      11:
+        type: String
+        length: 6
+        enc: ASCII
+        prefix: ASCII.Fixed
+        padding:
+          pad: "0"
+          type: Left
+        description: STAN
+      39:
+        type: String
+        length: 2
+        enc: ASCII
+        prefix: ASCII.Fixed
+        description: Response Code
+      41:
+        type: String
+        length: 8
+        enc: ASCII
+        prefix: ASCII.Fixed
+        description: Terminal ID
+      70:
+        type: String
+        length: 3
+        enc: ASCII
+        prefix: ASCII.Fixed
+        padding:
+          pad: "0"
+          type: Left
+        description: Network Management Information Code
+  fields:
+    0:
+      name: MTI
+    1:
+      name: Bitmap
+    7:
+      name: Transmission Date & Time
+      alias: trans_datetime
+    11:
+      name: STAN
+      alias: stan
+    39:
+      name: Response Code
+      alias: response_code
+    41:
+      name: Terminal ID
+      alias: terminal_id
+    70:
+      name: Network Management Information Code
+      alias: network_code

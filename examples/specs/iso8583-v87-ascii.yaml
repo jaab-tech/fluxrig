@@ -1,0 +1,838 @@
+# yaml-language-server: $schema=./spec.fluxrig.schema.json
+# fluxRig SDL: ISO 8583:1987 (ASCII) — reference example
+#
+# This file is the canonical example of a fluxrig protocol spec. It demonstrates
+# the two-layer design and is the fixture the spec-conformance and simulation
+# Robot Framework suites validate against.
+#
+#   Wire layer (parsing): NOT restated here. `spec.wire` names Moov's canonical
+#     spec87ascii as the base and declares this dialect's differences as an
+#     differences, so the base cannot drift from upstream and the delta is reviewable
+#     in one place. See the block below for provenance and licence.
+#
+#   Semantic core (open, portable): `messages`, `enums`, `checks`, plus per-field
+#     `alias`, `description`, `scope`, `messages`, `validValues`/`values_ref`,
+#     `format`, `sensitivity`, `subfields`. Validates against
+#     spec.core.schema.json on its own.
+#
+#   fluxrig extensions (`x-fluxrig-*`): behavioural sections that drive fluxrig
+#     engines, namespaced so this document stays a valid core spec for other
+#     tooling. Currently `x-fluxrig-simulation` and `x-fluxrig-observability`.
+#     See ADR 0049 for the open/closed boundary.
+#
+# Conventions:
+#   - `scope` defaults to `public`. Mark `private` for proprietary extensions that
+#     must be excluded from the public documentation output.
+#   - `validValues` is a map of code -> { name, description? }. Reuse shared sets
+#     with `values_ref: <enum name>`. The special `values_ref: "@messages"` means
+#     the valid values are the keys of the message catalog (used by DE 0, the MTI).
+#   - `spec.wire` is the only place wire attributes may be set. It takes a
+#     `source` — a Moov base (`moov:<name>`) or a wire document beside the spec —
+#     and `fields`, merged over whatever the source produced. Either alone is
+#     valid: a spec with no upstream base carries its whole wire layer in
+#     `fields`. A field entry under `spec.fields` carries semantics only, and the
+#     loader rejects a wire key there, so the two layers cannot fuse by accident.
+#   - `subfields` is split like everything else. The wire layer frames the parts —
+#     `from`/`to` for `positional` (1-based, inclusive), `tag` for `tlv`, plus
+#     `repeat` and `unknown_tags` — and the field says what they mean. Positional
+#     parts bind by order, TLV parts by tag. All three layouts compile to Moov's
+#     native Composite; for `tlv`, `unknown_tags: preserve` round-trips tags not
+#     declared here (no silent drop, no hard fail).
+#   - `messages` on a field is its per-message matrix; see section 2. `usage`
+#     states what the field is once an entry matches, so there is no
+#     `conditional`: the entry's `when` is the condition.
+#   - `when` is a minimal expression over the message: `field(N)`, `present(N)`,
+#     `mti`, string literals, `==` `!=` `&&` `||`, and parentheses. Comparisons on
+#     fields with a `format` are typed (dates compare chronologically, amounts in
+#     minor units).
+#   - `format` declares a field's semantic kind: pan (Luhn + default masking),
+#     amount (+ currency_field binding), date/time (+ layout, tz).
+#   - `sensitivity` is the PCI-aligned data classification (pan | chd | sad |
+#     pii | none): log_mask defaults from it (pan/sad -> masked), SAD is never
+#     persisted post-authorization, and the scenario compliance lint uses it
+#     (e.g. a SAD field mapped into a file sink is rejected at apply time).
+#     `scope` is documentation visibility; `sensitivity` is data handling —
+#     independent axes. `crypto.role` (pin_block, mac) marks fields for future
+#     HSM / MAC-verification gears.
+#   - enum values may carry `category` (bounded classification, e.g. approved /
+#     decline_soft), usable as a telemetry dimension and by simulator mixes.
+#   - `validation_policy.unlisted` fixes what an unnamed field means; per-MTI
+#     `checks` are named cross-field assertions; response rules take
+#     `response_value: echo|new|modified` (see section 2).
+#
+# Sourcing: all definitions are drawn from public, industry-standard references
+# (the ISO 8583:1987 data-element dictionary, ISO 4217 currency codes, and widely
+# published response / POS-entry-mode code lists). No proprietary dialect data.
+
+spec:
+  id: "iso8583-v87-ascii"
+  name: "ISO 8583:1987 (ASCII)"
+  version: "2.2.0"
+  encoding: "ascii"
+  overview: |-
+    An ISO 8583 message is a message type indicator, a bitmap, and the data
+    elements the bitmap says are present.
+
+    The message type indicator is four digits and each one means something. The
+    first is the version of the standard; the second is the class of business —
+    authorization, financial, reversal, network management; the third is the
+    function, which is what separates a request from the response that answers it;
+    and the fourth is who originated it. That is why 0100 and 0110 are a pair: same
+    version, same class, one asks and one answers.
+
+    The bitmap says which data elements the message carries. Each bit stands for one
+    element, so a message contains only what it needs and a reader knows what to
+    expect before parsing any of it. Elements are numbered, not named, and the names
+    in this document are what the standard calls them.
+
+    An element may be a single value or a composite of parts. Positional parts are
+    fixed slices of a fixed-width field, read by their offset. TLV parts each carry
+    their own tag and length, so a message may carry parts this document does not
+    list, and those are preserved rather than dropped.
+
+    Amounts are in the minor unit of their currency, which is the last thing to get
+    wrong: 1000 in a two-decimal currency is 10.00, and in a currency with no minor
+    unit it is 1000. Each amount here names the element that carries its currency.
+
+    What this document cannot tell you is what a scheme requires of you. The
+    standard defines the elements; a scheme decides which ones it wants, what its
+    own codes mean, and what it does with the ones it did not anticipate. Those are
+    in the documents under References, and they are obtained from their publishers.
+  references:
+    - title: "ISO 8583-1:2003, Financial transaction card originated messages"
+      publisher: "International Organization for Standardization"
+      note: "Sold by ISO and by national standards bodies. The 1987 edition this spec follows is withdrawn and obtained the same way."
+      url: "https://www.iso.org/standard/31628.html"
+    - title: "EMV Integrated Circuit Card Specifications, Book 3 — Application Specification"
+      publisher: "EMVCo, LLC"
+      note: "Annex A is the data element dictionary the tags under DE 55 come from. EMVCo publishes the specifications for download at no charge, under its own terms of use; the tag numbers and short names here are the labels, not the dictionary text."
+      url: "https://www.emvco.com/specifications/"
+    - title: "Scheme interface manuals"
+      note: "Each scheme issues its own under its own terms, to its members. They are what decide which elements a scheme requires, what its private codes mean, and how it treats values it did not anticipate — none of which the standard settles."
+    - title: "moov-io/iso8583"
+      publisher: "Moov Financial, Inc."
+      note: "The wire vocabulary this spec consumes rather than restates. Apache 2.0."
+      url: "https://github.com/moov-io/iso8583"
+  wire:
+    source: "moov:spec87ascii"
+    format: moov
+    fields:
+        # Zero-padding on fixed-length numerics. ISO 8583 carries these as
+        # zero-filled digit strings, and the base leaves padding to the caller on
+        # all but a few fields. Declaring it here keeps encoding a spec decision
+        # rather than something each gear remembers.
+      0: {padding: {type: Left, pad: "0"}}
+      7: {padding: {type: Left, pad: "0"}}
+      8: {padding: {type: Left, pad: "0"}}
+      9: {padding: {type: Left, pad: "0"}}
+      10: {padding: {type: Left, pad: "0"}}
+      11: {padding: {type: Left, pad: "0"}}
+      12: {padding: {type: Left, pad: "0"}}
+      13: {padding: {type: Left, pad: "0"}}
+      14: {padding: {type: Left, pad: "0"}}
+      15: {padding: {type: Left, pad: "0"}}
+      16: {padding: {type: Left, pad: "0"}}
+      17: {padding: {type: Left, pad: "0"}}
+      18: {padding: {type: Left, pad: "0"}}
+      19: {padding: {type: Left, pad: "0"}}
+      20: {padding: {type: Left, pad: "0"}}
+      21: {padding: {type: Left, pad: "0"}}
+      22: {padding: {type: Left, pad: "0"}}
+      23: {padding: {type: Left, pad: "0"}}
+      24: {padding: {type: Left, pad: "0"}}
+      25: {padding: {type: Left, pad: "0"}}
+      26: {padding: {type: Left, pad: "0"}}
+      27: {padding: {type: Left, pad: "0"}}
+      28: {padding: {type: Left, pad: "0"}}
+      29: {padding: {type: Left, pad: "0"}}
+      30: {padding: {type: Left, pad: "0"}}
+      31: {padding: {type: Left, pad: "0"}}
+      49: {padding: {type: Left, pad: "0"}}
+      50: {padding: {type: Left, pad: "0"}}
+      51: {padding: {type: Left, pad: "0"}}
+
+        # Structural upgrades. Typed fields and composites the base leaves as
+        # opaque strings, plus the two elements this dialect defines.
+      3:
+        subfields:
+          layout: positional
+          parts:
+            - from: 1
+              to: 2
+            - from: 3
+              to: 4
+            - from: 5
+              to: 6
+      35:
+        type: Track2
+      54:
+        subfields:
+          layout: positional
+          repeat:
+            length: 20
+            max: 6
+          parts:
+            - from: 1
+              to: 2
+            - from: 3
+              to: 4
+            - from: 5
+              to: 7
+            - from: 8
+              to: 8
+            - from: 9
+              to: 20
+      55:
+        type: Composite
+        subfields:
+          layout: tlv
+          unknown_tags: preserve
+          parts:
+            - tag: 9F02
+              type: Numeric
+              length: 6
+            - tag: 5F2A
+              type: Numeric
+              length: 3
+            - tag: 9F36
+              type: Binary
+              length: 2
+      70:
+        type: String
+        length: 3
+        enc: ASCII
+        prefix: ASCII.Fixed
+        padding:
+          type: Left
+          pad: '0'
+      104:
+        type: Composite
+        length: 999
+        enc: ASCII
+        prefix: ASCII.LLL
+        subfields:
+          layout: tlv
+          unknown_tags: preserve
+          parts:
+            - tag: '01'
+              type: String
+              length: 20
+            - tag: 1A
+              type: String
+              length: 99
+
+
+  # --- 0. Message catalog (which MTIs exist, how they pair, how they flow) ------
+  messages:
+    catalog:
+      "0100":
+        name: "Authorization Request"
+        flow: request
+        pairs_with: "0110"
+        response_timeout: 30s
+        meaning: "Request to authorize a transaction without immediate funds movement."
+      "0110":
+        name: "Authorization Response"
+        flow: response
+        pairs_with: "0100"
+        meaning: "Issuer decision for an authorization request."
+      "0200":
+        name: "Financial Request"
+        flow: request
+        pairs_with: "0210"
+        response_timeout: 30s
+        meaning: "Request to authorize and post a financial transaction."
+      "0210":
+        name: "Financial Response"
+        flow: response
+        pairs_with: "0200"
+        meaning: "Issuer decision for a financial request."
+      "0400":
+        name: "Reversal Request"
+        flow: request
+        pairs_with: "0410"
+        meaning: "Request to reverse a prior authorization or financial transaction."
+      "0410":
+        name: "Reversal Response"
+        flow: response
+        pairs_with: "0400"
+        meaning: "Acknowledgement of a reversal request."
+      "0800":
+        name: "Network Management Request"
+        flow: request
+        pairs_with: "0810"
+        response_timeout: 10s
+        class: network       # excluded from business-traffic metrics (default: business)
+        meaning: "Network housekeeping such as echo test or key exchange."
+      "0810":
+        name: "Network Management Response"
+        flow: response
+        pairs_with: "0800"
+        class: network
+        meaning: "Acknowledgement of a network management request."
+    transitions:
+      - from: "0100"
+        to: "0200"
+        trigger: capture
+        meaning: "An approved authorization may be captured by a financial request."
+      - from: "0200"
+        to: "0400"
+        trigger: reversal
+        meaning: "A financial transaction may be reversed by a reversal request."
+    # Match keys pairing a response (or reversal) to its originating request.
+    # Consumed by orphan/timeout telemetry, the simulator, and the Correlator.
+    correlate_on: [stan, txn_datetime, terminal_id]
+  enums:
+    account_type:
+      closed: true
+      values:
+        "00": {name: "Default / unspecified"}
+        "10": {name: "Savings"}
+        "20": {name: "Checking"}
+        "30": {name: "Credit"}
+    processing_txn_type:
+      closed: true
+      values:
+        "00": {name: "Goods and services"}
+        "01": {name: "Cash withdrawal"}
+        "09": {name: "Goods and services with cash back"}
+        "20": {name: "Refund"}
+        "30": {name: "Balance inquiry"}
+    pos_entry_mode:
+      closed: true
+      values:
+        "01": {name: "Manual (key entered)"}
+        "02": {name: "Magnetic stripe"}
+        "05": {name: "Integrated circuit card (chip)"}
+        "07": {name: "Contactless (chip)"}
+        "90": {name: "Magnetic stripe, full track available"}
+        "91": {name: "Contactless (magnetic stripe)"}
+    # `category` is a bounded classification usable as a telemetry dimension
+    # (approval rate, decline-class panels) and by the simulator's mixes.
+    response_code:
+      closed: false
+      values:
+        "00": {name: "Approved", category: approved}
+        "01": {name: "Refer to card issuer", category: referral}
+        "03": {name: "Invalid merchant", category: error}
+        "05": {name: "Do not honor", category: decline_soft}
+        "12": {name: "Invalid transaction", category: error}
+        "13": {name: "Invalid amount", category: error}
+        "14": {name: "Invalid card number", category: error}
+        "30": {name: "Format error", category: error}
+        "41": {name: "Lost card", category: decline_hard}
+        "43": {name: "Stolen card", category: decline_hard}
+        "51": {name: "Insufficient funds", category: decline_soft}
+        "54": {name: "Expired card", category: decline_hard}
+        "55": {name: "Incorrect PIN", category: decline_soft}
+        "57": {name: "Transaction not permitted to cardholder", category: decline_hard}
+        "61": {name: "Exceeds withdrawal amount limit", category: decline_soft}
+        "91": {name: "Issuer or switch inoperative", category: system}
+        "96": {name: "System malfunction", category: system}
+    currency_iso4217:
+      closed: true
+      values:
+        "840": {name: "USD", meaning: "US dollar"}
+        "858": {name: "UYU", meaning: "Uruguayan peso"}
+        "978": {name: "EUR", meaning: "Euro"}
+    network_mgmt_code:
+      closed: false
+      values:
+        "001": {name: "Sign-on"}
+        "002": {name: "Sign-off"}
+        "301": {name: "Echo test"}
+        "801": {name: "Key change"}
+  fields:
+    0:
+      alias: "mti"
+      scope: public
+      meaning: "Identifies the message class, function, and origin. Valid values are the keys of the message catalog above."
+      values_ref: "@messages"
+    1:
+      scope: public
+      meaning: "Indicates which data elements are present in the message."
+    2:
+      messages:
+        - mti: ["0100", "0200"]
+          usage: mandatory
+        - mti: ["0800", "0810"]
+          usage: forbidden
+      alias: "pan"
+      scope: public
+      meaning: "The cardholder account number. Sensitive; subject to masking and tokenization policy."
+      note: "Track 2 carries the account number as well. When both DE 2 and DE 35 are present they must agree; a switch that trusts one and forwards the other has two answers to the same question."
+      log_mask: true
+      format:
+        kind: pan            # implies Luhn validation and default masking
+      sensitivity: pan       # PCI classification: pan | chd | sad | pii | none
+                             # (log_mask defaults to true for pan/sad)
+    3:
+      messages:
+        - mti: ["0100", "0200"]
+          usage: mandatory
+      alias: "proc_code"
+      scope: public
+      meaning: "Describes the transaction type and the accounts affected. Composed of three positional subfields."
+      subfields:
+        layout: positional
+        parts:
+          - name: Transaction type
+            meaning: The kind of financial transaction.
+            values_ref: processing_txn_type
+          - name: Account type, from
+            meaning: Account debited or sourced.
+            values_ref: account_type
+          - name: Account type, to
+            meaning: Account credited or targeted.
+            values_ref: account_type
+    4:
+      name: "Amount, Transaction"
+      messages:
+        - mti: ["0100", "0200"]
+          usage: mandatory
+        - mti: ["0110", "0210"]
+          usage: mandatory
+          response_value: modified
+          note: "Partial approval returns less than the amount asked for, so this is not compared for equality."
+      alias: "txn_amount"
+      scope: public
+      meaning: "Transaction amount in the minor unit of the transaction currency (DE 49)."
+      note: "Minor units, so 1000 is 10.00 in a two-decimal currency — and not every currency has two. JPY has none, so 1000 is 1000; a fixed divisor of 100 is the mistake this field invites."
+      format:
+        kind: amount
+        currency_field: 49   # binds amount to its currency for histograms and docs
+    5:
+      name: "Amount, Settlement"
+      format:
+        kind: amount
+        currency_field: 50
+    6:
+      name: "Amount, Cardholder Billing"
+      format:
+        kind: amount
+        currency_field: 51
+    7:
+      messages:
+        - mti: ["0100", "0200"]
+          usage: mandatory
+        - mti: ["0800", "0810"]
+          usage: mandatory
+      alias: "txn_datetime"
+      scope: public
+      meaning: "Date and time the message entered the network, MMDDhhmmss in UTC."
+      note: "UTC, not local time. DE 12 and DE 13 carry the local time and date, and the two disagree by the acquirer's offset on purpose."
+      format:
+        kind: datetime
+        layout: "MMDDhhmmss"
+        tz: utc
+    8:
+      name: "Amount, Cardholder Billing Fee"
+    9:
+      name: "Conversion Rate, Settlement"
+    10:
+      name: "Conversion Rate, Cardholder Billing"
+    11:
+      name: "Systems Trace Audit Number"
+      messages:
+        - mti: ["0100", "0200"]
+          usage: mandatory
+        - mti: ["0110", "0210"]
+          usage: mandatory
+          response_value: echo
+          note: "STAN echoed unchanged from the request."
+        - mti: ["0400", "0410"]
+          usage: mandatory
+        - mti: ["0800", "0810"]
+          usage: mandatory
+      alias: "stan"
+      scope: public
+      meaning: "Sender-assigned trace number that identifies the transaction within the day."
+      note: "Unique per acquirer per day, not globally, and it wraps at 999999. Correlating on the STAN alone collides across acquirers and again the next day."
+    12:
+      name: "Time, Local Transaction"
+      format:
+        kind: time
+        layout: "hhmmss"
+    13:
+      name: "Date, Local Transaction"
+      format:
+        kind: date
+        layout: "MMDD"
+    14:
+      name: "Date, Expiration"
+      messages:
+        - mti: ["0100", "0200"]
+          usage: mandatory
+          when: "present(35) == false"
+          note: "Expiration date required when Track 2 is absent."
+      scope: public
+      meaning: "Card expiration date, YYMM."
+      format:
+        kind: date
+        layout: "YYMM"       # `when` comparisons on this field are chronological, not numeric
+      sensitivity: chd       # cardholder data (PAN, name, expiry, service code)
+    15:
+      name: "Date, Settlement"
+    16:
+      name: "Date, Conversion"
+    17:
+      name: "Date, Capture"
+    20:
+      name: "PAN Extended, Country Code"
+    22:
+      name: "Point of Service Entry Mode"
+      messages:
+        - mti: ["0100", "0200"]
+          usage: mandatory
+      alias: "pos_entry_mode"
+      scope: public
+      meaning: "How the PAN and PIN were captured at the point of service."
+      values_ref: "pos_entry_mode"
+    23:
+      name: "Application PAN Sequence Number"
+    26:
+      messages:
+        - mti: ["0100", "0200"]
+          usage: optional
+    28:
+      name: "Amount, Transaction Fee"
+    29:
+      name: "Amount, Settlement Fee"
+    30:
+      name: "Amount, Transaction Processing Fee"
+    31:
+      name: "Amount, Settlement Processing Fee"
+    32:
+      name: "Acquiring Institution ID Code"
+    33:
+      name: "Forwarding Institution ID Code"
+    34:
+      name: "Primary Account Number, Extended"
+    35:
+      messages:
+        - mti: ["0100", "0200"]
+          usage: optional
+      alias: "track2"
+      scope: public
+      meaning: "Magnetic stripe track 2. Parsed natively into PAN, expiration, service code, and discretionary data."
+      log_mask: true
+      sensitivity: sad       # full track data: never storable post-authorization
+    36:
+      sensitivity: sad
+    37:
+      messages:
+        - mti: ["0110", "0210"]
+          usage: mandatory
+          response_value: echo
+      alias: "rrn"
+      scope: public
+      meaning: "Reference assigned by the acquirer to retrieve the original transaction."
+    38:
+      messages:
+        - mti: ["0110", "0210"]
+          usage: mandatory
+          when: "field(39) == '00'"
+          response_value: new
+          note: "Authorization code present when approved."
+      alias: "auth_code"
+      scope: public
+      meaning: "Approval code returned by the issuer when a transaction is approved."
+    39:
+      messages:
+        - mti: ["0110", "0210"]
+          usage: mandatory
+          response_value: new
+        - mti: "0410"
+          usage: mandatory
+          note: "Issuer disposition of the reversal, originated here."
+          response_value: new
+        - mti: "0810"
+          usage: mandatory
+          response_value: new
+        - mti: "0400"
+          usage: forbidden
+          note: "A reversal request states what is being reversed, not how it was answered."
+        - mti: "0800"
+          usage: forbidden
+          note: "A network management request carries no disposition."
+      alias: "resp_code"
+      scope: public
+      meaning: "Issuer or switch disposition of the transaction."
+      note: "A code this spec does not list is not necessarily an error: schemes issue their own. Reject on an unrecognised code and the first proprietary decline takes production down."
+      values_ref: "response_code"
+    40:
+      sensitivity: chd
+    41:
+      messages:
+        - mti: ["0100", "0200"]
+          usage: mandatory
+      alias: "terminal_id"
+      scope: public
+      meaning: "Identifier of the terminal at the card acceptor location."
+    42:
+      messages:
+        - mti: ["0100", "0200"]
+          usage: mandatory
+      alias: "merchant_id"
+      scope: public
+      meaning: "Identifier of the merchant (card acceptor)."
+    44:
+      name: "Additional Response Data"
+      messages:
+        - mti: ["0110", "0210"]
+          usage: optional
+          response_value: new
+    45:
+      log_mask: true
+      sensitivity: sad
+    46:
+      name: "Additional Data - ISO"
+    47:
+      name: "Additional Data - National"
+    48:
+      name: "Additional Data - Private"
+    49:
+      name: "Currency Code, Transaction"
+      messages:
+        - mti: ["0100", "0200"]
+          usage: mandatory
+      alias: "txn_currency"
+      scope: public
+      meaning: "ISO 4217 numeric currency code for DE 4."
+      values_ref: "currency_iso4217"
+    50:
+      name: "Currency Code, Settlement"
+      values_ref: "currency_iso4217"
+    51:
+      name: "Currency Code, Cardholder Billing"
+      values_ref: "currency_iso4217"
+    52:
+      name: "Personal Identification Number Data"
+      messages:
+        - mti: ["0100", "0200"]
+          usage: mandatory
+          when: "field(22) == '01'"
+          note: "PIN block expected for manually entered transactions requiring cardholder verification."
+      scope: private
+      meaning: "Encrypted PIN block. Excluded from public documentation."
+      log_mask: true
+      sensitivity: sad
+      crypto:
+        role: pin_block      # hook for HSM / PIN-translation gears (roadmap)
+    53:
+      scope: private
+    54:
+      scope: public
+      meaning: "Up to six repeating 20-character amount groups (e.g. cashback, tip, balances)."
+      subfields:
+        layout: positional
+        parts:
+          - name: Account type
+            values_ref: account_type
+          - name: Amount type
+          - name: Currency code
+            values_ref: currency_iso4217
+          - name: Sign
+            validValues:
+              closed: true
+              values:
+                C:
+                  name: Credit
+                D:
+                  name: Debit
+          - name: Amount
+    55:
+      name: "ICC Data"
+      messages:
+        - mti: ["0100", "0200"]
+          usage: mandatory
+          when: "field(22) == '05' || field(22) == '07'"
+          note: "Chip read; the cryptogram travels here."
+        - mti: ["0100", "0200"]
+          usage: forbidden
+          when: "field(22) == '02' || field(22) == '90'"
+          note: "Magnetic stripe read; there is no chip data to carry."
+        - mti: ["0100", "0200"]
+          usage: optional
+          note: "Any other entry mode: not expected, not forbidden."
+      alias: "icc_data"
+      scope: public
+      meaning: "EMV chip data as BER-TLV. Tags not declared here are preserved on decode and re-emitted on encode."
+      subfields:
+        layout: tlv
+        parts:
+          - tag: 9F02
+            name: Amount, Authorized
+          - tag: 5F2A
+            name: Transaction Currency Code
+            values_ref: currency_iso4217
+          - tag: 9F36
+            name: Application Transaction Counter
+      note: "The tags named here are the three this dialect declares, not the ones a chip sends: real chip data carries far more. Their numbers and names come from EMV Book 3, Annex A — see References. Anything undeclared is preserved on the way through, which is what a switch forwarding to a scheme depends on."
+    61:
+      scope: private
+    62:
+      scope: private
+    63:
+      scope: private
+    64:
+      scope: private
+      meaning: "Message authentication code. Excluded from public documentation."
+      crypto:
+        role: mac            # hook for a MAC-verification gear (roadmap)
+    90:
+      messages:
+        - mti: ["0400", "0410"]
+          usage: mandatory
+      scope: public
+      meaning: "Key fields of the original transaction, used to match a reversal to its financial request."
+    70:
+      name: "Network Management Information Code"
+      messages:
+        - mti: ["0800", "0810"]
+          usage: mandatory
+      alias: "net_mgmt_code"
+      scope: public
+      meaning: "Identifies the network management function for 0800/0810 messages."
+      values_ref: "network_mgmt_code"
+
+    # Custom extension: proprietary, excluded from public documentation.
+    104:
+      name: "Transaction Specific Data"
+      alias: "txn_specific_data"
+      scope: private
+      meaning: "Proprietary transaction data carried as TLV. Example of a private extension."
+
+      subfields:
+        layout: tlv
+        parts:
+          - tag: '01'
+            name: Customer Data
+          - tag: 1A
+            name: Fleet Data
+  # --- 3. Validation (cross-field only; per-field rules live on the fields) -----
+  #   Presence and value domain per message sit on the field itself, under `mti:`
+  #   in section 2. What remains here is what no single field can state: an
+  #   assertion across several. `assert` is a `when` expression; severity `warn`
+  #   reports without rejecting (monitor-only rollout).
+  validation_policy:
+    unlisted: optional     # fields not named in a group are permitted (permissive
+                           # switch posture); strict conformance dialects set: forbidden
+  checks:
+    - mti: ["0100", "0200"]
+      name: "Credential present"
+      assert: "present(2) || present(35)"
+      severity: reject
+      note: "At least one credential: PAN or Track 2."
+    - mti: ["0100", "0200"]
+      name: "Amount is positive"
+      assert: "field(4) > 0"
+      severity: warn
+  # --- 4. Simulation (defaults + per-MTI overrides, macro-driven) ---------------
+  # Generators derive the field set from the fields' `messages` matrix (mandatory
+  # always; entries with `when` by evaluating it on the partially built message),
+  # then fill values: template override > defaults macro > enum-aware synthesis >
+  # filler.
+  #
+  # A value is a literal, a macro, or a choice.
+  #
+  #   Macros are part of the spec contract and every one is deterministic under
+  #   the run's seed, so a failing suite replays exactly: `$PAN(prefix,len)`
+  #   (Luhn-valid), `$STAN`, `$RRN`, `$SEQ(start)` (monotonic within the run),
+  #   `$RAND(min,max)`, `$UUID`, `$NOW` (rendered in the target field's declared
+  #   `format`, which is why there is no date-macro zoo), `$ENUM` (a valid value
+  #   from the field's own set) and `$INVALID` (deliberately outside it, for
+  #   generating traffic that should be rejected).
+  #
+  #   A choice is either an inline list or a draw from a value set this spec
+  #   already declares — the second so the codes are not restated here, where
+  #   they would drift from the set. Weights are relative rather than
+  #   percentages: adding a case does not mean rewriting the others, and a set
+  #   drawn from with `weights` leaves everything unlisted evenly likely.
+  #
+  # The loader checks these like every other reference: a draw from a set nobody
+  # declared, a weight on a code the set does not contain, or a mix generating a
+  # message outside the catalog all fail the spec at load.
+  x-fluxrig-simulation:
+    mix:                       # traffic profile for generator gears/tools
+      - use: "0100"
+        weight: 85
+      - use: "0200"
+        weight: 10
+      - use: "0800"
+        weight: 5
+
+    defaults:
+      7: "$NOW"               # rendered in each field's declared format
+      11: "$SEQ(1)"           # monotonic within the run, so a trace number is never reused
+      12: "$NOW"
+      13: "$NOW"
+      37: "$RRN"
+    "0100":
+      0: "0100"
+      2:
+        choose:
+          - {value: "$PAN(4111, 16)", weight: 70, note: "Visa test range"}
+          - {value: "$PAN(5500, 16)", weight: 25, note: "Mastercard test range"}
+          - {value: "$PAN(340000, 15)", weight: 5, note: "Amex: fifteen digits, and the length is the point"}
+      3:
+        choose:
+          from: processing_txn_type
+      4: "$RAND(100, 5000)"
+      22:
+        choose:
+          from: pos_entry_mode
+          weights: {"05": 60, "07": 25, "90": 15}
+      41: "TERM0001"
+      42: "MERCHANT0000001"
+      49:
+        choose:
+          from: currency_iso4217
+    "0200":
+      0: "0200"
+      2: "$PAN(4111, 16)"
+      3: "000000"
+      4: "$RAND(100, 20000)"
+      22: "$ENUM"
+      41: "TERM0001"
+      42: "MERCHANT0000001"
+      49: "858"
+    "0800":
+      0: "0800"
+      70:
+        choose:
+          from: network_mgmt_code
+          weights: {"301": 90}
+    responder:
+      echo: valid_in_response
+      delay: 50ms            # simulated scheme latency; a rule may set its own delay
+      default:
+        39: "00"
+        38: "$AUTH"
+      rules:
+        - name: "Insufficient funds over limit"
+          when: "field(4) > 1000000"
+          set:
+            39: "51"
+        - name: "Expired card"
+          when: "field(14) < 2501"
+          set:
+            39: "54"
+
+  # --- 5. Observability (spec-driven telemetry) ----------------------------------
+  # `dimensions` lists fields eligible as metric labels. Each entry MUST resolve
+  # to an enum-bounded field or subfield (values_ref/validValues) so the label
+  # space is closed; the loader rejects unbounded fields at load time. Wire
+  # values outside the enum are reported under the reserved label value "_other".
+  # Message-catalog `class` (business/network) partitions traffic metrics, and
+  # `log_mask` governs what may ever appear in logs, traces, and dumps.
+  x-fluxrig-observability:
+    dimensions:
+      - "mti"            # catalog-bounded (DE 0)
+      - "resp_code"      # DE 39, response_code enum
+      - "3.1"            # processing code, transaction-type part
+      - "pos_entry_mode" # DE 22
+    histograms:
+      - field: "txn_amount"
+        by: "txn_currency"
+        unit: minor_units

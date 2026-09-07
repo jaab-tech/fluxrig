@@ -347,6 +347,37 @@ class ISO8583Library:
         logger.info(f"Received {len(reply)} bytes: {reply.hex()}")
         return reply.hex()
 
+    def send_iso_message_expecting_no_reply(self, message_hex, target="localhost:8583",
+                                            header_len=2, wait="3"):
+        """Sends one framed message and asserts that nothing comes back.
+
+        This is the shape of a message a gear discarded: the connection stays
+        open and no reply is framed onto it. Proving a non-event needs a bound,
+        so `wait` is how long silence has to last to count -- configurable,
+        because how long is long enough belongs to the machine running it, not
+        to this file.
+
+        If a reply does arrive it is returned in the failure, since what came
+        back is the useful half of the diagnosis.
+        """
+        payload = bytes.fromhex(message_hex.replace(" ", "").replace("\n", ""))
+        header_len = int(header_len)
+        frame = len(payload).to_bytes(header_len, "big") + payload
+
+        host, _, port = target.rpartition(":")
+        with socket.create_connection((host, int(port)), timeout=float(wait)) as sock:
+            sock.settimeout(float(wait))
+            sock.sendall(frame)
+            try:
+                data = sock.recv(4096)
+            except socket.timeout:
+                return True
+        if not data:
+            # The peer closed without answering, which is also no reply.
+            return True
+        raise AssertionError(
+            "expected no reply within %ss, got %d bytes: %s" % (wait, len(data), data.hex()))
+
     def send_iso_messages_together(self, messages_hex, target="localhost:8583",
                                    header_len=2, timeout=10):
         """Sends several messages on their own connections before reading any reply.

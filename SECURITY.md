@@ -4,10 +4,15 @@
 
 The following versions of fluxrig are currently being supported with security updates:
 
-| Version | Supported          |
-| ------- | ------------------ |
-| v0.5.x  | :white_check_mark: |
-| < v0.5  | :x: Hard-break migration (UUID v7). Please upgrade. |
+| Version | Supported |
+| ------- | --------- |
+| Latest minor release | :white_check_mark: |
+| Anything earlier | :x: Please upgrade. |
+
+fluxrig is pre-1.0 and moves on a single line: fixes land in the next release
+rather than being backported. Naming the supported version as "the latest" is
+deliberate, because a version number written here goes stale the day after it is
+written, and this table had been claiming v0.5.x through five releases.
 
 ## Reporting a Vulnerability
 

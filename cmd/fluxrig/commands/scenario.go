@@ -137,11 +137,8 @@ var scenarioListCmd = &cobra.Command{
 			return err
 		}
 
-		fmt.Println("NAME\tTAG\tHASH")
-		for _, a := range list {
-			fmt.Printf("%s\t%s\t%s\n", a.Name, a.Tag, a.Hash)
-		}
-		return nil
+		asJSON, _ := cmd.Flags().GetBool("json")
+		return printArtifacts(cmd.OutOrStdout(), list, manager.KindScenario, asJSON)
 	},
 }
 
@@ -258,6 +255,7 @@ func init() {
 
 	scenarioCmd.AddCommand(scenarioImportCmd)
 
+	scenarioListCmd.Flags().Bool("json", false, "Machine-readable output")
 	scenarioCmd.AddCommand(scenarioListCmd)
 	scenarioCmd.AddCommand(scenarioExportCmd)
 	scenarioCmd.AddCommand(scenarioDiffCmd)

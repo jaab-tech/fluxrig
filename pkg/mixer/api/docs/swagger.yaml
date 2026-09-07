@@ -52,7 +52,7 @@ definitions:
         example: "45612378"
         type: string
       ip:
-        description: IP address of the rack agent.
+        description: IP address of the Rack.
         example: 192.168.1.50
         type: string
       last_seen:
@@ -68,7 +68,7 @@ definitions:
         example: rack-01
         type: string
       port:
-        description: Port number of the rack agent.
+        description: Port the Rack listens on.
         example: 4222
         type: integer
       stats:
@@ -108,6 +108,50 @@ definitions:
       status:
         description: Status of the import.
         example: imported_and_activated
+        type: string
+    type: object
+  api.SpecSummary:
+    properties:
+      doc:
+        description: Doc is where this version's protocol reference is served.
+        example: /api/v1/specs/iso8583-v87-ascii/v2.2.0/doc
+        type: string
+      hash:
+        example: 1c8831d23bdd8458feafe6a506c5d3730605b78fd22b5d5c7f1c147043ef71af
+        type: string
+      imported_at:
+        description: ImportedAt is absent for anything filed before the store kept
+          dates.
+        example: "2026-09-06T18:47:26Z"
+        type: string
+      latest:
+        description: Latest reports whether a reference without a tag resolves here.
+        example: true
+        type: boolean
+      name:
+        example: iso8583-v87-ascii
+        type: string
+      protocol:
+        description: |-
+          Protocol is what the spec declares it speaks; empty when it declares none
+          and relies on the loader's default.
+        example: iso8583
+        type: string
+      size:
+        description: Size of the stored document in bytes.
+        example: 34441
+        type: integer
+      tag:
+        example: v2.2.0
+        type: string
+      title:
+        description: |-
+          Title is the human name the document declares, which is not the reference
+          it is filed under.
+        example: ISO 8583:1987 (ASCII)
+        type: string
+      urn:
+        example: iso8583-v87-ascii:v2.2.0
         type: string
     type: object
   api.TopologyStatusResponse:
@@ -847,6 +891,123 @@ paths:
       summary: Import Scenario
       tags:
       - scenario
+  /specs:
+    get:
+      description: Every spec in the content-addressed store, by name, version tag
+        and content hash.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/api.SpecSummary'
+            type: array
+        "503":
+          description: Service Unavailable
+          schema:
+            type: string
+      summary: List stored specs
+      tags:
+      - specs
+  /specs/{name}:
+    get:
+      description: Each version the store holds for this spec, newest first — newest
+        meaning the highest version, not the last imported, since a patch to an older
+        branch arrives after a newer release.
+      parameters:
+      - description: Spec name
+        in: path
+        name: name
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/api.SpecSummary'
+            type: array
+        "404":
+          description: Not Found
+          schema:
+            type: string
+      summary: Every version of one spec
+      tags:
+      - specs
+  /specs/{name}/{tag}:
+    get:
+      description: The spec document as imported, byte for byte.
+      parameters:
+      - description: Spec name
+        in: path
+        name: name
+        required: true
+        type: string
+      - description: Version tag, or 'latest'
+        in: path
+        name: tag
+        required: true
+        type: string
+      produces:
+      - text/plain
+      responses:
+        "200":
+          description: the spec document
+          schema:
+            type: string
+        "404":
+          description: Not Found
+          schema:
+            type: string
+      summary: Fetch a stored spec
+      tags:
+      - specs
+  /specs/{name}/{tag}/doc:
+    get:
+      description: 'The messages, what each carries, and what every data element means
+        — derived from the spec on each request. Defaults to the public variant, which
+        omits fields the spec marks `scope: private`.'
+      parameters:
+      - description: Spec name
+        in: path
+        name: name
+        required: true
+        type: string
+      - description: Version tag, or 'latest'
+        in: path
+        name: tag
+        required: true
+        type: string
+      - description: public (default) or complete
+        in: query
+        name: scope
+        type: string
+      - description: html (default) or markdown
+        in: query
+        name: format
+        type: string
+      produces:
+      - text/html
+      responses:
+        "200":
+          description: the rendered reference
+          schema:
+            type: string
+        "400":
+          description: Bad Request
+          schema:
+            type: string
+        "404":
+          description: Not Found
+          schema:
+            type: string
+      summary: Render a spec's protocol reference
+      tags:
+      - specs
   /telemetry/{type}:
     get:
       description: Query Logs or Metrics from DuckDB
