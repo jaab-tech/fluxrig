@@ -26,7 +26,9 @@ source "${BASE_DIR}/../utils/e2e_utils.sh"
 # Global Variables
 # ==============================================================================
 MIXER_PID=""
+RACK_PID=""
 API_URL="http://127.0.0.1:8090/api/v1"
+ENROLL_TIMEOUT=30
 STORE_DIR=""
 SCENARIO_DIR="${BASE_DIR}/scenarios"
 
@@ -47,6 +49,10 @@ run_fluxrig_scenario() {
 }
 
 cleanup_mixer() {
+    if [[ -n "$RACK_PID" ]] && kill -0 "$RACK_PID" 2>/dev/null; then
+        kill "$RACK_PID" 2>/dev/null || true
+        kill -9 "$RACK_PID" 2>/dev/null || true
+    fi
     if [[ -n "$MIXER_PID" ]] && kill -0 "$MIXER_PID" 2>/dev/null; then
         kill "$MIXER_PID" 2>/dev/null || true
         # Wait up to 2s for graceful shutdown, then force-kill
@@ -112,6 +118,43 @@ EOF
 
     wait_for_port 8090 15 || fail "Mixer failed to start"
     log_success "Mixer Started (PID: $MIXER_PID)"
+}
+
+# Start the Rack named in scenario_v1.yaml and wait until the registry lists it as
+# active. The Mixer adopts it on its own (enrollment.auto_adopt).
+start_rack() {
+    log_info "Starting Rack (rack-1)..."
+    mkdir -p "${WORK_DIR}/rack"
+    cd "${WORK_DIR}/rack"
+
+    cat <<EOF > fluxrig.toml
+[store]
+dir = "./data"
+state_file = "state.flux"
+
+[rack]
+name = "rack-1"
+heartbeat_interval = "1s"
+
+[rack.bus]
+url = "nats://localhost:4222"
+EOF
+
+    "${FLUXRIG_BIN}" rack -c fluxrig.toml > rack.stdout 2>&1 &
+    RACK_PID=$!
+    cd "${BASE_DIR}"
+
+    local deadline=$((SECONDS + ENROLL_TIMEOUT))
+    while (( SECONDS < deadline )); do
+        if curl -s --max-time 2 "${API_URL}/racks?status=active" | grep -q "rack-1"; then
+            log_success "Rack rack-1 is active"
+            return 0
+        fi
+        sleep 0.5
+    done
+    log_error "Rack rack-1 did not become active within ${ENROLL_TIMEOUT}s"
+    cat "${WORK_DIR}/rack/rack.stdout"
+    return 1
 }
 
 # ==============================================================================
@@ -208,25 +251,54 @@ test_cli_spec_lifecycle() {
 test_api_scenario_lifecycle() {
     section "API Scenario Lifecycle (Mixer Integration)"
 
-    # 1. Import Scenario via API (using curl for raw control)
-    log_info "Importing Scenario via API..."
-    
+    # 1. A scenario can be filed before its Racks enroll, but not activated: import
+    # is permissive and activation checks that every deploy target is an active Rack.
+    log_info "Importing and activating a scenario whose Rack has not enrolled..."
+
+    HTTP_CODE=$(curl -s -o "${OUTPUT}" -w "%{http_code}" -X POST "${API_URL}/scenario/import?activate=true" \
+        -H "Content-Type: application/x-yaml" \
+        --data-binary @"${SCENARIO_DIR}/scenario_v1.yaml")
+
+    if [[ "$HTTP_CODE" == "409" ]] && grep -q "deploys to unknown or inactive target 'rack-1'" "${OUTPUT}"; then
+        log_success "Activation refused while rack-1 is not enrolled (HTTP 409)"
+    else
+        log_error "Expected HTTP 409 naming the missing Rack, got HTTP ${HTTP_CODE}"
+        cat "${OUTPUT}"
+        return 1
+    fi
+
+    if [[ -f "${STORE_DIR}/scenarios/active" ]]; then
+        log_error "A refused activation left an active scenario behind"
+        return 1
+    fi
+    if [[ -f "${STORE_DIR}/scenarios/payment-flow.yaml" ]]; then
+        log_success "Scenario stayed filed, and none is active"
+    else
+        log_error "The scenario was not filed by the import"
+        ls -R "${STORE_DIR}"
+        return 1
+    fi
+
+    # 2. Enroll the Rack, then activate the same scenario.
+    start_rack || return 1
+
+    log_info "Importing and activating it again..."
     HTTP_CODE=$(curl -s -o "${OUTPUT}" -w "%{http_code}" -X POST "${API_URL}/scenario/import?activate=true" \
         -H "Content-Type: application/x-yaml" \
         --data-binary @"${SCENARIO_DIR}/scenario_v1.yaml")
 
     if [[ "$HTTP_CODE" == "200" ]] || [[ "$HTTP_CODE" == "201" ]]; then
-        log_success "Scenario Imported (HTTP $HTTP_CODE)"
+        log_success "Scenario Imported and Activated (HTTP $HTTP_CODE)"
     else
         log_error "Scenario Import Failed (HTTP $HTTP_CODE)"
         cat "${OUTPUT}"
         return 1
     fi
 
-    # 2. Verify Topology Status
+    # 3. Verify Topology Status
     log_info "Verifying Topology Status..."
     STATUS_JSON=$(curl -s "${API_URL}/topology/status")
-    
+
     # We expect ActiveVer to be non-empty/non-unknown
     if [[ "$STATUS_JSON" =~ "active_ver" ]] && [[ "$STATUS_JSON" != *"unknown"* ]]; then
          log_success "Topology Status Verified: $STATUS_JSON"
@@ -235,7 +307,7 @@ test_api_scenario_lifecycle() {
          return 1
     fi
 
-    # 3. Persistence Check (Check disk)
+    # 4. Persistence Check (Check disk)
     if [[ -f "${STORE_DIR}/scenarios/active" ]]; then
          log_success "Scenario persisted to disk"
     else

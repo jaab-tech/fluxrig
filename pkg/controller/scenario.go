@@ -5,6 +5,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -28,6 +29,31 @@ import (
 type ScenarioPublisher interface {
 	Publish(ctx context.Context, subject string, msg *fluxmsg.FluxMsg) error
 }
+
+// ErrUnknownDeployTarget is returned by Activate when a gear deploys to a name
+// that is not an active Rack in the registry. The scenario stays imported: the
+// caller can enroll the Rack and activate again.
+var ErrUnknownDeployTarget = errors.New("unknown or inactive target")
+
+// ErrUnresolvableGroupTarget is returned by Activate when a gear deploys to a
+// name the scenario itself declares as a Rack group (a registry.RackTarget
+// with Group set). The scenario's own syntax is valid: registry.Scenario.Validate
+// accepts a group target and checks that the group carries match labels. But
+// nothing in the registry today lets a live Rack carry labels, so there is no
+// way to tell which active Racks, if any, belong to the group: matching one at
+// Activate time is not implemented, and a gear pinned to a group target will
+// always fail here until it is. This is deliberately a different sentinel from
+// ErrUnknownDeployTarget: enrolling a Rack cannot fix this one.
+var ErrUnresolvableGroupTarget = errors.New("deploy target names a Rack group, which cannot be matched against active Racks yet")
+
+// ErrNoRackReached is returned by Activate when it has one or more targets but
+// delivered to none of them. The scenario is still active: a Rack enrolling
+// afterwards reaches it through PushActiveToRack. This is a distinct sentinel
+// from ErrUnknownDeployTarget because a caller with an asynchronous enrollment
+// path (a Mixer activating a startup scenario before any Rack has connected)
+// needs to tell "nobody is there yet, and that is expected" apart from "this
+// scenario names a target that will never exist."
+var ErrNoRackReached = errors.New("reached no target rack")
 
 // ScenarioManager defines the interface for managing scenarios.
 type ScenarioManager interface {
@@ -154,6 +180,57 @@ func (c *ScenarioController) Import(ctx context.Context, content []byte, dryRun 
 	return safeName, nil
 }
 
+// validateDeployTargets checks that all gear deploy targets exist as active racks in the registry.
+// A target that names a Rack group the scenario declares (rather than an
+// individual Rack) is refused with ErrUnresolvableGroupTarget: see its doc
+// comment for why groups cannot be resolved here yet.
+func (c *ScenarioController) validateDeployTargets(ctx context.Context, s *registry.Scenario) error {
+	if c.store == nil {
+		c.log.Warn("validateDeployTargets: no store available, skipping validation")
+		return nil // No store available, skip validation
+	}
+
+	// Get all active racks from the registry
+	activeRacks, err := c.store.List(ctx, "active")
+	if err != nil {
+		return fmt.Errorf("failed to list active racks: %w", err)
+	}
+	c.log.Debug("validateDeployTargets: active racks", "count", len(activeRacks))
+
+	// Build a set of active rack names
+	activeRackNames := make(map[string]bool, len(activeRacks))
+	for _, rack := range activeRacks {
+		if rack.Name != "" {
+			activeRackNames[rack.Name] = true
+		}
+	}
+
+	// Groups the scenario itself declares. registry.Scenario.Validate already
+	// confirmed each one carries match labels; named here only so an
+	// unresolvable group gets its own, honest error instead of looking like a
+	// typo or a Rack that just needs to enroll.
+	declaredGroups := make(map[string]bool)
+	for _, r := range s.Racks {
+		if r.Group != "" {
+			declaredGroups[r.Group] = true
+		}
+	}
+
+	// Check each gear's deploy target
+	for _, g := range s.Gears {
+		target, ok := g.Deploy.(string)
+		if !ok || activeRackNames[target] {
+			continue
+		}
+		if declaredGroups[target] {
+			return fmt.Errorf("gear %s deploys to group %q: %w", g.Name, target, ErrUnresolvableGroupTarget)
+		}
+		return fmt.Errorf("gear %s deploys to %w '%s'", g.Name, ErrUnknownDeployTarget, target)
+	}
+
+	return nil
+}
+
 // Activate loads a scenario by name and pushes it to racks.
 // Use this to switch between stored scenarios.
 // PushActiveToRack pushes the currently active scenario to a specific rack.
@@ -199,6 +276,14 @@ func (c *ScenarioController) Activate(ctx context.Context, name string) error {
 		return fmt.Errorf("failed to parse scenario: %w", err)
 	}
 
+	// 2a. Validate deploy targets against the live registry. Racks must
+	// exist and be active before a scenario is pushed to them. Import
+	// stays permissive on purpose so a scenario can be filed before
+	// its racks enroll.
+	if err := c.validateDeployTargets(ctx, &s); err != nil {
+		return fmt.Errorf("deploy target validation failed: %w", err)
+	}
+
 	// 2. Update active pointer
 	activeFile := filepath.Join(c.repoPath, "active")
 	if err := os.WriteFile(activeFile, []byte(safeName), 0600); err != nil {
@@ -220,10 +305,17 @@ func (c *ScenarioController) Activate(ctx context.Context, name string) error {
 		}
 	}
 
-	// 5. Push scenario to connected racks via NATS
+	// 5. Push scenario to connected racks via NATS. The active pointer, the
+	// in-memory scenario and the registry entities above are already
+	// committed by this point, so a zero-delivery push does not roll them
+	// back: the scenario genuinely is the Mixer's active one, and a Rack
+	// that enrolls later still gets it through PushActiveToRack. But the
+	// caller must not be told the activation reached anyone when it did
+	// not, so the error is returned rather than only logged.
 	if c.bus != nil {
 		if err := c.pushScenarioToRacks(ctx, &s, content, ""); err != nil {
 			c.log.Warn("failed to push scenario to racks", "error", err)
+			return fmt.Errorf("scenario %q is active but was not delivered: %w", safeName, err)
 		}
 	}
 
@@ -479,18 +571,40 @@ func (c *ScenarioController) pushScenarioToRacks(ctx context.Context, s *registr
 		scenarioName = fmt.Sprintf("scenario-%s", s.Meta.Version)
 	}
 
-	// Determine targets
+	// Determine targets: the scenario's own racks: list, unioned with every
+	// gear's deploy: pin. A scenario that pins gears to a Rack but omits it
+	// from racks: (or omits racks: altogether) must still reach that Rack;
+	// racks: alone used to be the only source, so such a scenario silently
+	// pushed to nobody. A Global Gear (no deploy) needs neither: it reaches
+	// every connected Rack through its own subscription, not this list.
 	var targets []string
 	if specificRack != "" {
 		targets = []string{specificRack}
 	} else {
+		seen := make(map[string]bool)
+		add := func(name string) {
+			if name != "" && !seen[name] {
+				seen[name] = true
+				targets = append(targets, name)
+			}
+		}
 		for _, r := range s.Racks {
-			if r.Name != "" {
-				targets = append(targets, r.Name)
+			add(r.Name)
+		}
+		for _, g := range s.Gears {
+			if name, ok := g.Deploy.(string); ok {
+				add(name)
 			}
 		}
 	}
 
+	// A scenario without push targets activates into nothing. Say so
+	// loudly: this used to be a silent no-op (HTTP 200, zero delivery).
+	if len(targets) == 0 {
+		c.log.Warn("scenario has no push targets: activation is a no-op", "name", scenarioName)
+	}
+
+	delivered := 0
 	for _, rackName := range targets {
 		// Get rack machineID from registry with retry
 		var machineID uuid.UUID
@@ -541,7 +655,15 @@ func (c *ScenarioController) pushScenarioToRacks(ctx context.Context, s *registr
 			c.log.Warn("failed to publish scenario to rack", "rack", rackName, "subject", subject, "error", err)
 		} else {
 			c.log.Info("pushed scenario to rack", "rack", rackName, "version", s.Meta.Version)
+			delivered++
 		}
+	}
+
+	// A scenario with nobody to reach (no racks:, no gear deploys) is a legitimate
+	// activation of an empty or global-only scenario: only fail when there was
+	// somewhere to go and every attempt failed.
+	if len(targets) > 0 && delivered == 0 {
+		return fmt.Errorf("%w: %d target rack(s): %v", ErrNoRackReached, len(targets), targets)
 	}
 
 	return nil

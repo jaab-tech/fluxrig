@@ -4,9 +4,11 @@
 package io_tcp
 
 import (
+	"bytes"
 	"context"
 	"log/slog"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,6 +19,7 @@ import (
 	"github.com/jaab-tech/fluxrig/pkg/bus"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/jaab-tech/fluxrig/pkg/idgen"
+	"github.com/jaab-tech/fluxrig/pkg/logger"
 	"github.com/jaab-tech/fluxrig/pkg/manager"
 	"github.com/jaab-tech/fluxrig/pkg/sdk"
 )
@@ -28,13 +31,19 @@ func (m *MockIDGen) NextEntityID(etype idgen.EntityType) uuid.UUID { return uuid
 
 type MockCtx struct {
 	cfg map[string]any
+	log *slog.Logger // nil means the default logger
 }
 
 func (m *MockCtx) Config() map[string]any   { return m.cfg }
 func (m *MockCtx) Context() context.Context { return context.Background() }
 func (m *MockCtx) GearName() string         { return "test-gear" }
 func (m *MockCtx) MachineID() uuid.UUID     { return uuid.Nil }
-func (m *MockCtx) Logger() *slog.Logger     { return slog.Default() }
+func (m *MockCtx) Logger() *slog.Logger {
+	if m.log != nil {
+		return m.log
+	}
+	return slog.Default()
+}
 func (m *MockCtx) IDGen() sdk.IDGenerator   { return &MockIDGen{} }
 func (m *MockCtx) Bus() bus.Bus             { return nil }
 func (m *MockCtx) Manager() manager.Manager { return nil }
@@ -228,4 +237,84 @@ func TestServerDrain(t *testing.T) {
 			t.Fatalf("second stop: %v", err)
 		}
 	})
+}
+
+// lockedBuffer is a log sink both gears write to from their own goroutines.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// exchangeCardNumber sends a message carrying testPAN from a client gear to a server
+// gear and back, with both gears logging to one sink at the given level, and returns
+// everything they logged.
+func exchangeCardNumber(t *testing.T, level slog.Level, testPAN string) string {
+	t.Helper()
+	sink := &lockedBuffer{}
+	log := slog.New(slog.NewTextHandler(sink, &slog.HandlerOptions{Level: level}))
+
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := l.Addr().String()
+	_ = l.Close()
+
+	s := &Gear{}
+	require.NoError(t, s.Init(&MockCtx{log: log, cfg: map[string]any{"mode": "server", "bind": addr}}))
+	sReceived := make(chan *fluxmsg.FluxMsg, 5)
+	require.NoError(t, s.Start(context.Background(), func(m *fluxmsg.FluxMsg) { sReceived <- m }))
+	defer func() { _ = s.Stop() }()
+
+	c := &Gear{}
+	require.NoError(t, c.Init(&MockCtx{log: log, cfg: map[string]any{"mode": "client", "connect": addr, "reconnect_wait": "10ms"}}))
+	cReceived := make(chan *fluxmsg.FluxMsg, 5)
+	require.NoError(t, c.Start(context.Background(), func(m *fluxmsg.FluxMsg) { cReceived <- m }))
+	defer func() { _ = c.Stop() }()
+
+	require.Eventually(t, func() bool {
+		_, errSend := c.Process(context.Background(), &fluxmsg.FluxMsg{RawPayload: []byte("0100" + testPAN + "\n")})
+		if errSend != nil {
+			return false
+		}
+		select {
+		case <-sReceived:
+			return true
+		case <-time.After(50 * time.Millisecond):
+			return false
+		}
+	}, 5*time.Second, 20*time.Millisecond, "the server never received the message")
+	return sink.String()
+}
+
+// A log is shipped to the Mixer and kept there, so a card number in a message never
+// reaches one at a level that is on by default or in a debugging session.
+func TestGear_LogsNeverCarryTheCardNumberBelowTrace(t *testing.T) {
+	const testPAN = "4111111111111111"
+
+	for _, level := range []slog.Level{slog.LevelInfo, slog.LevelDebug} {
+		logged := exchangeCardNumber(t, level, testPAN)
+		assert.NotContains(t, logged, testPAN, "level %v", level)
+		assert.NotContains(t, logged, "34313131313131313131313131313131", "the number as hex, level %v", level)
+	}
+}
+
+func TestGear_TraceLogsCarryTheCardNumberMasked(t *testing.T) {
+	const testPAN = "4111111111111111"
+
+	logged := exchangeCardNumber(t, logger.LevelTrace, testPAN)
+
+	assert.Contains(t, logged, "received message", "the trace line is there")
+	assert.NotContains(t, logged, testPAN)
+	assert.Contains(t, logged, "411111******1111", "first six and last four stay")
 }

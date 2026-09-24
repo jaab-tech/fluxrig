@@ -335,12 +335,27 @@ func (s *TelemetrySink) persistMetrics(msg *fluxmsg.FluxMsg) error {
 			}
 		}
 		f64 := func(k string) float64 {
+			// CBOR decodes positive integers as uint64, so OTel int64
+			// counters arrive as uint64 after a bus hop. Missing the
+			// unsigned cases persisted every counter as 0.
 			switch v := metric[k].(type) {
 			case float64:
 				return v
+			case float32:
+				return float64(v)
 			case int64:
 				return float64(v)
 			case int:
+				return float64(v)
+			case int32:
+				return float64(v)
+			case int16:
+				return float64(v)
+			case uint64:
+				return float64(v)
+			case uint:
+				return float64(v)
+			case uint32:
 				return float64(v)
 			default:
 				return 0

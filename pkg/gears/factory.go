@@ -36,8 +36,11 @@ func NewFactory() *Factory {
 	f.Register("wasm", func() sdk.NativeGear { return wasm.New() })
 
 	// Optional gears, selected at build time. See factory_bento.go /
-	// factory_nobento.go: a `nobento` build omits the Bento gear entirely.
+	// factory_nobento.go
 	registerOptional(f)
+
+	// Gears that other modules register. See extension.go.
+	applyExtensions(f)
 
 	return f
 }

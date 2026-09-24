@@ -245,10 +245,13 @@ func TestManager_PublishPort_NamedSubject(t *testing.T) {
 	gen, _ := idgen.New(mid)
 	mgr := NewManager(mid, "test-rack", mockBus, gen, &MockManager{}, time.Second, time.Second, 100*time.Millisecond, false, false, nil)
 
+	want := "flux.msg.test-rack.cond.out_scheme_a"
+	// Only a subject some consumer outside this Rack's memory needs goes to the bus.
+	mgr.busSubjects[want] = true
+
 	_ = mgr.publishPort(context.Background(), "cond", "out_scheme_a", &fluxmsg.FluxMsg{})
 
 	got := mockBus.publishedSubjects()
-	want := "flux.msg.test-rack.cond.out_scheme_a"
 	if len(got) != 1 || got[0] != want {
 		t.Fatalf("published = %v, want [%s]", got, want)
 	}
@@ -400,7 +403,8 @@ func TestManager_Errors(t *testing.T) {
 			},
 		},
 		Wires: []registry.WireSpec{
-			{From: "g1.in", To: "g1.out"},
+			// A wire that asked for the guaranteed lane goes over the bus, which fails here.
+			{From: "g1.in", To: "g1.out", Lane: registry.LaneGuaranteed},
 		},
 	}
 	if err := mgr2.ApplyScenario(context.Background(), sc2); err == nil {
@@ -459,7 +463,9 @@ func TestManager_ConvergenceTimeout(t *testing.T) {
 			},
 		},
 		Wires: []registry.WireSpec{
-			{From: "g2.out", To: "g1.in"}, // g2 doesn't exist, will be "global"
+			// g2 doesn't exist, will be "global". The guaranteed lane is the one that
+			// waits for the bus to confirm the wire is hot.
+			{From: "g2.out", To: "g1.in", Lane: registry.LaneGuaranteed},
 		},
 	}
 

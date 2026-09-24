@@ -8,6 +8,8 @@ type BaseConfig struct {
 	Name      string `koanf:"name" example:"node-01"`
 	StateDir  string `koanf:"state_dir" example:"./data"`
 	StateFile string `koanf:"state_file" example:"rack.flux"`
+	// ScenarioFile names, inside StateDir, the Rack's copy of the last scenario it applied. Empty keeps no copy.
+	ScenarioFile string `koanf:"scenario_file" example:"scenario.flux"`
 }
 
 // LoggingConfig configures the structured logger.
@@ -50,6 +52,16 @@ type SnakeConfig struct {
 	SubscriptionRetryAttempts int      `koanf:"subscription_retry_attempts" example:"5"`
 	InactiveThreshold         string   `koanf:"inactive_threshold" example:"30s"`
 	ConvergenceDelay          string   `koanf:"convergence_delay" example:"100ms"`
+	InitialRetryWait          string   `koanf:"initial_retry_wait" example:"500ms"`
+	InitialRetryAttempts      int      `koanf:"initial_retry_attempts" example:"10"`
+	OfflineStartTimeout       string   `koanf:"offline_start_timeout" example:"3s"`
+	OfflineRetryInterval      string   `koanf:"offline_retry_interval" example:"5s"`
+	StoreEncryption           bool     `koanf:"store_encryption" example:"true"`
+	StoreCipher               string   `koanf:"store_cipher" example:"chacha"`
+	StoreKeyFile              string   `koanf:"store_key_file"`
+	StoreOldKeyFile           string   `koanf:"store_old_key_file"`
+	StreamMaxAge              string   `koanf:"stream_max_age" example:"24h"`
+	StreamMaxBytes            int64    `koanf:"stream_max_bytes" example:"1073741824"`
 	RootCAFile                string   `koanf:"root_ca_file"`
 	TLSCertFile               string   `koanf:"tls_cert_file"`
 	TLSKeyFile                string   `koanf:"tls_key_file"`

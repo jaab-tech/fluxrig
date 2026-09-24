@@ -10,10 +10,14 @@ import (
 	"testing"
 
 	"github.com/moov-io/iso8583"
+	"github.com/moov-io/iso8583/encoding"
+	"github.com/moov-io/iso8583/field"
+	"github.com/moov-io/iso8583/prefix"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
+	"github.com/jaab-tech/fluxrig/pkg/gears/native/iso8583/codec/sdl"
 	"github.com/jaab-tech/fluxrig/pkg/sdk"
 )
 
@@ -469,4 +473,127 @@ func TestMetadata_IdentityDistinguishesSpecsAtTheSameVersion(t *testing.T) {
 
 	require.Equal(t, g1.meta.SpecVersion, g2.meta.SpecVersion, "the case this test exists for is gone")
 	assert.NotEqual(t, g1.meta.SpecID, g2.meta.SpecID)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Binary-safe encode through aliases
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestEncode_AliasHeldBytesPackRaw(t *testing.T) {
+	g := initGear(t, "generic_ascii.yaml", map[string]any{"direction": "encode"})
+
+	// Values that crossed the bus (or came from decode of non-UTF8 fields)
+	// arrive as []byte. The alias-priority loop must pack them as raw bytes,
+	// not render them with %v ("[52 52 ...]").
+	msg := fluxmsg.New()
+	msg.Metadata["iso8583.mti"] = "0200"
+	_ = msg.Set("stan", []byte("444444"))
+
+	res, err := g.Process(context.Background(), msg)
+	require.NoError(t, err)
+	require.NotEmpty(t, res.RawPayload)
+
+	back := iso8583.NewMessage(g.moovSpec)
+	require.NoError(t, back.Unpack(res.RawPayload))
+	v, err := back.GetString(11)
+	require.NoError(t, err)
+	assert.Equal(t, "444444", v)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// A panic inside Unpack must not be read as a successful decode
+// ─────────────────────────────────────────────────────────────────────────────
+
+// panickyEncoder is a well-formed encoding.Encoder whose Decode panics, standing
+// in for whatever future field, spec or moov-io change might one day panic
+// where today's fields do not: the point under test is what the codec does
+// with the panic, not how one arises.
+type panickyEncoder struct{}
+
+func (panickyEncoder) Encode(data []byte) ([]byte, error) { return data, nil }
+func (panickyEncoder) Decode([]byte, int) ([]byte, int, error) {
+	panic("simulated decode panic")
+}
+
+// panickySpec is a two-field spec (MTI, and one String field whose encoder
+// panics) built directly rather than loaded from YAML, so the panicking
+// encoder can be installed on the field the SDL loader has no syntax for.
+func panickySpec() *iso8583.MessageSpec {
+	return &iso8583.MessageSpec{
+		Name: "panicky",
+		Fields: map[int]field.Field{
+			0: field.NewString(&field.Spec{
+				Length: 4, Description: "MTI",
+				Enc: encoding.ASCII, Pref: prefix.ASCII.Fixed,
+			}),
+			1: field.NewBitmap(&field.Spec{
+				Length: 8, Description: "Bitmap",
+				Enc: encoding.Binary, Pref: prefix.Binary.Fixed,
+			}),
+			2: field.NewString(&field.Spec{
+				Length: 4, Description: "Panics on decode",
+				Enc: panickyEncoder{}, Pref: prefix.ASCII.LL,
+			}),
+		},
+	}
+}
+
+func TestDecode_UnpackPanicIsNotReadAsSuccess(t *testing.T) {
+	g := &Gear{
+		logger:   slog.Default(),
+		moovSpec: panickySpec(),
+		meta:     &sdl.FieldMeta{},
+	}
+
+	// MTI "0100", bitmap with only bit 2 set, then field 2's own length-prefixed
+	// value: field.NewBitmap needs a real bitmap byte, and isoMsg.Bitmap().IsSet(2)
+	// must be true so Unpack reaches the panicking field.
+	moovMsg := iso8583.NewMessage(g.moovSpec)
+	require.NoError(t, moovMsg.Field(0, "0100"))
+	require.NoError(t, moovMsg.Field(2, "AB"))
+	packed, err := moovMsg.Pack()
+	require.NoError(t, err, "the fixture must pack before it can prove anything about unpacking it")
+
+	msg := fluxmsg.New()
+	msg.RawPayload = packed
+
+	mti, fields, err := g.decode(msg)
+	require.Error(t, err, "a message whose Unpack panicked must not be reported as decoded")
+	assert.Empty(t, mti)
+	assert.Nil(t, fields)
+}
+
+// A panic anywhere else in decode, not just inside Unpack, must not be read as
+// a successful decode either. The field-extraction loop that runs after a
+// successful Unpack is guarded only by the function-level recover; that
+// recover must set the returned error itself; leaving decode's returns
+// unnamed would let a panic there fall through to the zero values ("", nil,
+// nil), which reads as an empty but successful decode.
+func TestDecode_PostUnpackPanicIsNotReadAsSuccess(t *testing.T) {
+	g := &Gear{
+		logger:   slog.Default(),
+		moovSpec: panickySpec(),
+		// A nil meta panics at g.meta.Aliases[i] on the very first field (i=0,
+		// the MTI, which the loop always reaches): a controlled stand-in for
+		// whatever future panic (a malformed spec, a moov-io change) might one
+		// day occur there. The point under test is what decode does with the
+		// panic, not how one arises.
+		meta: nil,
+	}
+
+	// MTI only: the bitmap has no other bit set, so Unpack succeeds cleanly and
+	// never reaches field 2's panicking encoder. This proves the outer,
+	// function-level recover, not the Unpack-specific inner one above.
+	moovMsg := iso8583.NewMessage(g.moovSpec)
+	require.NoError(t, moovMsg.Field(0, "0100"))
+	packed, err := moovMsg.Pack()
+	require.NoError(t, err, "the fixture must pack before it can prove anything about unpacking it")
+
+	msg := fluxmsg.New()
+	msg.RawPayload = packed
+
+	mti, fields, err := g.decode(msg)
+	require.Error(t, err, "a panic anywhere in decode, not just inside Unpack, must not be reported as decoded")
+	assert.Empty(t, mti)
+	assert.Nil(t, fields)
 }

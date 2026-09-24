@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fxamacker/cbor/v2"
 	"github.com/google/uuid"
 
 	"github.com/jaab-tech/fluxrig/pkg/bus"
@@ -283,4 +284,56 @@ func TestTelemetrySink_MiscLogs(t *testing.T) {
 	if !foundWAL {
 		t.Error("WAL log not found")
 	}
+}
+
+// TestTelemetrySink_CBORIntCounters pins that OTel int64 counters survive
+// the CBOR bus hop with their values intact. CBOR decodes positive integers
+// as uint64, and the ingest value parser used to drop every unsigned shape,
+// persisting all counters as 0 (entity present, value always zero).
+func TestTelemetrySink_CBORIntCounters(t *testing.T) {
+	mockBus := bus.NewMockBus()
+	store, _ := duckdb.NewStore(slog.Default(), ":memory:")
+	defer func() { _ = store.Close() }()
+	ctx := context.Background()
+	_ = store.Migrate(ctx)
+
+	sink := ingest.NewTelemetrySink(mockBus, store, "flux.telemetry.>", "test-cbor", 1*time.Minute, nil)
+	_ = sink.Start(ctx)
+	defer func() { _ = sink.Stop() }()
+
+	eid := uuid.New()
+	// Build the record exactly as the OTel exporter does, then run it
+	// through a real CBOR round trip like the NATS bus performs.
+	payload := map[string]interface{}{
+		"timestamp":   time.Now().UnixMicro(),
+		"attributes":  map[string]interface{}{"subject": "flux.msg.x"},
+		"entity_id":   eid,
+		"entity_name": "cbor-rack",
+		"name":        "flux.bus.publish_count",
+		"value":       int64(42),
+	}
+	raw, err := cbor.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rt map[string]any
+	if err := cbor.Unmarshal(raw, &rt); err != nil {
+		t.Fatal(err)
+	}
+
+	msg := fluxmsg.New()
+	msg.Metadata["type"] = "telemetry.metric"
+	msg.Data = rt
+	_ = mockBus.Publish(context.Background(), "flux.telemetry.cbor-rack.metrics", msg)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		var v float64
+		_ = store.DB().QueryRow("SELECT value FROM telemetry_metrics WHERE entity_name='cbor-rack' AND name='flux.bus.publish_count' ORDER BY timestamp DESC LIMIT 1").Scan(&v)
+		if v == 42 {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("int64 counter did not persist with its value through CBOR")
 }

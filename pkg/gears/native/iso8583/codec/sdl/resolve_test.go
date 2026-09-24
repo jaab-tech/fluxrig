@@ -304,3 +304,19 @@ spec:
 `), "")
 	require.NoError(t, err)
 }
+
+// A date or a time field says how it is written on the wire, and the spec loader keeps
+// it: a gear that renders the current time for the field needs it to write the expiry as
+// YYMM and not as a day.
+func TestTheLayoutOfADateFieldIsKept(t *testing.T) {
+	raw, err := os.ReadFile(refSpec)
+	require.NoError(t, err)
+	spec, err := ParseSemantic(raw)
+	require.NoError(t, err)
+
+	layouts := map[int]string{7: "MMDDhhmmss", 12: "hhmmss", 13: "MMDD", 14: "YYMM"}
+	for de, want := range layouts {
+		require.Equal(t, want, spec.Fields[de].Format.Layout, "DE %d", de)
+	}
+	require.Empty(t, spec.Fields[2].Format.Layout, "a field that declares no layout has none")
+}

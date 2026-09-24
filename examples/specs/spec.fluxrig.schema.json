@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://fluxrig.org/schemas/spec.fluxrig.schema.json",
   "title": "Protocol spec — fluxrig profile (core + x-fluxrig extensions)",
-  "description": "The semantic core plus fluxrig's vendor extensions. Extensions are behavioural (they drive engines) and live under x-fluxrig-* keys, so a document valid here is also valid against the core alone and remains portable to other tooling. See ADR 0049.",
+  "description": "The semantic core plus fluxrig's vendor extensions. Extensions are behavioural (they drive engines) and live under x-fluxrig-* keys, so a document valid here is also valid against the core alone and remains portable to other tooling.",
   "allOf": [
     { "$ref": "https://fluxrig.org/schemas/spec.core.schema.json" },
     {

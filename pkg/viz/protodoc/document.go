@@ -60,6 +60,9 @@ type Document struct {
 	// derived view, and a reader who doubts it should not have to go looking for
 	// the file it was derived from.
 	Source string
+	// SourceLines is the original line number of each line of Source, present
+	// when blocks were removed so the numbering still matches the file.
+	SourceLines []int
 }
 
 // Reference is one document the spec was written from.
@@ -229,8 +232,24 @@ func Build(spec *sdl.Spec, opts Options) *Document {
 	for de := range b.labels {
 		count(de)
 	}
+	// The source is the whole file, and the whole file contains the fields the
+	// public scope exists to withhold. Embedding it unfiltered published every
+	// one of them inside a document whose own header said they were omitted,
+	// which is worse than not offering the source at all: a reader who trusts
+	// that line ships a proprietary dialect believing it was redacted.
+	//
+	// A public variant carries the source with those blocks cut out. The cut is
+	// made from the same index the rest of the page is built from, by line range
+	// rather than by pattern, so it removes a field's whole entry including the
+	// comment written above it. TestThePublicPageCarriesNothingPrivate reads the
+	// rendered bytes rather than the anchors, which is what a filter that misses
+	// a case needs in order to fail loudly instead of silently.
 	if b.src != nil {
-		doc.Source = b.src.Whole
+		if b.scope == ScopeComplete {
+			doc.Source = b.src.Whole
+		} else {
+			doc.Source, doc.SourceLines = redactPrivate(b.src, b.privateFields())
+		}
 	}
 	doc.WireSource = spec.Wire.Source
 	if len(opts.Source) > 0 {
@@ -292,6 +311,62 @@ func (b *builder) enumSource(ref string) (string, int) {
 	}
 	f := b.src.Enums[ref]
 	return f.Text, f.Line
+}
+
+// privateFields is the set the public scope withholds, taken from the same
+// visibility check the element and message views use.
+func (b *builder) privateFields() map[int]bool {
+	out := make(map[int]bool)
+	for de := range b.spec.Fields {
+		if !b.visible(de) {
+			out[de] = true
+		}
+	}
+	return out
+}
+
+// redactPrivate removes each withheld field's block from the document and
+// leaves a line saying one was removed. It works on line ranges from the source
+// index, not on the text, so a block is cut whole: its key, everything nested
+// under it, and the comment above it, which is where the reason for the field
+// tends to be written.
+func redactPrivate(src *sdl.SourceIndex, private map[int]bool) (string, []int) {
+	if len(private) == 0 {
+		return src.Whole, nil
+	}
+	lines := strings.Split(src.Whole, "\n")
+	drop := make(map[int]string, len(private)) // 1-based line -> indent of the block
+	for de := range private {
+		frag, ok := src.Fields[de]
+		if !ok || frag.Line <= 0 {
+			continue
+		}
+		n := len(strings.Split(strings.TrimRight(frag.Text, "\n"), "\n"))
+		for i := frag.Line; i < frag.Line+n && i <= len(lines); i++ {
+			drop[i] = indentOf(lines[frag.Line-1])
+		}
+	}
+	out := make([]string, 0, len(lines))
+	nums := make([]int, 0, len(lines))
+	for i, line := range lines {
+		indent, cut := drop[i+1]
+		if !cut {
+			out = append(out, line)
+			nums = append(nums, i+1)
+			continue
+		}
+		// One marker per block, not per line, numbered where the block began so
+		// the lines after it still carry the numbers the file gives them.
+		if _, prev := drop[i]; !prev {
+			out = append(out, indent+"# (a private element is withheld from this variant)")
+			nums = append(nums, i+1)
+		}
+	}
+	return strings.Join(out, "\n"), nums
+}
+
+func indentOf(line string) string {
+	return line[:len(line)-len(strings.TrimLeft(line, " \t"))]
 }
 
 func (b *builder) visible(de int) bool {

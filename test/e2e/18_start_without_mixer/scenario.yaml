@@ -1,0 +1,24 @@
+# Copyright (c) 2026 JAAB Tech SAS, Uruguay
+# SPDX-License-Identifier: Apache-2.0
+
+meta:
+  name: "solo_test"
+  version: "1.0.0"
+
+racks:
+  - name: "rack-solo"
+
+gears:
+  # A TCP server: while its port is listening, the scenario is running.
+  - name: "gateway"
+    type: "io_tcp"
+    deploy: "rack-solo"
+    config:
+      mode: "server"
+      bind: ":9631"
+      delimiter: "\n"
+      delimiter_append: true
+
+wires:
+  - from: "gateway.out"
+    to: "gateway.in"

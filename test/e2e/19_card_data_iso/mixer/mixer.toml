@@ -1,0 +1,19 @@
+[api]
+port = 9165
+
+[snake]
+port = 4285
+url = "nats://localhost:4285"
+
+[store]
+dir = "./data"
+database_file = "flux.duckdb"
+cluster_key_file = "cluster.key"
+
+# Telemetry reaches the Mixer's DuckDB and Parquet files every second here, so that the
+# test does not wait on the default interval.
+[telemetry]
+batch_interval = "1s"
+
+[enrollment]
+auto_adopt = true

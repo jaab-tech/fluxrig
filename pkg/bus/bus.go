@@ -25,6 +25,14 @@ type ConnectOptions struct {
 	InsecureSkipVerify        bool          // Optional bypass for local testing
 	InProcessServer           any           // Optional direct NATS server instance (In-Process)
 	InactiveThreshold         time.Duration // Time after which the NATS server cleans up idle consumers
+	InitialRetryWait          time.Duration // Base wait time for initial connection retries
+	InitialRetryAttempts      int           // Number of initial connection retry attempts
+	InitialRetryTimeout       time.Duration // Upper bound on the total time spent retrying the first connection; 0 means only the attempt count limits it
+	// Ctx bounds the initial connection retry: a caller with a shutdown signal
+	// (SIGTERM/SIGINT) passes its context here so that signal is observed
+	// between retry attempts instead of only after the whole retry budget
+	// elapses. Nil means only InitialRetryAttempts/InitialRetryTimeout bound it.
+	Ctx context.Context
 }
 
 // Bus defines the standard behavior for our messaging layer.

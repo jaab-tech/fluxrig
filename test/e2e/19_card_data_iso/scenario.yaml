@@ -1,0 +1,53 @@
+# Copyright (c) 2026 JAAB Tech SAS, Uruguay
+# SPDX-License-Identifier: Apache-2.0
+
+# A real ISO 8583 authorization crosses from one Rack to another: Rack A takes the
+# message from a terminal socket and decodes it, Rack B encodes it again and hands it to
+# a sink. The decoded message carries the card number in its fields, and it travels over
+# the Mixer's bus between the two.
+meta:
+  name: "card_data_iso"
+  version: "1.0.0"
+
+racks:
+  - name: "rack-a"
+  - name: "rack-b"
+
+gears:
+  - name: "terminals"
+    type: "io_iso8583"
+    deploy: "rack-a"
+    config:
+      mode: "server"
+      bind: ":10101"
+      frame_length_size: 2
+      frame_length_endian: "big"
+      encoding: "ascii"
+
+  - name: "decode-request"
+    type: "codec_iso8583"
+    deploy: "rack-a"
+    config: { spec_path: "specs/auth.yaml", direction: "decode", on_error: "reject" }
+
+  - name: "encode-request"
+    type: "codec_iso8583"
+    deploy: "rack-b"
+    config: { spec_path: "specs/auth.yaml", direction: "encode", on_error: "reject" }
+
+  - name: "sink"
+    type: "io_tcp"
+    deploy: "rack-b"
+    config:
+      mode: "server"
+      bind: ":10102"
+      delimiter: "\n"
+      delimiter_append: true
+
+wires:
+  - from: "terminals.out"
+    to: "decode-request.in"
+  # Between Racks: over the Mixer's bus.
+  - from: "decode-request.out"
+    to: "encode-request.in"
+  - from: "encode-request.out"
+    to: "sink.in"

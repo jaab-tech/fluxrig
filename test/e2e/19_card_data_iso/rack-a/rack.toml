@@ -1,0 +1,11 @@
+[rack]
+name = "rack-a"
+
+[rack.bus]
+url = "nats://localhost:4285"
+
+[rack.telemetry]
+enabled = true
+
+[telemetry]
+batch_interval = "1s"

@@ -4,9 +4,11 @@
 package protodoc
 
 import (
+	"html"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -860,7 +862,16 @@ func TestTheSpecPaneShowsTheWireItResolved(t *testing.T) {
 	const p = "../../../examples/specs/iso8583-v87-ascii.yaml"
 	raw, _ := os.ReadFile(p)
 	spec, _ := sdl.ParseSemantic(raw)
-	out := HTML(spec, Options{Scope: ScopePublic, Source: raw, BaseDir: filepath.Dir(p)})
+	// Complete, not public: the unredacted file is only in the complete variant.
+	// This assertion used to run against ScopePublic, which is how a document
+	// that withheld seven elements from its lists shipped all seven inside it.
+	out := HTML(spec, Options{Scope: ScopeComplete, Source: raw, BaseDir: filepath.Dir(p)})
+
+	// The public variant keeps the pane and redacts it, so a reader still sees
+	// the document that produced the page.
+	if pub := HTML(spec, Options{Scope: ScopePublic, Source: raw, BaseDir: filepath.Dir(p)}); !strings.Contains(pub, `id="pane-spec"`) {
+		t.Error("a public render lost the spec pane entirely")
+	}
 
 	if !strings.Contains(out, `<h3 id="written">The spec, as written</h3>`) {
 		t.Error("the spec pane does not separate the document from what it resolved to")
@@ -1130,5 +1141,65 @@ func TestTheIndexMarksTheSectionTheReaderIsIn(t *testing.T) {
 	pane = pane[:strings.Index(pane, "function paneOf")]
 	if !strings.Contains(pane, "collectSpy()") {
 		t.Error("switching panes leaves the marker following the old index")
+	}
+}
+
+// A public render must not carry what the public scope exists to withhold. The
+// count in the header is derived from the same field set that was supposed to
+// be filtered, so it cannot detect its own failure: v0.10.0 published a
+// document that said "7 private elements are omitted" while embedding all seven
+// in its source pane. The sibling test above checks the anchors, which is what
+// is painted. This checks the bytes.
+func TestThePublicPageCarriesNothingPrivate(t *testing.T) {
+	raw, err := os.ReadFile(refSpec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := reference(t)
+	if !strings.Contains(string(raw), "scope: private") {
+		t.Fatal("the reference spec declares no private field, so this proves nothing")
+	}
+
+	out := HTML(spec, Options{Scope: ScopePublic, Source: raw})
+	flat := html.UnescapeString(regexp.MustCompile(`<[^>]+>`).ReplaceAllString(out, " "))
+	for _, forbidden := range []string{"scope: private", "txn_specific_data", "ADR 00"} {
+		if strings.Contains(flat, forbidden) {
+			t.Errorf("the public page carries %q", forbidden)
+		}
+	}
+
+	// Redacted, not removed: the reader still gets the document that produced
+	// the page, with the withheld blocks marked.
+	if !strings.Contains(out, `id="pane-spec"`) {
+		t.Error("the public page has no spec pane at all")
+	}
+	if !strings.Contains(flat, "withheld from this variant") {
+		t.Error("nothing in the public source says a block was removed")
+	}
+
+	// The numbering has to keep matching the file, or a reader who opens the
+	// spec at the line the page shows lands wherever the redaction pushed it.
+	written := out[strings.Index(out, `data-sec="written"`):]
+	if end := strings.Index(written, `data-sec="wire"`); end > 0 {
+		written = written[:end]
+	}
+	shown := regexp.MustCompile(`class="yn"[^>]*>(\d+)<`).FindAllStringSubmatch(written, -1)
+	if len(shown) == 0 {
+		t.Fatal("the public source block carries no line numbers")
+	}
+	last := 0
+	for _, m := range shown {
+		n, _ := strconv.Atoi(m[1])
+		if n <= last {
+			t.Fatalf("line numbers are not increasing: %d after %d", n, last)
+		}
+		last = n
+	}
+	if want := strings.Count(string(raw), "\n"); last != want {
+		t.Errorf("the last numbered line is %d; the file has %d", last, want)
+	}
+	full := HTML(spec, Options{Scope: ScopeComplete, Source: raw})
+	if !strings.Contains(full, "txn_specific_data") {
+		t.Error("the complete page no longer carries the unredacted source")
 	}
 }

@@ -24,6 +24,13 @@ type RouterWrapper struct {
 	Router *message.Router
 	Pub    message.Publisher
 	Sub    message.Subscriber
+
+	// NC is a plain, persistent NATS connection, separate from the one
+	// Watermill's Publisher/Subscriber hold internally (which is not
+	// reachable from here). It exists for callers that need the bus directly
+	// rather than through a Watermill wire, such as the control plane's
+	// request/reply confirmation. Nil until ConfigureJetStream succeeds.
+	NC *nats.Conn
 }
 
 // NewRouter creates a standard Watermill Router.
@@ -195,8 +202,18 @@ func (r *RouterWrapper) ConfigureJetStream(url string, domain string, durable bo
 		return err
 	}
 
+	// A persistent connection for callers that need the bus directly, such as
+	// the control plane's request/reply confirmation: separate from the
+	// provisioning connection above (closed by the defer) and from whatever
+	// Watermill's Publisher/Subscriber hold internally (not reachable here).
+	ncPersistent, err := nats.Connect(url, natsOpts...)
+	if err != nil {
+		return fmt.Errorf("failed to open the persistent NATS connection: %w", err)
+	}
+
 	r.Pub = pub
 	r.Sub = sub
+	r.NC = ncPersistent
 	return nil
 }
 
@@ -244,6 +261,9 @@ func (r *RouterWrapper) Close() error {
 		if err := r.Sub.Close(); err != nil {
 			return err
 		}
+	}
+	if r.NC != nil {
+		r.NC.Close()
 	}
 	return r.Router.Close()
 }

@@ -6,10 +6,21 @@ package io_tcp
 import (
 	"bufio"
 	"bytes"
+	"fmt"
 )
 
 // MakeSplitter returns a bufio.SplitFunc based on configuration.
 func MakeSplitter(cfg *Config) bufio.SplitFunc {
+	// Length-prefixed framing
+	if cfg.Framing == FramingLengthPrefix2 || cfg.Framing == FramingLengthPrefix4 {
+		headerLen := 2
+		if cfg.Framing == FramingLengthPrefix4 {
+			headerLen = 4
+		}
+		return makeLengthPrefixSplitter(headerLen)
+	}
+
+	// Delimiter-based framing (default)
 	delim := []byte(cfg.Delimiter)
 	if len(delim) == 0 {
 		return bufio.ScanLines // Default fallback
@@ -79,6 +90,48 @@ func MakeSplitter(cfg *Config) bufio.SplitFunc {
 			}
 			return 0, nil, nil
 		}
+	}
+}
+
+// makeLengthPrefixSplitter returns a SplitFunc for length-prefixed framing.
+// Expects messages in format: [2 or 4 byte BE length][payload]
+func makeLengthPrefixSplitter(headerLen int) bufio.SplitFunc {
+	return func(data []byte, atEOF bool) (advance int, token []byte, err error) {
+		if atEOF && len(data) == 0 {
+			return 0, nil, nil
+		}
+
+		// Need at least headerLen bytes to read length
+		if len(data) < headerLen {
+			if atEOF {
+				return len(data), nil, fmt.Errorf("incomplete length header: got %d bytes, need %d", len(data), headerLen)
+			}
+			return 0, nil, nil // Wait for more data
+		}
+
+		// Read length from header
+		var length int
+		if headerLen == 2 {
+			length = int(data[0])<<8 | int(data[1])
+		} else {
+			length = int(data[0])<<24 | int(data[1])<<16 | int(data[2])<<8 | int(data[3])
+		}
+
+		// Check for reasonable length (prevent allocation attacks)
+		if length < 0 || length > 1024*1024 { // 1MB max
+			return 0, nil, fmt.Errorf("invalid message length: %d", length)
+		}
+
+		totalLen := headerLen + length
+		if len(data) < totalLen {
+			if atEOF {
+				return len(data), nil, fmt.Errorf("incomplete message: need %d bytes, got %d", totalLen, len(data))
+			}
+			return 0, nil, nil // Wait for more data
+		}
+
+		// Return payload only (without length prefix)
+		return totalLen, data[headerLen:totalLen], nil
 	}
 }
 

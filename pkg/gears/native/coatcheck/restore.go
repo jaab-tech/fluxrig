@@ -76,9 +76,14 @@ func (r *RestoreLogic) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*flux
 		msg.TraceID = savedMsg.TraceID
 	}
 
-	// D. Restore Saved Data fields? (e.g. original PAN?)
-	// Configurable key_fields might need this?
-	// For now, only Metadata is merged.
+	// D. Restore Saved Data fields (e.g. the original PAN): deep
+	// merge, because both sides nest dotted paths (iso8583 -> field
+	// -> N) and a top-level assignment would clobber sibling fields
+	// the message already carries.
+	if msg.Data == nil {
+		msg.Data = make(map[string]any)
+	}
+	deepMergeData(msg.Data, savedMsg.Data, shouldOverwrite)
 
 	r.gear.ctx.Logger().Debug("coat restored", "key", key, "restored_keys", fmt.Sprintf("%v", restoredKeys))
 
@@ -113,5 +118,32 @@ func (r *RestoreLogic) handleMissing(ctx context.Context, msg *fluxmsg.FluxMsg, 
 			r.gear.emit(msg)
 		}
 		return nil, nil
+	}
+}
+
+// deepMergeData merges src into dst recursively, so restoring one nested
+// leaf (iso8583 -> field -> 2) keeps the sibling leaves the live message
+// already holds. Map shapes from a CBOR round trip (map[any]any) merge
+// with in-process shapes (map[string]any). With overwrite false, existing
+// leaves win; maps always recurse.
+func deepMergeData(dst, src map[string]any, overwrite bool) {
+	for k, sv := range src {
+		if sm, ok := fluxmsg.AsDataMap(sv); ok {
+			if dm, ok := fluxmsg.AsDataMap(dst[k]); ok {
+				deepMergeData(dm, sm, overwrite)
+				// fluxmsg.AsDataMap returns a fresh map[string]any for a
+				// map[any]any input (the CBOR-round-tripped shape a
+				// cross-Rack message arrives in): dm is then a disconnected
+				// copy, and merging into it without writing it back here
+				// would leave dst[k] untouched -- the restored fields
+				// silently never land. A no-op when dst[k] was already
+				// map[string]any, since dm is that same map.
+				dst[k] = dm
+				continue
+			}
+		}
+		if _, exists := dst[k]; overwrite || !exists {
+			dst[k] = sv
+		}
 	}
 }

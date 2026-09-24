@@ -6,6 +6,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -20,11 +21,13 @@ import (
 	"github.com/ThreeDotsLabs/watermill/message"
 	"github.com/fxamacker/cbor/v2"
 	"github.com/google/uuid"
+	"github.com/nats-io/nats.go"
 	httpSwagger "github.com/swaggo/http-swagger"
 	"gopkg.in/yaml.v3"
 
 	"github.com/jaab-tech/fluxrig/pkg/config"
 	"github.com/jaab-tech/fluxrig/pkg/controller"
+	"github.com/jaab-tech/fluxrig/pkg/ctrl"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/jaab-tech/fluxrig/pkg/gears"
 	"github.com/jaab-tech/fluxrig/pkg/manager"
@@ -55,6 +58,11 @@ type Server struct {
 	wasmCatalog   WasmCatalog
 	gearFactory   *gears.Factory
 	specs         manager.Manager
+	// ctrlNC is a persistent NATS connection used to confirm a control-plane
+	// command reached a listening gear (see handleSimControl). Nil in tests
+	// that do not exercise that endpoint; handleSimControl reports 503 rather
+	// than panicking when it is.
+	ctrlNC *nats.Conn
 }
 
 // WithSpecStore gives the API the content-addressed store, so a spec that was
@@ -74,7 +82,8 @@ type WasmCatalog interface {
 
 func NewServer(reg registry.Registry, pub message.Publisher, signer *pki.ClusterKey,
 	sc controller.ScenarioManager, cache *telemetry.MetricsCache,
-	mixerID uuid.UUID, mixerEntityID uuid.UUID, cfg *config.MixerConfig, wasmCat WasmCatalog) *Server {
+	mixerID uuid.UUID, mixerEntityID uuid.UUID, cfg *config.MixerConfig, wasmCat WasmCatalog,
+	ctrlNC *nats.Conn) *Server {
 	return &Server{
 		reg: reg, pub: pub, signer: signer, scenarioCtrl: sc,
 		metricsCache: cache, mixerID: mixerID, mixerEntityID: mixerEntityID, cfg: cfg,
@@ -83,6 +92,7 @@ func NewServer(reg registry.Registry, pub message.Publisher, signer *pki.Cluster
 		// single factory serves it. The Mixer knows the same gears a Rack of
 		// the same build does.
 		gearFactory: gears.NewFactory(),
+		ctrlNC:      ctrlNC,
 	}
 }
 
@@ -110,6 +120,9 @@ func (s *Server) Start(addr string) error {
 	mux.HandleFunc("GET /api/v1/specs/{name}", s.handleSpecHistory)
 	mux.HandleFunc("GET /api/v1/specs/{name}/{tag}", s.handleSpecSource)
 	mux.HandleFunc("GET /api/v1/specs/{name}/{tag}/doc", s.handleSpecDoc)
+
+	// Simulator control plane endpoints
+	mux.HandleFunc("POST /api/v1/control/sim/{action}", s.handleSimControl)
 
 	// Swagger UI
 	mux.Handle("/swagger/", httpSwagger.WrapHandler)
@@ -561,6 +574,9 @@ func (s *Server) handleEntityStats(w http.ResponseWriter, r *http.Request) {
 // @Param activate query boolean false "Immediately activate after import"
 // @Param body body registry.Scenario true "Scenario YAML"
 // @Success 200 {object} ScenarioImportResponse
+// @Failure 400 {string} string "The scenario could not be read or failed validation"
+// @Failure 409 {string} string "Imported, but not activated: a gear deploys to a name that is not an active Rack"
+// @Failure 500 {string} string "Imported, but activation failed"
 // @Router /scenario/import [post]
 func (s *Server) handleScenarioImport(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -593,8 +609,14 @@ func (s *Server) handleScenarioImport(w http.ResponseWriter, r *http.Request) {
 	// Activate if requested and not dry-run
 	if shouldActivate && !dryRun {
 		if err := s.scenarioCtrl.Activate(r.Context(), name); err != nil {
+			// A deploy target that is not an active Rack is a state the caller can
+			// fix by enrolling it, not a fault of the Mixer.
+			status := http.StatusInternalServerError
+			if errors.Is(err, controller.ErrUnknownDeployTarget) {
+				status = http.StatusConflict
+			}
 			slog.Error("Activation failed", "scenario", name, "error", err)
-			http.Error(w, fmt.Sprintf("Imported but activation failed: %v", err), http.StatusInternalServerError)
+			http.Error(w, fmt.Sprintf("Imported but activation failed: %v", err), status)
 			return
 		}
 	}
@@ -837,4 +859,142 @@ func (s *Server) handleGearManifest(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(m)
+}
+
+// defaultControlConfirmTimeout is used when Config.API.ControlConfirmTimeout is
+// unset or does not parse, including when handleSimControl runs against a
+// Server built without a *config.MixerConfig at all (as most tests do).
+const defaultControlConfirmTimeout = 2 * time.Second
+
+// SimControlArgs represents arguments for simulator control commands
+type SimControlArgs struct {
+	Gear  string  `json:"gear"`
+	Seed  int64   `json:"seed,omitempty"`
+	TPS   float64 `json:"tps,omitempty"`
+	Shape string  `json:"shape,omitempty"`
+	From  float64 `json:"from,omitempty"`
+	To    float64 `json:"to,omitempty"`
+	Over  string  `json:"over,omitempty"`
+}
+
+// handleSimControl godoc
+// @Summary Simulator control
+// @Description Sends a start, stop, rate, or reset command to a named gear and waits for it to acknowledge receiving the command. The gear must be running on an enrolled Rack and subscribed to its control plane; the response reflects delivery, not that the gear finished acting on the command.
+// @Tags control
+// @Accept json
+// @Produce json
+// @Param action path string true "Command" Enums(start, stop, rate, reset)
+// @Param body body SimControlArgs true "Target gear and, for rate/reset, its arguments"
+// @Success 200 {object} map[string]string
+// @Failure 400 {object} map[string]string "Invalid JSON, missing gear, or an unknown action"
+// @Failure 503 {object} map[string]string "No control-plane connection, or no gear acknowledged the command"
+// @Failure 500 {object} map[string]string
+// @Router /control/sim/{action} [post]
+func (s *Server) handleSimControl(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var args SimControlArgs
+	if err := json.NewDecoder(r.Body).Decode(&args); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	if args.Gear == "" {
+		http.Error(w, "gear is required", http.StatusBadRequest)
+		return
+	}
+
+	// Determine command from path
+	action := r.PathValue("action")
+	var cmd ctrl.Command
+
+	switch action {
+	case "start":
+		cmd = ctrl.Command{
+			Cmd:  ctrl.CmdSimStart,
+			Args: map[string]string{"gear": args.Gear},
+		}
+		if args.Seed != 0 {
+			cmd.Args["seed"] = fmt.Sprintf("%d", args.Seed)
+		}
+	case "stop":
+		cmd = ctrl.Command{
+			Cmd:  ctrl.CmdSimStop,
+			Args: map[string]string{"gear": args.Gear},
+		}
+	case "rate":
+		cmd = ctrl.Command{
+			Cmd:  ctrl.CmdSimRate,
+			Args: map[string]string{"gear": args.Gear, "tps": fmt.Sprintf("%f", args.TPS)},
+		}
+		if args.Shape != "" {
+			cmd.Args["shape"] = args.Shape
+		}
+		if args.From != 0 {
+			cmd.Args["from"] = fmt.Sprintf("%f", args.From)
+		}
+		if args.To != 0 {
+			cmd.Args["to"] = fmt.Sprintf("%f", args.To)
+		}
+		if args.Over != "" {
+			cmd.Args["over"] = args.Over
+		}
+	case "reset":
+		cmd = ctrl.Command{
+			Cmd:  ctrl.CmdSimReset,
+			Args: map[string]string{"gear": args.Gear},
+		}
+		if args.Seed != 0 {
+			cmd.Args["seed"] = fmt.Sprintf("%d", args.Seed)
+		}
+	default:
+		http.Error(w, "Invalid action", http.StatusBadRequest)
+		return
+	}
+
+	// Publish the command through the control plane and wait for a gear to
+	// acknowledge it, rather than trusting NATS having accepted the publish:
+	// with nobody subscribed, or a subscriber whose queue was already full,
+	// the old fire-and-forget publish still reported 200.
+	if s.ctrlNC == nil {
+		http.Error(w, "Control plane not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	confirmTimeout := defaultControlConfirmTimeout
+	if s.cfg != nil {
+		if d, parseErr := time.ParseDuration(s.cfg.API.ControlConfirmTimeout); parseErr == nil && d > 0 {
+			confirmTimeout = d
+		}
+	}
+	confirmCtx, cancel := context.WithTimeout(r.Context(), confirmTimeout)
+	defer cancel()
+
+	if err := ctrl.ConfirmedPublish(confirmCtx, s.ctrlNC, args.Gear, cmd); err != nil {
+		if errors.Is(err, ctrl.ErrNoAck) {
+			slog.Warn("control command not acknowledged by any gear", "gear", args.Gear, "action", action, "error", err)
+			http.Error(w, fmt.Sprintf("no gear named %q acknowledged the command", args.Gear), http.StatusServiceUnavailable)
+			return
+		}
+		slog.Error("failed to publish control command", "gear", args.Gear, "action", action, "error", err)
+		http.Error(w, "Failed to publish command", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	status := "ok"
+	switch action {
+	case "start":
+		status = "started"
+	case "stop":
+		status = "stopped"
+	case "rate":
+		status = "rate_changed"
+	case "reset":
+		status = "reset"
+	}
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": status})
 }
