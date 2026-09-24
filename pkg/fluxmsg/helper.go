@@ -10,6 +10,34 @@ import (
 
 // Helper methods to make working with generic maps easier
 
+// AsDataMap accepts either shape a nested object in Data can take on a
+// FluxMsg: a message built in process carries map[string]any, but CBOR
+// decodes an object into map[any]any, so the same field is one shape before
+// a bus hop and the other after it. Descending only into map[string]any
+// therefore makes a nested path resolve locally and fail once the message
+// has crossed the bus, with no error anywhere: the caller simply sees a
+// missing field. The one place this normalization lives: pkg/sdk and
+// pkg/gears/native/coatcheck both call it rather than each keeping their own
+// copy, which had already drifted once (see coatcheck's restore.go history).
+func AsDataMap(v any) (map[string]any, bool) {
+	switch t := v.(type) {
+	case map[string]any:
+		return t, true
+	case map[any]any:
+		out := make(map[string]any, len(t))
+		for k, val := range t {
+			ks, ok := k.(string)
+			if !ok {
+				ks = fmt.Sprint(k)
+			}
+			out[ks] = val
+		}
+		return out, true
+	default:
+		return nil, false
+	}
+}
+
 // Set stores a value regardless of nesting (using dot notation)
 // Example: msg.Set("user.address.zip", 12345)
 func (m *FluxMsg) Set(key string, val any) error {

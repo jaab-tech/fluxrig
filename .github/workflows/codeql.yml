@@ -12,7 +12,7 @@ jobs:
   analyze:
     name: Analyze
     if: github.repository == 'jaab-tech/fluxrig' && !contains(github.repository, 'internal')
-    runs-on: "ubuntu-latest"
+    runs-on: [self-hosted, oci-int]
     timeout-minutes: 360
     permissions:
       security-events: write

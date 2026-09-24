@@ -150,7 +150,11 @@ type Field struct {
 	ValuesRef   string    `yaml:"values_ref"`
 	ValidValues *ValueSet `yaml:"validValues"`
 	Format      struct {
-		Kind          string `yaml:"kind"`
+		Kind string `yaml:"kind"`
+		// Layout says how a date or a time is written on the wire: "MMDD", "hhmmss",
+		// "MMDDhhmmss" or "YYMM" (the expiry). The tokens are YYYY, YY, MM (month),
+		// DD, hh, mm (minute) and ss.
+		Layout        string `yaml:"layout"`
 		CurrencyField *int   `yaml:"currency_field"`
 	} `yaml:"format"`
 	Subfields struct {
@@ -234,7 +238,8 @@ type Spec struct {
 // four-digit key is a message, and anything else belongs to the section itself.
 type simulation struct {
 	Mix []struct {
-		Use string `yaml:"use"`
+		Use    string `yaml:"use"`
+		Weight int    `yaml:"weight"`
 	}
 	Defaults  map[int]simValue
 	Templates map[string]map[int]simValue
@@ -270,6 +275,10 @@ type simValue struct {
 		From    string         `yaml:"from"`
 		Weights map[string]int `yaml:"weights"`
 	} `yaml:"choose"`
+	// Raw carries a scalar literal or macro verbatim ("000000", "$SEQ(1)").
+	// Without it the loader silently drops every non-choice value and the
+	// generator emits sparse traffic missing STANs, dates and literals.
+	Raw string `yaml:"-"`
 }
 
 // UnmarshalYAML tolerates the common case. Most values are a literal or a macro
@@ -277,6 +286,9 @@ type simValue struct {
 // spec that never needed it.
 func (v *simValue) UnmarshalYAML(node *yaml.Node) error {
 	if node.Kind != yaml.MappingNode {
+		if node.Kind == yaml.ScalarNode {
+			v.Raw = node.Value
+		}
 		return nil
 	}
 	type raw simValue

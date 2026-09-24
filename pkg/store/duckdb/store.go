@@ -64,6 +64,7 @@ func (s *Store) SetAutoAdopt(enabled bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.autoAdopt = enabled
+	s.log.Info("SetAutoAdopt called", "enabled", enabled)
 }
 
 func (s *Store) Wipe(ctx context.Context) error {
@@ -99,12 +100,14 @@ func (s *Store) RegisterEntity(ctx context.Context, typeID uint8, machineID uuid
 
 	s.log.Info("Registering Entity", "type_id", typeID, "machine_id", machineID, "name", name, "ip", ip, "port", port, "version", version)
 
-	status := "pending"
 	s.mu.RLock()
-	if s.autoAdopt {
+	autoAdopt := s.autoAdopt
+	s.mu.RUnlock()
+	status := "pending"
+	if autoAdopt {
 		status = "active"
 	}
-	s.mu.RUnlock()
+	s.log.Debug("RegisterEntity: autoAdopt status", "autoAdopt", autoAdopt, "status", status)
 
 	// Identity Verification Logic (MachineID based)
 	var existingSecret string

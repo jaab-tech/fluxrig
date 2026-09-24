@@ -132,7 +132,9 @@ fi
 # 6.5 Verify State File (Passport)
 log_info "Verifying Passport (state.flux)..."
 STATE_FILE="$WORK_DIR/rack/data/state.flux"
-if [ -f "$STATE_FILE" ]; then
+# The Mixer lists the Rack as soon as it handles the Hello; the Rack saves its
+# passport when the reply arrives, a moment later.
+if wait_for_file "$STATE_FILE" 15; then
     log_success "Passport found at $STATE_FILE"
     log_info "Inspecting Passport..."
     INSPECT_OUT=$( "${ROOT_DIR}/bin/fluxrig" keys inspect "$STATE_FILE" )

@@ -35,10 +35,14 @@ type yamlLine struct {
 // startLine is the number of the first line as it sits in the document this text
 // came from. A fragment numbered from one is a fragment the reader then has to
 // go and find in the file.
-func renderYAML(text string, openTo, startLine int) string {
+// nums, when given, is the original line number of each line of text, so a
+// document with blocks removed still numbers the lines it kept the way the file
+// numbers them. Without that a reader opening the spec at line 700 lands
+// wherever the redaction pushed it.
+func renderYAML(text string, openTo, startLine int, nums []int) string {
 	// A zero start means the text belongs to no file, so it carries no numbers.
 	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
-	roots := buildYAMLTree(lines, startLine)
+	roots := buildYAMLTree(lines, startLine, nums)
 	var b strings.Builder
 	for _, n := range roots {
 		writeYAMLNode(&b, n, 0, openTo)
@@ -46,7 +50,7 @@ func renderYAML(text string, openTo, startLine int) string {
 	return b.String()
 }
 
-func buildYAMLTree(lines []string, startLine int) []*yamlLine {
+func buildYAMLTree(lines []string, startLine int, nums []int) []*yamlLine {
 	var roots []*yamlLine
 	var stack []*yamlLine
 
@@ -54,7 +58,11 @@ func buildYAMLTree(lines []string, startLine int) []*yamlLine {
 		// A zero start means the text belongs to no file, so no line of it is
 		// numbered — not the first, and not the ones after it either.
 		num := 0
-		if startLine > 0 {
+		if nums != nil {
+			if i < len(nums) {
+				num = nums[i]
+			}
+		} else if startLine > 0 {
 			num = startLine + i
 		}
 		if strings.TrimSpace(raw) == "" {

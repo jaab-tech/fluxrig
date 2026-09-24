@@ -24,7 +24,7 @@ on:
 
 jobs:
   lint:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, oci-int]
     steps:
       - uses: actions/checkout@v7
       - name: Check no compiled binaries are tracked
@@ -48,7 +48,7 @@ jobs:
           install-mode: "goinstall"
 
   test:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, oci-int]
     steps:
       - uses: actions/checkout@v7
       - name: Set up Go
@@ -67,7 +67,7 @@ jobs:
           fail_ci_if_error: false
 
   build:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, oci-int]
     steps:
       - uses: actions/checkout@v7
       - name: Set up Go

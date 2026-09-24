@@ -92,6 +92,12 @@ type ApiConfig struct {
 	TLSCertFile string `koanf:"tls_cert_file" example:"server.crt"`
 	// TLSKeyFile path to server key.
 	TLSKeyFile string `koanf:"tls_key_file" example:"server.key"`
+	// ControlConfirmTimeout bounds how long a control-plane command (the
+	// simulator start/stop/rate/reset endpoints) waits for a gear to
+	// acknowledge receiving it before the request answers that nobody is
+	// listening, rather than the success a bare, unconfirmed publish would
+	// have reported.
+	ControlConfirmTimeout string `koanf:"control_confirm_timeout" example:"2s"`
 }
 
 // LoadMixer reads configuration from a TOML file and Environment Variables.
@@ -120,6 +126,7 @@ func LoadMixer(path string) (*MixerConfig, error) {
 	_ = k.Set("mixer.scenario_wait_timeout", "15s")
 	_ = k.Set("api.port", 8090)
 	_ = k.Set("api.read_header_timeout", "3s")
+	_ = k.Set("api.control_confirm_timeout", "2s")
 
 	// Defaults: Snake
 	_ = k.Set("snake.url", "nats://localhost:4222")
@@ -128,6 +135,10 @@ func LoadMixer(path string) (*MixerConfig, error) {
 	_ = k.Set("snake.stream_name", "flux-msg")
 	_ = k.Set("snake.operation_timeout", "5s")
 	_ = k.Set("snake.inactive_threshold", "30s")
+	_ = k.Set("snake.store_encryption", true)
+	_ = k.Set("snake.store_cipher", "chacha")
+	_ = k.Set("snake.stream_max_age", "24h")
+	_ = k.Set("snake.stream_max_bytes", 1073741824)
 
 	// Defaults: Telemetry (Self-Monitoring)
 	_ = k.Set("telemetry.service_name", "flux.mixer")

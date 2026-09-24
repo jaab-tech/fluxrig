@@ -22,7 +22,7 @@
 ## Key Capabilities
 
 *   **Protocol Agnostic**: Native support for ISO8583, JSON, XML, Protobuf, and raw binary protocols.
-*   **Edge Autonomy**: Racks process logic independently, ensuring business continuity during network failures.
+*   **Edge resilience**: A Rack keeps its identity and last scenario in local state, reconnects to the Mixer by itself after an outage, keeps running the flows that stay inside it, and can start without the Mixer.
 *   **Unified Control**: A centralized Mixer for fleet-wide policy, identity management, and real-time telemetry.
 *   **High-Fidelity Observability**: Native OpenTelemetry (OTel) integration for deep tracing and metrics without sidecars.
 *   **Extensible Logic**: Custom processing modules (Gears) written in Go or WebAssembly (Wasm).

@@ -35,7 +35,12 @@ type RackSettings struct {
 	// DrainTimeout bounds a graceful stop (SIGTERM or shutdown command). It
 	// must exceed the largest gear ticket TTL so in-flight work can complete
 	// or time out before the process exits. Default 35s (> a 30s switch TTL).
-	DrainTimeout       string `koanf:"drain_timeout"`
+	DrainTimeout string `koanf:"drain_timeout"`
+	// LaneQueueSize is how many messages each wire inside the Rack can hold in memory
+	// between the gear that emits and the gear that consumes. LaneSendTimeout is how
+	// long an emitting gear waits for room in a full queue before it gets an error.
+	LaneQueueSize      int    `koanf:"lane_queue_size" example:"1024"`
+	LaneSendTimeout    string `koanf:"lane_send_timeout" example:"5s"`
 	EnrollmentTimeout  string `koanf:"enrollment_timeout"`
 	EnrollmentInterval string `koanf:"enrollment_interval"`
 	MaxHops            int    `koanf:"max_hops"`
@@ -50,6 +55,7 @@ func LoadRack(path string) (*RackConfig, error) {
 	// 1. Defaults
 	_ = k.Set("base.state_dir", "./data")
 	_ = k.Set("base.state_file", "rack.flux")
+	_ = k.Set("base.scenario_file", "scenario.flux")
 
 	_ = k.Set("logging.level", "info")
 	_ = k.Set("logging.filename", "logs/fluxrig.log")
@@ -74,6 +80,8 @@ func LoadRack(path string) (*RackConfig, error) {
 	_ = k.Set("rack.drain_timeout", "35s")
 	_ = k.Set("rack.convergence_timeout", "5s")
 	_ = k.Set("rack.handshake_interval", "500ms")
+	_ = k.Set("rack.lane_queue_size", 1024)
+	_ = k.Set("rack.lane_send_timeout", "5s")
 	_ = k.Set("rack.heartbeat_interval", "30s")
 	_ = k.Set("rack.enrollment_timeout", "15s")
 	_ = k.Set("rack.enrollment_interval", "2s")
@@ -90,6 +98,10 @@ func LoadRack(path string) (*RackConfig, error) {
 	_ = k.Set("snake.subscription_retry_attempts", 5)
 	_ = k.Set("snake.inactive_threshold", "30s")
 	_ = k.Set("snake.convergence_delay", "100ms")
+	_ = k.Set("snake.initial_retry_wait", "500ms")
+	_ = k.Set("snake.initial_retry_attempts", 10)
+	_ = k.Set("snake.offline_start_timeout", "3s")
+	_ = k.Set("snake.offline_retry_interval", "5s")
 
 	// 2. Load from File
 	if path != "" {
@@ -158,6 +170,9 @@ func LoadRack(path string) (*RackConfig, error) {
 	// Map store.state_file to base.state_file (Always override if store.state_file is present in File/Env)
 	if k.Exists("store.state_file") {
 		_ = k.Set("base.state_file", k.String("store.state_file"))
+	}
+	if k.Exists("store.scenario_file") {
+		_ = k.Set("base.scenario_file", k.String("store.scenario_file"))
 	}
 
 	var cfg RackConfig

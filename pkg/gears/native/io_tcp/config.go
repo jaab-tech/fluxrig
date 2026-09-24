@@ -39,6 +39,13 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 	}
 }
 
+// Framing mode for messages
+const (
+	FramingDelimiter     = "delimiter"      // Delimiter-based framing (default)
+	FramingLengthPrefix2 = "length_prefix2" // 2-byte big-endian length prefix
+	FramingLengthPrefix4 = "length_prefix4" // 4-byte big-endian length prefix
+)
+
 // Config holds the configuration for the Simple TCP Gear.
 type Config struct {
 	// Mode: 'server' (Listen) or 'client' (Dial)
@@ -51,26 +58,44 @@ type Config struct {
 	// Client Mode Settings
 	Connect       string   `json:"connect" mapstructure:"connect"`               // e.g. "localhost:9000"
 	ReconnectWait Duration `json:"reconnect_wait" mapstructure:"reconnect_wait"` // e.g. "5s"
+	ReadResponses bool     `json:"read_responses" mapstructure:"read_responses"` // Client: read responses from server (default true)
+
+	// Framing Settings
+	Framing           string `json:"framing" mapstructure:"framing"`                       // "delimiter" (default), "length_prefix2", "length_prefix4"
+	Delimiter         string `json:"delimiter" mapstructure:"delimiter"`                   // Delimiter string (e.g. "\n", "<log")
+	DelimiterPosition string `json:"delimiter_position" mapstructure:"delimiter_position"` // "suffix" (default) or "prefix"
+	DelimiterInclude  bool   `json:"delimiter_include" mapstructure:"delimiter_include"`   // Ingress: Keep delimiter in payload
+	DelimiterAppend   bool   `json:"delimiter_append" mapstructure:"delimiter_append"`     // Egress: Append delimiter to outgoing
 
 	// Common Settings
-	Delimiter         string   `json:"delimiter" mapstructure:"delimiter"`                   // Delimiter string (e.g. "\n", "<log")
-	DelimiterPosition string   `json:"delimiter_position" mapstructure:"delimiter_position"` // "suffix" (default) or "prefix"
-	DelimiterInclude  bool     `json:"delimiter_include" mapstructure:"delimiter_include"`   // Ingress: Keep delimiter in payload
-	DelimiterAppend   bool     `json:"delimiter_append" mapstructure:"delimiter_append"`     // Egress: Append delimiter to outgoing
-	IdleTimeout       Duration `json:"idle_timeout" mapstructure:"idle_timeout"`             // Close connection if idle
+	IdleTimeout Duration `json:"idle_timeout" mapstructure:"idle_timeout"` // Close connection if idle
+
+	// Server Mode: outbound traffic with no connection to reach yet (nothing
+	// connected, or the message named no conn.id at all) queues here instead
+	// of being dropped. 0 selects the default (1000); a message whose named
+	// conn.id belongs to a connection that is gone is never queued here, it
+	// is refused (see server.go, Process).
+	MaxBufferedMessages int `json:"max_buffered_messages" mapstructure:"max_buffered_messages"`
 }
 
 // DefaultConfig returns safe defaults
 func DefaultConfig() Config {
 	return Config{
-		Mode:              ModeServer,
-		Bind:              ":8080",
-		MaxConnections:    4096,
-		ReconnectWait:     Duration(5 * time.Second),
-		DelimiterPosition: "suffix",
-		IdleTimeout:       Duration(60 * time.Second),
+		Mode:                ModeServer,
+		Bind:                ":8080",
+		MaxConnections:      4096,
+		ReconnectWait:       Duration(5 * time.Second),
+		ReadResponses:       true,
+		Framing:             FramingDelimiter,
+		DelimiterPosition:   "suffix",
+		IdleTimeout:         Duration(60 * time.Second),
+		MaxBufferedMessages: defaultMaxBufferedMessages,
 	}
 }
+
+// defaultMaxBufferedMessages is used when MaxBufferedMessages is left unset
+// (0), including by a Config built directly rather than through ParseConfig.
+const defaultMaxBufferedMessages = 1000
 
 // ParseConfig decodes the raw map into the Config struct.
 // We use JSON round-trip to respect the json tags.
@@ -116,12 +141,15 @@ func SchemaJSON() string {
     "bind": { "type": "string", "default": ":8080", "description": "server mode: address to listen on, e.g. ':9000'." },
     "connect": { "type": "string", "description": "client mode: upstream address to dial, host:port." },
     "reconnect_wait": { "type": "string", "pattern": "^[0-9]+(s|ms|m|h)$", "default": "5s", "description": "client mode: delay before redialing a dropped connection, e.g. '1s'." },
+    "read_responses": { "type": "boolean", "default": true, "description": "client mode: whether to read responses from the server. Set to false for one-way send (e.g. to an echo server that doesn't send proper ISO8583 responses)." },
     "max_connections": { "type": "integer", "default": 4096, "description": "server mode: maximum concurrent connections (0 = unlimited)." },
+    "framing": { "type": "string", "enum": ["delimiter", "length_prefix2", "length_prefix4"], "default": "delimiter", "description": "message framing mode: delimiter (newline, etc), length_prefix2 (2-byte BE), length_prefix4 (4-byte BE)." },
     "delimiter": { "type": "string", "description": "message delimiter for framing (e.g. a newline, 0x03); if empty, frames on newline (ScanLines)." },
     "delimiter_position": { "type": "string", "enum": ["suffix", "prefix"], "default": "suffix", "description": "where the delimiter sits relative to the message: suffix or prefix." },
     "delimiter_include": { "type": "boolean", "default": false, "description": "ingress: keep the delimiter in the emitted payload." },
     "delimiter_append": { "type": "boolean", "default": false, "description": "egress: append the delimiter to outgoing payloads." },
-    "idle_timeout": { "type": "string", "pattern": "^[0-9]+(s|ms|m|h)$", "default": "60s", "description": "max time a connection may sit idle before it is closed." }
+    "idle_timeout": { "type": "string", "pattern": "^[0-9]+(s|ms|m|h)$", "default": "60s", "description": "max time a connection may sit idle before it is closed." },
+    "max_buffered_messages": { "type": "integer", "default": 1000, "description": "server mode: outbound messages queued when nothing is connected yet, or when a message names no conn.id (0 selects the default)." }
   },
   "required": ["mode"]
 }`

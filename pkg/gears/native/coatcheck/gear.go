@@ -99,7 +99,8 @@ func (g *CoatCheckGear) extractKey(msg *fluxmsg.FluxMsg) (string, error) {
 	for _, field := range g.config.KeyFields {
 		val, found := sdk.GetValue(msg, field)
 		if !found {
-			return "", fmt.Errorf("missing key field: %s", field)
+			return "", fmt.Errorf("missing key field: %s (message carries data keys %v)",
+				field, dataKeys(msg))
 		}
 		keyParts = append(keyParts, g.normalizeKeyPart(fmt.Sprint(val)))
 	}
@@ -259,4 +260,41 @@ func (g *CoatCheckGear) Stop() error {
 		g.daemon.Stop()
 	}
 	return nil
+}
+
+// dataKeys lists top-level Data keys for missing-field diagnostics, so a
+// key-extraction failure names what the message actually carries. The
+// iso8583 subtree is expanded one level with value types, because that
+// is where nested-descent misses hide.
+func dataKeys(msg *fluxmsg.FluxMsg) []string {
+	if msg == nil || msg.Data == nil {
+		return nil
+	}
+	keys := make([]string, 0, len(msg.Data))
+	for k, v := range msg.Data {
+		keys = append(keys, k)
+		if k == "iso8583" {
+			keys = append(keys, "iso8583-subtree="+describeValue(v))
+		}
+	}
+	return keys
+}
+
+func describeValue(v any) string {
+	switch t := v.(type) {
+	case map[string]any:
+		inner := make([]string, 0, len(t))
+		for k, vv := range t {
+			inner = append(inner, k+":"+describeValue(vv))
+		}
+		return "map" + strings.Join(inner, ",")
+	case map[any]any:
+		inner := make([]string, 0, len(t))
+		for k, vv := range t {
+			inner = append(inner, fmt.Sprintf("%v", k)+":"+describeValue(vv))
+		}
+		return "anymap" + strings.Join(inner, ",")
+	default:
+		return fmt.Sprintf("%T", v)
+	}
 }

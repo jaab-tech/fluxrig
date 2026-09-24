@@ -61,16 +61,16 @@ bin/fluxrig-lite: catalog $(shell find cmd/fluxrig -name "*.go")
 	@mkdir -p bin
 	go build $(GO_FLAGS) -tags nobento -ldflags "$(LDFLAGS)" -o bin/fluxrig-lite ./cmd/fluxrig
 
-# Only the Rack needs a lean variant: the Mixer is the control plane and never
-# links pkg/gears (and therefore never links Bento), so a `nobento` Mixer is
-# byte-identical to the normal one.
+# Only the Rack has a lean variant. The Mixer links pkg/gears too, for the gear
+# catalog it serves, so it carries Bento as well and a `nobento` Mixer is a
+# different, smaller binary. No target builds one.
 build-lite: bin/fluxrig-lite ## Build the lean Rack without the Bento gear
 	@echo "--------------------------------------------------"
 	@echo "Lean Build Complete (-tags nobento)"
 	@ls -lh bin/fluxrig-lite | awk '{printf "  %-28s %s\n", $$9, $$5}'
 	@echo "--------------------------------------------------"
 
-build-all-variants: build-bin build-lite ## Build both the full and lean Rack binaries
+build-all-variants: build-bin build-lite ## Build all variants: full and lean
 	@echo "--------------------------------------------------"
 	@ls -lh bin/fluxrig bin/fluxrig-lite bin/fluxrig-mixer 2>/dev/null | awk '{printf "  %-28s %s\n", $$9, $$5}'
 	@echo "--------------------------------------------------"

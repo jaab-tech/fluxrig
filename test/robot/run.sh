@@ -46,8 +46,12 @@ else
     SUITE_DIR="suites"
 fi
 
-# Ensure absolute path for linking logic (relative to BASE_DIR execution)
-LINK_BASE="${BASE_DIR}/${SUITE_DIR}"
+# A suite directory given as an absolute path (a suite kept in another repository)
+# links its results next to itself. A relative one resolves against BASE_DIR.
+case "$SUITE_DIR" in
+    /*) LINK_BASE="$SUITE_DIR" ;;
+    *)  LINK_BASE="${BASE_DIR}/${SUITE_DIR}" ;;
+esac
 mkdir -p "$LINK_BASE"
 
 # Update Symlinks
@@ -76,21 +80,29 @@ fi
 # a rebuild and this check will disagree and deadlock.
 # Set FLUXRIG_ROBOT_SKIP_BIN_CHECK=true to run against bin/ as-is.
 PROJECT_ROOT="$(cd "${BASE_DIR}/../.." && pwd)"
+# FLUXRIG_BIN_DIR points the suites at binaries built elsewhere (see lib/binpaths.py).
+# The caller owns that build, so only their presence is checked: staleness is measured
+# against this repository's sources, which say nothing about a build made from others.
+BIN_DIR="${FLUXRIG_BIN_DIR:-${PROJECT_ROOT}/bin}"
 if [ "${FLUXRIG_ROBOT_SKIP_BIN_CHECK}" != "true" ]; then
     STALE=""
     for b in fluxrig fluxrig-mixer iso8583-tool; do
-        bin="${PROJECT_ROOT}/bin/${b}"
+        bin="${BIN_DIR}/${b}"
         if [ ! -x "$bin" ]; then
             STALE="${STALE}
-  bin/${b} is missing"
-        elif [ -n "$(find "${PROJECT_ROOT}/cmd/${b}" "${PROJECT_ROOT}/pkg" -name '*.go' -not -path '*/mixer/api/docs/*' -newer "$bin" -print -quit 2>/dev/null)" ]; then
+  ${bin} is missing"
+        elif [ -z "${FLUXRIG_BIN_DIR}" ] && [ -n "$(find "${PROJECT_ROOT}/cmd/${b}" "${PROJECT_ROOT}/pkg" -name '*.go' -not -path '*/mixer/api/docs/*' -newer "$bin" -print -quit 2>/dev/null)" ]; then
             STALE="${STALE}
   bin/${b} is older than a .go source"
         fi
     done
     if [ -n "$STALE" ]; then
         printf '[ROBOT] Refusing to run against stale or missing binaries:%s\n' "$STALE" >&2
-        printf '[ROBOT] Build them first:  make build-bin\n' >&2
+        if [ -n "${FLUXRIG_BIN_DIR}" ]; then
+            printf '[ROBOT] FLUXRIG_BIN_DIR=%s is built by whoever set it.\n' "$FLUXRIG_BIN_DIR" >&2
+        else
+            printf '[ROBOT] Build them first:  make build-bin\n' >&2
+        fi
         printf '[ROBOT] Or bypass on purpose:  FLUXRIG_ROBOT_SKIP_BIN_CHECK=true %s %s\n' "$0" "$*" >&2
         exit 1
     fi

@@ -44,6 +44,8 @@ func NewNatsBus(streamName string) *NatsBus {
 }
 
 // Connect establishes the connection to the NATS server and initializes JetStream.
+// Implements retry with exponential backoff for initial connection to handle
+// race conditions where the NATS server reports ready but isn't accepting connections yet.
 func (n *NatsBus) Connect(url string, opts ConnectOptions) error {
 	// 1. Build Options
 	natsOpts := []nats.Option{
@@ -98,14 +100,78 @@ func (n *NatsBus) Connect(url string, opts ConnectOptions) error {
 		natsOpts = append(natsOpts, nats.Secure(tlsConfig))
 	}
 
-	// 2. Connect to NATS Core
-	nc, err := nats.Connect(url, natsOpts...)
+	// 2. Connect to NATS Core with retry logic for initial connection
+	nc, err := dialWithRetry(url, natsOpts, opts)
 	if err != nil {
 		return err
 	}
 	n.conn = nc
 
 	return n.finalizeConnect(opts)
+}
+
+// Defaults for the initial connection retry, used when ConnectOptions leaves
+// them unset. Rack and Mixer configuration set them explicitly
+// (snake.initial_retry_wait and snake.initial_retry_attempts).
+const (
+	defaultInitialRetryWait     = 500 * time.Millisecond
+	defaultInitialRetryAttempts = 10
+	initialRetryBackoff         = 1.5
+)
+
+// dialWithRetry connects to url and retries a failed first connection with
+// exponential backoff. It gives up after InitialRetryAttempts tries or, when
+// InitialRetryTimeout is set, as soon as the next wait would carry it past that
+// bound. A single attempt is also clamped to the time left, so a host that never
+// answers cannot hold the caller beyond the bound.
+func dialWithRetry(url string, natsOpts []nats.Option, opts ConnectOptions) (*nats.Conn, error) {
+	wait := opts.InitialRetryWait
+	if wait == 0 {
+		wait = defaultInitialRetryWait
+	}
+	attempts := opts.InitialRetryAttempts
+	if attempts == 0 {
+		attempts = defaultInitialRetryAttempts
+	}
+	var deadline time.Time
+	if opts.InitialRetryTimeout > 0 {
+		deadline = time.Now().Add(opts.InitialRetryTimeout)
+	}
+
+	for attempt := 1; ; attempt++ {
+		attemptOpts := natsOpts
+		if !deadline.IsZero() {
+			remaining := time.Until(deadline)
+			if remaining < opts.ConnectTimeout || opts.ConnectTimeout == 0 {
+				attemptOpts = append(append([]nats.Option{}, natsOpts...), nats.Timeout(max(remaining, time.Millisecond)))
+			}
+		}
+
+		nc, err := nats.Connect(url, attemptOpts...)
+		if err == nil {
+			slog.Info("NATS connection established", "attempt", attempt)
+			return nc, nil
+		}
+
+		if attempt >= attempts {
+			return nil, fmt.Errorf("failed to connect to NATS after %d attempts: %w", attempt, err)
+		}
+		if !deadline.IsZero() && time.Now().Add(wait).After(deadline) {
+			return nil, fmt.Errorf("failed to connect to NATS after %d attempts within %s: %w", attempt, opts.InitialRetryTimeout, err)
+		}
+
+		slog.Info("NATS connection failed, retrying...", "attempt", attempt, "max_attempts", attempts, "error", err, "next_retry_in", wait)
+		if opts.Ctx != nil {
+			select {
+			case <-opts.Ctx.Done():
+				return nil, fmt.Errorf("failed to connect to NATS after %d attempts: %w", attempt, opts.Ctx.Err())
+			case <-time.After(wait):
+			}
+		} else {
+			time.Sleep(wait)
+		}
+		wait = time.Duration(float64(wait) * initialRetryBackoff)
+	}
 }
 
 func (n *NatsBus) finalizeConnect(opts ConnectOptions) error {

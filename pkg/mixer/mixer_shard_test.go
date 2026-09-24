@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/jaab-tech/fluxrig/pkg/config"
 	"github.com/jaab-tech/fluxrig/pkg/pki"
@@ -21,9 +22,13 @@ func TestRun_ErrorPaths(t *testing.T) {
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	t.Run("InvalidStoreDir", func(t *testing.T) {
+		// A directory below a regular file cannot be created by any user. A missing
+		// path under the root of the disk can, when the tests run as root.
+		blocker := filepath.Join(tmpDir, "blocker")
+		require.NoError(t, os.WriteFile(blocker, nil, 0o600))
 		cfg := &config.MixerConfig{
 			Store: config.StoreConfig{
-				Dir: "/nonexistent/path/that/fails/mkdir",
+				Dir: filepath.Join(blocker, "store"),
 			},
 		}
 		app := NewApp(cfg, "", nil)

@@ -129,7 +129,12 @@ func (c *Client) handleConn(conn net.Conn) {
 		_ = conn.Close()
 	}()
 
-	c.log.Info("connected", "target", c.config.Connect)
+	c.log.Info("connected", "target", c.config.Connect, "read_responses", c.config.ReadResponses)
+
+	if !c.config.ReadResponses {
+		c.watchForClose(conn)
+		return
+	}
 
 	scanner := bufio.NewScanner(conn)
 	scanner.Split(MakeSplitter(c.config))
@@ -164,15 +169,13 @@ func (c *Client) handleConn(conn net.Conn) {
 				"flux_id", msg.FluxID.String(),
 				"target", c.config.Connect,
 				"size", len(payload),
-				"payload", string(payload),
-				"hex", fmt.Sprintf("%x", payload),
+				"payload", logger.MaskPANString(string(payload)),
+				"hex", fmt.Sprintf("%x", logger.MaskPAN(payload)),
 			)
 		} else if c.log.Enabled(context.Background(), slog.LevelDebug) {
 			c.log.Debug("received message",
 				"target", c.config.Connect,
 				"size", len(payload),
-				"payload", string(payload),
-				"hex", fmt.Sprintf("%x", payload),
 			)
 		}
 
@@ -183,6 +186,33 @@ func (c *Client) handleConn(conn net.Conn) {
 		c.log.Warn("connection lost", "error", err)
 	} else {
 		c.log.Info("connection closed by peer")
+	}
+}
+
+// watchForClose blocks until conn dies or the gear stops. ReadResponses is
+// false for this connection, so nothing it sends back is a protocol this gear
+// parses into messages, but the connection dying must still be noticed: a
+// bare <-c.done here (the previous behavior) never detects a peer that closes
+// or resets the connection, so runLoop's dial/backoff reconnect logic never
+// runs again, and Process keeps writing to a socket nobody is reading from,
+// silently, until the gear is stopped.
+func (c *Client) watchForClose(conn net.Conn) {
+	closed := make(chan struct{})
+	go func() {
+		defer close(closed)
+		buf := make([]byte, 1)
+		for {
+			if _, err := conn.Read(buf); err != nil {
+				return
+			}
+			// Discarded: not a response this gear reads for protocol purposes.
+		}
+	}()
+	select {
+	case <-c.done:
+		// handleConn's own defer closes conn, which unblocks the read above.
+	case <-closed:
+		c.log.Warn("connection closed while not reading responses", "target", c.config.Connect)
 	}
 }
 
@@ -210,15 +240,13 @@ func (c *Client) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.Fl
 				"flux_id", msg.FluxID.String(),
 				"target", c.config.Connect,
 				"size", len(msg.RawPayload),
-				"payload_str", string(msg.RawPayload),
+				"payload_str", logger.MaskPANString(string(msg.RawPayload)),
 				"flux_path", pathStr,
 			)
 		} else if c.log.Enabled(ctx, slog.LevelDebug) {
 			c.log.Debug("sending message",
 				"target", c.config.Connect,
 				"size", len(msg.RawPayload),
-				"payload", string(msg.RawPayload),
-				"hex", fmt.Sprintf("%x", msg.RawPayload),
 			)
 		}
 

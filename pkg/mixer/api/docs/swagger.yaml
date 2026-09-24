@@ -110,6 +110,23 @@ definitions:
         example: imported_and_activated
         type: string
     type: object
+  api.SimControlArgs:
+    properties:
+      from:
+        type: number
+      gear:
+        type: string
+      over:
+        type: string
+      seed:
+        type: integer
+      shape:
+        type: string
+      to:
+        type: number
+      tps:
+        type: number
+    type: object
   api.SpecSummary:
     properties:
       doc:
@@ -175,6 +192,15 @@ definitions:
     type: object
   config.ApiConfig:
     properties:
+      controlConfirmTimeout:
+        description: |-
+          ControlConfirmTimeout bounds how long a control-plane command (the
+          simulator start/stop/rate/reset endpoints) waits for a gear to
+          acknowledge receiving it before the request answers that nobody is
+          listening, rather than the success a bare, unconfirmed publish would
+          have reported.
+        example: 2s
+        type: string
       port:
         description: Port to listen on.
         example: 8090
@@ -196,6 +222,11 @@ definitions:
     properties:
       name:
         example: node-01
+        type: string
+      scenarioFile:
+        description: ScenarioFile names, inside StateDir, the Rack's copy of the last
+          scenario it applied. Empty keeps no copy.
+        example: scenario.flux
         type: string
       stateDir:
         example: ./data
@@ -375,6 +406,16 @@ definitions:
       ip:
         example: 10.0.0.5
         type: string
+      laneQueueSize:
+        description: |-
+          LaneQueueSize is how many messages each wire inside the Rack can hold in memory
+          between the gear that emits and the gear that consumes. LaneSendTimeout is how
+          long an emitting gear waits for room in a full queue before it gets an error.
+        example: 1024
+        type: integer
+      laneSendTimeout:
+        example: 5s
+        type: string
       machineID:
         description: 'Runtime only: set via Passport or Mixer assignment'
         type: string
@@ -399,8 +440,20 @@ definitions:
       inactiveThreshold:
         example: 30s
         type: string
+      initialRetryAttempts:
+        example: 10
+        type: integer
+      initialRetryWait:
+        example: 500ms
+        type: string
       insecureSkipVerify:
         type: boolean
+      offlineRetryInterval:
+        example: 5s
+        type: string
+      offlineStartTimeout:
+        example: 3s
+        type: string
       operationTimeout:
         example: 5s
         type: string
@@ -412,6 +465,22 @@ definitions:
         type: string
       rootCAFile:
         type: string
+      storeCipher:
+        example: chacha
+        type: string
+      storeEncryption:
+        example: true
+        type: boolean
+      storeKeyFile:
+        type: string
+      storeOldKeyFile:
+        type: string
+      streamMaxAge:
+        example: 24h
+        type: string
+      streamMaxBytes:
+        example: 1073741824
+        type: integer
       streamName:
         example: flux-msg
         type: string
@@ -580,6 +649,12 @@ definitions:
       id:
         description: Assigned by Registry/Mixer
         type: string
+      lane:
+        description: |-
+          Lane is "hot", "guaranteed" or empty. Empty means hot inside one Rack and
+          guaranteed between Racks.
+        example: guaranteed
+        type: string
       to:
         example: router.in
         type: string
@@ -723,6 +798,61 @@ paths:
       summary: Get Configuration
       tags:
       - core
+  /control/sim/{action}:
+    post:
+      consumes:
+      - application/json
+      description: Sends a start, stop, rate, or reset command to a named gear and
+        waits for it to acknowledge receiving the command. The gear must be running
+        on an enrolled Rack and subscribed to its control plane; the response reflects
+        delivery, not that the gear finished acting on the command.
+      parameters:
+      - description: Command
+        enum:
+        - start
+        - stop
+        - rate
+        - reset
+        in: path
+        name: action
+        required: true
+        type: string
+      - description: Target gear and, for rate/reset, its arguments
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.SimControlArgs'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "400":
+          description: Invalid JSON, missing gear, or an unknown action
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "503":
+          description: No control-plane connection, or no gear acknowledged the command
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Simulator control
+      tags:
+      - control
   /entities/stats:
     get:
       description: Returns cached metrics for a specific entity or all entities.
@@ -888,6 +1018,19 @@ paths:
           description: OK
           schema:
             $ref: '#/definitions/api.ScenarioImportResponse'
+        "400":
+          description: The scenario could not be read or failed validation
+          schema:
+            type: string
+        "409":
+          description: 'Imported, but not activated: a gear deploys to a name that
+            is not an active Rack'
+          schema:
+            type: string
+        "500":
+          description: Imported, but activation failed
+          schema:
+            type: string
       summary: Import Scenario
       tags:
       - scenario

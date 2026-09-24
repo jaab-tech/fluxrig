@@ -439,7 +439,7 @@ func HTMLDoc(doc *Document) string {
 		lit(`<div class="sect" data-sec="written">`)
 		lit("<h3 id=\"written\">The spec, as written</h3>\n")
 		lit("<p>Sections fold; the top two levels start open.</p>\n")
-		w(`<div class="yaml">%s</div>`+"\n", renderYAML(doc.Source, 2, 1))
+		w(`<div class="yaml">%s</div>`+"\n", renderYAML(doc.Source, 2, 1, doc.SourceLines))
 		lit("</div>\n")
 
 		// The byte layout is not in the file when a base is named, so a page
@@ -465,7 +465,7 @@ func HTMLDoc(doc *Document) string {
 				lit("<p>Declared in the document above, under <code>wire.fields</code>: this spec names " +
 					"no base, so nothing was merged into it. Shown here as the parser reads it.</p>\n")
 			}
-			w(`<div class="yaml nonum">%s</div>`+"\n", renderYAML(doc.Wire, 2, 0))
+			w(`<div class="yaml nonum">%s</div>`+"\n", renderYAML(doc.Wire, 2, 0, nil))
 			lit("</div>\n")
 		}
 		lit("</section>\n")
@@ -554,9 +554,9 @@ func panelFor(id, title, caption, body string, startLine int) string {
 	}
 	// Both go through the same renderer: a wire block is YAML too, and rendering
 	// it any other way is a second way for it to look wrong.
-	rendered := `<div class="yaml inline nonum">` + renderYAML(body, 99, 0) + `</div>`
+	rendered := `<div class="yaml inline nonum">` + renderYAML(body, 99, 0, nil) + `</div>`
 	if startLine > 0 {
-		rendered = `<div class="yaml inline">` + renderYAML(body, 99, startLine) + `</div>`
+		rendered = `<div class="yaml inline">` + renderYAML(body, 99, startLine, nil) + `</div>`
 	}
 	return fmt.Sprintf(`<div class="srcpanel" id="src-%s" data-title="%s" hidden><p class="cap">%s</p>%s</div>`,
 		esc(id), esc(title), esc(caption), rendered) + "\n"

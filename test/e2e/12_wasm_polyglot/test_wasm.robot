@@ -59,6 +59,10 @@ Verify Wasm Gear Loads And Processes
 
     # 1. Start Mixer and Rack
     Log    Starting Mixer...
+    # The previous case left a message store encrypted with a key derived from ITS
+    # cluster key, and this case makes a new one. A store does not open with another
+    # key, so the state that depends on the old key is reset with it.
+    Remove Directory    ${WORK_DIR}/mixer/data/snake    recursive=True
     Generate Cluster Key   work_dir=${WORK_DIR}/mixer
     Start Mixer    config_file=${MIXER_CONFIG}    work_dir=${WORK_DIR}/mixer    alias=mixer
     Wait For Healthy    port=${MIXER_PORT}

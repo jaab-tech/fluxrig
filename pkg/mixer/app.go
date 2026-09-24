@@ -5,6 +5,7 @@ package mixer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -118,6 +119,7 @@ func (a *App) Run(ctx context.Context) error {
 	if errMig := store.Migrate(ctx); errMig != nil {
 		return fmt.Errorf("failed to migrate store: %w", errMig)
 	}
+	a.log.Info("Setting auto_adopt", "enabled", a.cfg.Enrollment.AutoAdopt)
 	store.SetAutoAdopt(a.cfg.Enrollment.AutoAdopt)
 
 	// 2. Identity Management (Sovereign Passport)
@@ -180,6 +182,20 @@ func (a *App) Run(ctx context.Context) error {
 		}
 	}
 
+	storeKey, storeOldKey, storeKeySource, errStoreKey := resolveStoreKeys(&a.cfg.Snake, clusterKey)
+	if errStoreKey != nil {
+		return fmt.Errorf("failed to resolve the snake store key: %w", errStoreKey)
+	}
+	streamMaxAge, errMaxAge := parseStreamMaxAge(a.cfg.Snake.StreamMaxAge)
+	if errMaxAge != nil {
+		return errMaxAge
+	}
+	if storeKey == "" {
+		a.log.Warn("Snake store encryption is OFF: every message on a wire rests in clear on this disk", "setting", "snake.store_encryption")
+	} else {
+		a.log.Info("Snake store is encrypted at rest", "cipher", a.cfg.Snake.StoreCipher, "key", storeKeySource)
+	}
+
 	snakeSrv, err := snake.NewServer(ctx, snake.Config{
 		Port:           a.cfg.Snake.Port,
 		StoreDir:       filepath.Join(a.cfg.Store.Dir, "snake"),
@@ -188,6 +204,11 @@ func (a *App) Run(ctx context.Context) error {
 		TLSCert:        a.cfg.Snake.TLSCertFile,
 		TLSKey:         a.cfg.Snake.TLSKeyFile,
 		LogLevel:       a.cfg.Logging.Level,
+		StoreKey:       storeKey,
+		StoreOldKey:    storeOldKey,
+		StoreCipher:    a.cfg.Snake.StoreCipher,
+		StreamMaxAge:   streamMaxAge,
+		StreamMaxBytes: a.cfg.Snake.StreamMaxBytes,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to start snake: %w", err)
@@ -418,7 +439,7 @@ func (a *App) Run(ctx context.Context) error {
 	}
 
 	// 9. API Server
-	apiSrv := api.NewServer(store, r.Pub, clusterKey, scenarioCtrl, mCache, mixerState.MachineID, mixerEntityID, a.cfg, wasmCat)
+	apiSrv := api.NewServer(store, r.Pub, clusterKey, scenarioCtrl, mCache, mixerState.MachineID, mixerEntityID, a.cfg, wasmCat, r.NC)
 	if specMgr, errSpec := manager.NewManager(filepath.Join(a.cfg.Store.Dir, "store")); errSpec == nil {
 		apiSrv.WithSpecStore(specMgr)
 	}
@@ -453,13 +474,13 @@ func (a *App) Run(ctx context.Context) error {
 			} else {
 				// Activate it
 				if errAct := scenarioCtrl.Activate(ctx, name); errAct != nil {
-					a.log.Warn("Failed to activate startup scenario", "name", name, "error", errAct)
+					logStartupActivateResult(a.log, name, errAct)
 				}
 			}
 		} else {
 			// Assume it's a name already in the repo
 			if errAct := scenarioCtrl.Activate(ctx, a.scenarioRef); errAct != nil {
-				a.log.Warn("Failed to activate named startup scenario", "name", a.scenarioRef, "error", errAct)
+				logStartupActivateResult(a.log, a.scenarioRef, errAct)
 			}
 		}
 	}
@@ -470,4 +491,18 @@ func (a *App) Run(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// logStartupActivateResult reports how Activate failed for a startup scenario.
+// ErrNoRackReached is the ordinary case at boot: no Rack has enrolled yet when
+// this runs, and the scenario is still the Mixer's active one, reaching each
+// Rack as it enrolls (Activate's own comment on this). Logging that at Warn
+// would print a false "activation failed" on nearly every cold start that
+// pins a deploy target; anything else is a real failure and stays a Warn.
+func logStartupActivateResult(log *slog.Logger, name string, err error) {
+	if errors.Is(err, controller.ErrNoRackReached) {
+		log.Info("Startup scenario activated; no Rack has enrolled yet", "name", name, "detail", err)
+		return
+	}
+	log.Warn("Failed to activate startup scenario", "name", name, "error", err)
 }

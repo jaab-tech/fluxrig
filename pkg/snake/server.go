@@ -25,7 +25,22 @@ import (
 type Server struct {
 	ns     *server.Server
 	domain string
+
+	// Limits applied to every stream this server provisions. Zero means none.
+	streamMaxAge   time.Duration
+	streamMaxBytes int64
 }
+
+// storeEncryptedMarker is left in the store directory once a store has been
+// encrypted. Started without a key, the server would open an encrypted store and
+// find it empty; the marker turns that into an error instead.
+const storeEncryptedMarker = ".store-encrypted"
+
+// Store ciphers a Config can name.
+const (
+	CipherChaCha = "chacha" // ChaCha20-Poly1305, the default
+	CipherAES    = "aes"    // AES-GCM
+)
 
 // Config holds the configuration for the Snake Server.
 type Config struct {
@@ -39,6 +54,23 @@ type Config struct {
 	TLSCA          string
 	TLSVerify      bool
 	LogLevel       string
+
+	// StoreKey encrypts the JetStream store on disk when it is not empty: every
+	// message, stream and key-value bucket. The server keeps the key and decrypts on
+	// read, so this protects the files, a copy of the directory and a backup. It does
+	// not protect against a NATS client, or against someone with the running process.
+	// A store that already holds unencrypted data is converted on the first start.
+	StoreKey string
+	// StoreOldKey is the key the store was encrypted with before StoreKey, for the
+	// start that rotates the key.
+	StoreOldKey string
+	// StoreCipher is CipherChaCha (the default) or CipherAES.
+	StoreCipher string
+
+	// StreamMaxAge and StreamMaxBytes limit every stream the server provisions.
+	// Zero means no limit.
+	StreamMaxAge   time.Duration
+	StreamMaxBytes int64
 }
 
 // NewServer creates and starts an embedded NATS server with JetStream enabled.
@@ -50,6 +82,28 @@ func NewServer(ctx context.Context, cfg Config) (*Server, error) {
 		ServerName: "fluxrig-mixer-embedded",
 		NoSigs:     true, // fluxrig handles signals, preventing double-shutdown panic
 		HTTPPort:   0,    // Disable HTTP for security/simplicity
+	}
+
+	// A store that was encrypted must not be opened without its key.
+	markerPath := filepath.Join(cfg.StoreDir, storeEncryptedMarker)
+	if cfg.StoreKey == "" {
+		if _, errMarker := os.Stat(markerPath); errMarker == nil {
+			return nil, fmt.Errorf("snake: the store in %s was encrypted and no store key is set: set the key again, or move the directory away to start an empty store", cfg.StoreDir)
+		}
+	}
+
+	// Encryption at rest
+	if cfg.StoreKey != "" {
+		opts.JetStreamKey = cfg.StoreKey
+		opts.JetStreamOldKey = cfg.StoreOldKey
+		switch strings.ToLower(cfg.StoreCipher) {
+		case "", CipherChaCha:
+			opts.JetStreamCipher = server.ChaCha
+		case CipherAES:
+			opts.JetStreamCipher = server.AES
+		default:
+			return nil, fmt.Errorf("snake: unknown store cipher %q (use %q or %q)", cfg.StoreCipher, CipherChaCha, CipherAES)
+		}
 	}
 
 	// Map LogLevel to NATS Debug/Trace
@@ -140,16 +194,26 @@ func NewServer(ctx context.Context, cfg Config) (*Server, error) {
 	}
 	slog.Info("NATS server is ready")
 
-	s := &Server{ns: ns, domain: cfg.ClusterName}
+	s := &Server{ns: ns, domain: cfg.ClusterName, streamMaxAge: cfg.StreamMaxAge, streamMaxBytes: cfg.StreamMaxBytes}
 
 	// 4. Provision Streams
 	if cfg.StreamName != "" {
 		slog.Info("Provisioning streams...", "name", cfg.StreamName)
 		if err := s.ProvisionStream(ctx, cfg.StreamName, cfg.StreamSubjects); err != nil {
 			s.Shutdown()
+			if _, errMarker := os.Stat(markerPath); cfg.StoreKey != "" && errMarker == nil {
+				return nil, fmt.Errorf("snake: the store in %s did not open with the current key, and it was encrypted before: the cluster key or the store key file has changed since. Put the previous key back, or name it in the store's old key file to rotate to the new one, or move the directory away to start an empty store: %w", cfg.StoreDir, err)
+			}
 			return nil, err
 		}
 		slog.Info("Streams provisioned")
+	}
+
+	if cfg.StoreKey != "" {
+		if err := os.WriteFile(markerPath, []byte("encrypted\n"), 0o600); err != nil {
+			s.Shutdown()
+			return nil, fmt.Errorf("snake: record that the store is encrypted: %w", err)
+		}
 	}
 
 	return s, nil
@@ -200,6 +264,12 @@ func (s *Server) ProvisionStream(ctx context.Context, name string, subjects []st
 
 		cfg := info.Config
 		cfg.Subjects = subjects
+		cfg.MaxAge = s.streamMaxAge
+		// Applied unconditionally, like MaxAge above: zero is a real, documented
+		// setting ("no limit"), not "leave whatever the stream already has". An
+		// operator who lowers, or clears, a limit on an existing stream expects
+		// the next start to apply it, not to silently keep the old one forever.
+		cfg.MaxBytes = s.streamMaxBytes
 		if _, err = js.UpdateStream(ctx, cfg); err != nil {
 			return fmt.Errorf("snake: failed to update stream %s subjects: %w", name, err)
 		}
@@ -215,6 +285,8 @@ func (s *Server) ProvisionStream(ctx context.Context, name string, subjects []st
 		Storage:   jetstream.FileStorage,
 		Retention: jetstream.LimitsPolicy, // Keep until limits
 		Replicas:  1,
+		MaxAge:    s.streamMaxAge,
+		MaxBytes:  s.streamMaxBytes,
 	})
 
 	if err != nil {

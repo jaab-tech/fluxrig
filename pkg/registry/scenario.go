@@ -51,11 +51,26 @@ type GearSpec struct {
 	Doc    string               `json:"doc,omitempty" yaml:"doc,omitempty" example:"Primary Ingress"`
 }
 
+// The lanes a wire can use. A wire that names none uses the hot lane when both of
+// its ends run on one Rack, and the guaranteed lane otherwise.
+const (
+	// LaneHot carries the wire's messages through the Rack's memory: no bus, no disk,
+	// delivered at most once, lost if the Rack process dies. Both ends of the wire
+	// must run on the same Rack.
+	LaneHot = "hot"
+	// LaneGuaranteed carries them over the bus, which stores each message before the
+	// emitting gear is told it was accepted.
+	LaneGuaranteed = "guaranteed"
+)
+
 // WireSpec defines a connection between ports.
 type WireSpec struct {
 	ID   uuid.UUID `json:"id,omitempty" yaml:"id,omitempty"` // Assigned by Registry/Mixer
 	From string    `json:"from" yaml:"from" example:"iso8583-in.out"`
 	To   string    `json:"to" yaml:"to" example:"router.in"`
+	// Lane is "hot", "guaranteed" or empty. Empty means hot inside one Rack and
+	// guaranteed between Racks.
+	Lane string `json:"lane,omitempty" yaml:"lane,omitempty" example:"guaranteed"`
 }
 
 // Validate ensures the Scenario is structurally sound.
@@ -93,8 +108,12 @@ func (s *Scenario) Validate() error {
 		}
 	}
 
+	// Determine if scenario defines explicit rack targets for deploy validation
+	hasExplicitRacks := len(s.Racks) > 0
+
 	// 2. Validate Gears
 	gearNames := make(map[string]bool)
+	deployTarget := make(map[string]string)    // gear -> the Rack it is pinned to, when it names one
 	declaredPorts := make(map[string]portDecl) // only gears that declare config.ports
 	for _, g := range s.Gears {
 		if g.Name == "" {
@@ -107,6 +126,9 @@ func (s *Scenario) Validate() error {
 			return fmt.Errorf("duplicate gear name: %s", g.Name)
 		}
 		gearNames[g.Name] = true
+		if target, ok := g.Deploy.(string); ok {
+			deployTarget[g.Name] = target
+		}
 
 		if g.Type == "" {
 			return fmt.Errorf("gear %s requires type", g.Name)
@@ -118,9 +140,11 @@ func (s *Scenario) Validate() error {
 		// Deploy Target Validation
 		// 'deploy' can be string (referencing rack/group) or complex.
 		// For Phase 3, we support string references basically.
+		// Only validate against scenario-defined racks/groups if scenario has explicit racks.
+		// Otherwise, defer to registry validation at import time.
 		if g.Deploy != nil {
 			target, ok := g.Deploy.(string)
-			if ok {
+			if ok && hasExplicitRacks {
 				if !rackNames[target] && !groups[target] {
 					return fmt.Errorf("gear %s deploys to unknown target '%s'", g.Name, target)
 				}
@@ -148,6 +172,17 @@ func (s *Scenario) Validate() error {
 		// (see the bento "gear.port"-as-portname class of bug).
 		fromRack, fromGear, fromPort := splitPortRef(w.From)
 		toRack, toGear, toPort := splitPortRef(w.To)
+		switch w.Lane {
+		case "", LaneHot, LaneGuaranteed:
+		default:
+			return fmt.Errorf("wire %q: unknown lane %q (use %q or %q)", w.From, w.Lane, LaneHot, LaneGuaranteed)
+		}
+		if w.Lane == LaneHot {
+			srcRack, dstRack := firstNonEmpty(fromRack, deployTarget[fromGear]), firstNonEmpty(toRack, deployTarget[toGear])
+			if srcRack != "" && dstRack != "" && srcRack != dstRack {
+				return fmt.Errorf("wire %q -> %q: a hot wire stays inside one Rack, and this one runs from %q to %q", w.From, w.To, srcRack, dstRack)
+			}
+		}
 		if fromRack != "" && !rackNames[fromRack] && !groups[fromRack] {
 			return fmt.Errorf("wire %q: source rack %q is not defined", w.From, fromRack)
 		}
@@ -267,4 +302,13 @@ func isValidName(s string) bool {
 
 func isValidPortRef(s string) bool {
 	return portRefRegex.MatchString(s)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }

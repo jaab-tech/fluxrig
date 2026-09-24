@@ -13,6 +13,8 @@ import subprocess
 
 from robot.api.deco import keyword, library
 
+from binpaths import bin_dir
+
 
 @library(scope="GLOBAL")
 class SpecLibrary:
@@ -31,7 +33,7 @@ class SpecLibrary:
 
     @property
     def _cli(self):
-        return os.path.join(self._root, "bin", "fluxrig")
+        return os.path.join(bin_dir(self._root), "fluxrig")
 
     @keyword
     def repository_path(self, *parts):

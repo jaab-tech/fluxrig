@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestScenario_Validate(t *testing.T) {
@@ -50,6 +51,9 @@ func TestScenario_Validate(t *testing.T) {
 			name: "Unknown Deploy Target",
 			s: Scenario{
 				Meta: ScenarioMeta{Version: "1.0"},
+				Racks: []RackTarget{
+					{Name: "rack1"},
+				},
 				Gears: []GearSpec{
 					{Name: "g1", Type: "t1", Deploy: "ghost_rack"},
 				},
@@ -141,6 +145,47 @@ func TestScenario_Validate(t *testing.T) {
 			} else {
 				assert.NoError(t, err)
 			}
+		})
+	}
+}
+
+func laneScenario(lane, fromDeploy, toDeploy string) *Scenario {
+	return &Scenario{
+		Meta:  ScenarioMeta{Name: "lanes", Version: "1.0.0"},
+		Racks: []RackTarget{{Name: "rack-a"}, {Name: "rack-b"}},
+		Gears: []GearSpec{
+			{Name: "src", Type: "io_tcp", Deploy: fromDeploy},
+			{Name: "dst", Type: "io_tcp", Deploy: toDeploy},
+		},
+		Wires: []WireSpec{{From: "src.out", To: "dst.in", Lane: lane}},
+	}
+}
+
+func TestScenario_WireLane(t *testing.T) {
+	cases := []struct {
+		name    string
+		lane    string
+		from    string
+		to      string
+		wantErr string
+	}{
+		{"no lane inside a rack", "", "rack-a", "rack-a", ""},
+		{"no lane between racks", "", "rack-a", "rack-b", ""},
+		{"hot inside a rack", LaneHot, "rack-a", "rack-a", ""},
+		{"guaranteed inside a rack", LaneGuaranteed, "rack-a", "rack-a", ""},
+		{"guaranteed between racks", LaneGuaranteed, "rack-a", "rack-b", ""},
+		{"hot between racks is refused", LaneHot, "rack-a", "rack-b", "stays inside one Rack"},
+		{"unknown lane", "warp", "rack-a", "rack-a", "unknown lane"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := laneScenario(tc.lane, tc.from, tc.to).Validate()
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErr)
 		})
 	}
 }

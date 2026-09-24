@@ -43,6 +43,83 @@ const docTemplate = `{
                 }
             }
         },
+        "/control/sim/{action}": {
+            "post": {
+                "description": "Sends a start, stop, rate, or reset command to a named gear and waits for it to acknowledge receiving the command. The gear must be running on an enrolled Rack and subscribed to its control plane; the response reflects delivery, not that the gear finished acting on the command.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "control"
+                ],
+                "summary": "Simulator control",
+                "parameters": [
+                    {
+                        "enum": [
+                            "start",
+                            "stop",
+                            "rate",
+                            "reset"
+                        ],
+                        "type": "string",
+                        "description": "Command",
+                        "name": "action",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Target gear and, for rate/reset, its arguments",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/api.SimControlArgs"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid JSON, missing gear, or an unknown action",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "No control-plane connection, or no gear acknowledged the command",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
         "/entities/stats": {
             "get": {
                 "description": "Returns cached metrics for a specific entity or all entities.",
@@ -291,6 +368,24 @@ const docTemplate = `{
                         "description": "OK",
                         "schema": {
                             "$ref": "#/definitions/api.ScenarioImportResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "The scenario could not be read or failed validation",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "409": {
+                        "description": "Imported, but not activated: a gear deploys to a name that is not an active Rack",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "500": {
+                        "description": "Imported, but activation failed",
+                        "schema": {
+                            "type": "string"
                         }
                     }
                 }
@@ -784,6 +879,32 @@ const docTemplate = `{
                 }
             }
         },
+        "api.SimControlArgs": {
+            "type": "object",
+            "properties": {
+                "from": {
+                    "type": "number"
+                },
+                "gear": {
+                    "type": "string"
+                },
+                "over": {
+                    "type": "string"
+                },
+                "seed": {
+                    "type": "integer"
+                },
+                "shape": {
+                    "type": "string"
+                },
+                "to": {
+                    "type": "number"
+                },
+                "tps": {
+                    "type": "number"
+                }
+            }
+        },
         "api.SpecSummary": {
             "type": "object",
             "properties": {
@@ -863,6 +984,11 @@ const docTemplate = `{
         "config.ApiConfig": {
             "type": "object",
             "properties": {
+                "controlConfirmTimeout": {
+                    "description": "ControlConfirmTimeout bounds how long a control-plane command (the\nsimulator start/stop/rate/reset endpoints) waits for a gear to\nacknowledge receiving it before the request answers that nobody is\nlistening, rather than the success a bare, unconfirmed publish would\nhave reported.",
+                    "type": "string",
+                    "example": "2s"
+                },
                 "port": {
                     "description": "Port to listen on.",
                     "type": "integer",
@@ -891,6 +1017,11 @@ const docTemplate = `{
                 "name": {
                     "type": "string",
                     "example": "node-01"
+                },
+                "scenarioFile": {
+                    "description": "ScenarioFile names, inside StateDir, the Rack's copy of the last scenario it applied. Empty keeps no copy.",
+                    "type": "string",
+                    "example": "scenario.flux"
                 },
                 "stateDir": {
                     "type": "string",
@@ -1136,6 +1267,15 @@ const docTemplate = `{
                     "type": "string",
                     "example": "10.0.0.5"
                 },
+                "laneQueueSize": {
+                    "description": "LaneQueueSize is how many messages each wire inside the Rack can hold in memory\nbetween the gear that emits and the gear that consumes. LaneSendTimeout is how\nlong an emitting gear waits for room in a full queue before it gets an error.",
+                    "type": "integer",
+                    "example": 1024
+                },
+                "laneSendTimeout": {
+                    "type": "string",
+                    "example": "5s"
+                },
                 "machineID": {
                     "description": "Runtime only: set via Passport or Mixer assignment",
                     "type": "string"
@@ -1170,8 +1310,24 @@ const docTemplate = `{
                     "type": "string",
                     "example": "30s"
                 },
+                "initialRetryAttempts": {
+                    "type": "integer",
+                    "example": 10
+                },
+                "initialRetryWait": {
+                    "type": "string",
+                    "example": "500ms"
+                },
                 "insecureSkipVerify": {
                     "type": "boolean"
+                },
+                "offlineRetryInterval": {
+                    "type": "string",
+                    "example": "5s"
+                },
+                "offlineStartTimeout": {
+                    "type": "string",
+                    "example": "3s"
                 },
                 "operationTimeout": {
                     "type": "string",
@@ -1187,6 +1343,28 @@ const docTemplate = `{
                 },
                 "rootCAFile": {
                     "type": "string"
+                },
+                "storeCipher": {
+                    "type": "string",
+                    "example": "chacha"
+                },
+                "storeEncryption": {
+                    "type": "boolean",
+                    "example": true
+                },
+                "storeKeyFile": {
+                    "type": "string"
+                },
+                "storeOldKeyFile": {
+                    "type": "string"
+                },
+                "streamMaxAge": {
+                    "type": "string",
+                    "example": "24h"
+                },
+                "streamMaxBytes": {
+                    "type": "integer",
+                    "example": 1073741824
                 },
                 "streamName": {
                     "type": "string",
@@ -1430,6 +1608,11 @@ const docTemplate = `{
                 "id": {
                     "description": "Assigned by Registry/Mixer",
                     "type": "string"
+                },
+                "lane": {
+                    "description": "Lane is \"hot\", \"guaranteed\" or empty. Empty means hot inside one Rack and\nguaranteed between Racks.",
+                    "type": "string",
+                    "example": "guaranteed"
                 },
                 "to": {
                     "type": "string",

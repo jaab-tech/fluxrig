@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://fluxrig.org/schemas/spec.core.schema.json",
   "title": "Protocol spec — semantic core",
-  "description": "Open semantic layer over a wire spec. Layer 1 (wire) uses the moov-io/iso8583 declarative vocabulary verbatim; layer 2 (this) adds what the packager cannot express: message catalog, valid values, per-message usage, declarative conditions, cardinality, and data classification. Vendor extensions use x- prefixed keys and are ignored here. Scope: this describes the two-layer shape, where `spec.wire` names a base and `spec.fields` carries semantics only. The loader also accepts an inline shape that fuses both layers into one field entry, by design, for specs with no wire document; that shape has a different `subfields` form and is not described here. See ADR 0049.",
+  "description": "Open semantic layer over a wire spec. Layer 1 (wire) uses the moov-io/iso8583 declarative vocabulary verbatim; layer 2 (this) adds what the packager cannot express: message catalog, valid values, per-message usage, declarative conditions, cardinality, and data classification. Vendor extensions use x- prefixed keys and are ignored here. Scope: this describes the two-layer shape, where `spec.wire` names a base and `spec.fields` carries semantics only. The loader also accepts an inline shape that fuses both layers into one field entry, by design, for specs with no wire document; that shape has a different `subfields` form and is not described here.",
   "type": "object",
   "required": [
     "spec"

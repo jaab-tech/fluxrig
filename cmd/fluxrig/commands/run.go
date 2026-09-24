@@ -5,6 +5,7 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"path/filepath"
 	"runtime"
@@ -84,13 +85,26 @@ func RunAgent(cfg *config.RackConfig, logger *slog.Logger, logBuffer *telemetry.
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
+	// What a session that started without the bus leaves for the next one: the gears
+	// it is running. If the Rack stops before another session takes them, they stop.
+	var carry sessionCarry
+	defer func() {
+		if carry.runtime != nil {
+			carry.runtime.Shutdown()
+		}
+	}()
+
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		err := runSession(ctx, cfg, logger, logBuffer)
+		err := runSession(ctx, cfg, logger, logBuffer, &carry)
+		if errors.Is(err, ErrRejoin) {
+			logger.Info("The bus is back: starting a session that joins the Mixer and keeps the running gears")
+			continue
+		}
 		if err == ErrReconnect {
-			logger.Info("Restarting Session (Identity Changed)")
+			logger.Info("Restarting Session")
 			// Brief pause to allow connection cleanup propagation
 			time.Sleep(500 * time.Millisecond)
 			continue
@@ -99,7 +113,7 @@ func RunAgent(cfg *config.RackConfig, logger *slog.Logger, logBuffer *telemetry.
 	}
 }
 
-func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger, logBuffer *telemetry.BufferHandler) error {
+func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger, logBuffer *telemetry.BufferHandler, carry *sessionCarry) error {
 	// 0. Set Message Limits (Priority 1 Hardening)
 	fluxmsg.SetLimits(cfg.Rack.MaxHops, cfg.Rack.MaxPayloadSize)
 
@@ -133,37 +147,18 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 		inactiveThreshold = 30 * time.Second
 	}
 
+	initialRetryAttempts := cfg.Snake.InitialRetryAttempts
+
 	// Synchronization Contexts
 	// These are now strictly configuration-driven with safe defaults in pkg/config
-	cleanupTimeout, errParse := time.ParseDuration(cfg.Rack.CleanupTimeout)
-	if errParse != nil {
-		return fmt.Errorf("invalid rack.cleanup_timeout: %w", errParse)
+	limits, errLimits := parseRackTimeouts(cfg)
+	if errLimits != nil {
+		return errLimits
 	}
-
-	drainTimeout, errParse := time.ParseDuration(cfg.Rack.DrainTimeout)
-	if errParse != nil {
-		return fmt.Errorf("invalid rack.drain_timeout: %w", errParse)
-	}
-
-	convTimeout, errParse := time.ParseDuration(cfg.Rack.ConvergenceTimeout)
-	if errParse != nil {
-		return fmt.Errorf("invalid rack.convergence_timeout: %w", errParse)
-	}
-
-	handshakeInterval, errParse := time.ParseDuration(cfg.Rack.HandshakeInterval)
-	if errParse != nil {
-		return fmt.Errorf("invalid rack.handshake_interval: %w", errParse)
-	}
-
-	subRetryWait, errParse := time.ParseDuration(cfg.Snake.SubscriptionRetryWait)
-	if errParse != nil {
-		return fmt.Errorf("invalid snake.subscription_retry_wait: %w", errParse)
-	}
-
-	opTimeout, errParse := time.ParseDuration(cfg.Snake.OperationTimeout)
-	if errParse != nil {
-		return fmt.Errorf("invalid snake.operation_timeout: %w", errParse)
-	}
+	cleanupTimeout, drainTimeout, convTimeout := limits.cleanup, limits.drain, limits.convergence
+	handshakeInterval, subRetryWait, opTimeout := limits.handshake, limits.subscriptionRetry, limits.operation
+	initialRetryWait, offlineStartTimeout := limits.initialRetryWait, limits.offlineStart
+	offlineRetryInterval, laneSendTimeout := limits.offlineRetry, limits.laneSend
 
 	// 2. Identify effective name for Enrollment and Bus
 	helloName := cfg.Base.Name
@@ -187,9 +182,16 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 		SubscriptionRetryWait:     subRetryWait,
 		SubscriptionRetryAttempts: cfg.Snake.SubscriptionRetryAttempts,
 		InactiveThreshold:         inactiveThreshold,
+		InitialRetryWait:          initialRetryWait,
+		InitialRetryAttempts:      initialRetryAttempts,
 		RootCA:                    cfg.Snake.RootCAFile,
 		InsecureSkipVerify:        cfg.Snake.InsecureSkipVerify,
+		// A SIGTERM/SIGINT during the initial connect retry is observed
+		// between attempts instead of only after the whole retry budget
+		// elapses (up to ~37s by default, longer with a configured timeout).
+		Ctx: ctx,
 	}
+	opts.InitialRetryTimeout = offlineStartBound(cfg.Rack.MachineID, offlineStartTimeout)
 	natsBus := bus.NewNatsBus(cfg.Snake.StreamName)
 	busConnected := false
 
@@ -202,9 +204,23 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 		return err
 	}
 
+	// A session that started without the bus may have left gears running. When they
+	// are this Rack's, this session takes them over instead of starting its own.
+	incoming, adopted := carry.take(mID, helloName, logger)
+
 	isSessionActive := false
 	runtimeStarted := false
 	var lastScenario *registry.Scenario
+	// pendingPayload is the payload behind lastScenario: kept until the Rack is
+	// promoted and applies it, and only then saved as its local copy.
+	var pendingPayload *fluxmsg.ScenarioPayload
+
+	// The Rack keeps its own copy of the last scenario it applied, so a restart
+	// resumes it without waiting for the Mixer to send it again.
+	scenarios := incoming.scenarios
+	if scenarios == nil {
+		scenarios = newScenarioSession(cfg)
+	}
 	var telBusCleanup *bus.NatsBus
 	var telShutdown func(context.Context) error
 	var rtManager *rt.Manager
@@ -233,11 +249,16 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 
 	// 2.5 Initialize Spec Manager & Runtime
 
-	// Spec Manager (Git-backed Registry)
+	// Spec Manager (Git-backed Registry). Gears that keep running hold the one they
+	// started with, so a session that takes them over keeps it too.
 	specStorePath := filepath.Join(cfg.Store.Dir, "store")
-	specMgr, errMgr := manager.NewManager(specStorePath)
-	if errMgr != nil {
-		return fmt.Errorf("failed to init spec manager: %w", errMgr)
+	specMgr := incoming.specMgr
+	if specMgr == nil {
+		newSpecMgr, errMgr := manager.NewManager(specStorePath)
+		if errMgr != nil {
+			return fmt.Errorf("failed to init spec manager: %w", errMgr)
+		}
+		specMgr = newSpecMgr
 	}
 
 	// INSTRUMENTATION: Wrap Bus
@@ -245,26 +266,32 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 
 	// Runtime Helper: Re-initializes the routing layer with correct identity
 	reinitRuntime := func(nodeID uuid.UUID, nodeName string, nodeGen *idgen.IDGenerator) {
+		pubKey := mixerPublicKey(statePath)
+		if rtManager != nil && rtManager.SameIdentity(nodeID, nodeName, pubKey) {
+			logger.Debug("Runtime Manager already has this identity: keeping it and its gears")
+			return
+		}
 		if rtManager != nil {
 			logger.Info("Stopping existing Runtime Manager for Identity Rotation")
 			rtManager.Shutdown()
 		}
 
-		var pubKey []byte
-		if env, errEnv := pki.LoadStateEnvelope(statePath); errEnv == nil {
-			if s, errVer := env.Verify(); errVer == nil {
-				pubKey = s.MixerPublic
-			}
-		}
-
 		logger.Info("Initializing Runtime Manager", "id", nodeID, "name", nodeName)
 		rtManager = rt.NewManager(nodeID, nodeName, managedBus, nodeGen, specMgr, opTimeout, convTimeout, handshakeInterval, cfg.Logging.Trace, cfg.Logging.Debug, pubKey)
+		rtManager.SetLaneConfig(cfg.Rack.LaneQueueSize, laneSendTimeout)
 	}
 
 	// Initial Init (might be 0/pending)
-	reinitRuntime(mID, helloName, gen)
+	keepRuntime := false // set when this session hands its gears to the next one
+	if adopted {
+		rtManager = incoming.runtime
+		rtManager.SetBus(managedBus)
+		logger.Info("Keeping the gears the previous session left running", "id", mID)
+	} else {
+		reinitRuntime(mID, helloName, gen)
+	}
 	defer func() {
-		if rtManager != nil {
+		if rtManager != nil && !keepRuntime {
 			rtManager.Shutdown()
 		}
 	}()
@@ -385,14 +412,11 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 							logger.Warn("Failed to init telemetry (resume)", "error", errInit)
 						} else {
 							telShutdown = sDown
-							// 4. Initialize Data Plane
-							var pubKey []byte
-							if env, errEnv := pki.LoadStateEnvelope(statePath); errEnv == nil {
-								if s, errVer := env.Verify(); errVer == nil {
-									pubKey = s.MixerPublic
-								}
+							// 4. Initialize Data Plane. Gears a previous session left running stay.
+							if !adopted {
+								rtManager = rt.NewManager(cfg.Rack.MachineID, cfg.Base.Name, natsBus, gen, specMgr, opTimeout, convTimeout, handshakeInterval, cfg.Logging.Trace, cfg.Logging.Debug, mixerPublicKey(statePath))
+								rtManager.SetLaneConfig(cfg.Rack.LaneQueueSize, laneSendTimeout)
 							}
-							rtManager = rt.NewManager(cfg.Rack.MachineID, cfg.Base.Name, natsBus, gen, specMgr, opTimeout, convTimeout, handshakeInterval, cfg.Logging.Trace, cfg.Logging.Debug, pubKey)
 							if errStart := rtManager.Start(); errStart != nil {
 								logger.Error("Failed to start runtime (resume)", "error", errStart)
 							}
@@ -472,12 +496,14 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 
 						telBus := bus.NewNatsBus("flux-telemetry")
 						if errBus := telBus.Connect(cfg.Snake.URL, bus.ConnectOptions{
-							Name:              clientName + "-telemetry",
-							ConnectTimeout:    connectTimeout,
-							ReconnectWait:     reconnectWait,
-							Domain:            cfg.Snake.Domain,
-							InactiveThreshold: inactiveThreshold,
-							RootCA:            cfg.Snake.RootCAFile,
+							Name:                 clientName + "-telemetry",
+							ConnectTimeout:       connectTimeout,
+							ReconnectWait:        reconnectWait,
+							Domain:               cfg.Snake.Domain,
+							InactiveThreshold:    inactiveThreshold,
+							InitialRetryWait:     initialRetryWait,
+							InitialRetryAttempts: initialRetryAttempts,
+							RootCA:               cfg.Snake.RootCAFile,
 						}); errBus != nil {
 							logger.Warn("Failed to connect telemetry bus", "error", errBus)
 						} else {
@@ -657,16 +683,27 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 				return
 			}
 
+			scenarios.mu.Lock()
+			defer scenarios.mu.Unlock()
+
 			if isSessionActive {
+				// The Mixer sends its scenario after the Rack has resumed its own copy.
+				if scenarios.consumeResumed(payload.Scenario) {
+					runtimeStarted = true
+					logger.Info("Scenario from the Mixer matches the one resumed from local state; gears keep running", "version", payload.Version)
+					return
+				}
 				if errApply := rtManager.ApplyScenario(ctx, &sc); errApply != nil {
 					logger.Error("Failed to apply scenario", "error", errApply)
 					return
 				}
 				logger.Info("Scenario Applied Successfully", "version", payload.Version)
 				runtimeStarted = true
+				scenarios.applied(logger, payload)
 			} else {
 				logger.Info("Rack Pending: Scenario Cached - Waiting for Promotion", "version", payload.Version)
 				lastScenario = &sc
+				pendingPayload = payload
 			}
 		})
 		if err != nil {
@@ -676,8 +713,29 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 			// defer func() { _ = scenarioSub.Unsubscribe() }()
 		}
 
+		// Resume the scenario this Rack last applied, from its own copy, unless the
+		// Mixer has already sent one. A Rack that is not active yet has none to resume.
+		if isSessionActive && scenarios.resume(ctx, logger, rtManager, mID, helloName) {
+			runtimeStarted = true
+		}
+
 	} else {
 		logger.Info("Skipping Enrollment (Offline)")
+	}
+
+	// A Rack that started offline runs the saved scenario if it needs no bus, and keeps
+	// probing the bus. When it answers, the next session joins the Mixer and takes the
+	// gears over as they are, so a Mixer that comes back is found without a manual
+	// restart and without stopping what the Rack is serving.
+	rejoinCh := make(chan struct{}, 1)
+	if !busConnected {
+		if isSessionActive && scenarios.resumeWithoutBus(ctx, logger, rtManager, mID, helloName) {
+			runtimeStarted = true
+		} else {
+			scenarios.announceWaiting(logger, mID, helloName)
+		}
+		stopWatch := startBusWatcher(ctx, cfg.Snake.URL, opts, cfg.Snake.StreamName, offlineRetryInterval, rejoinCh, logger)
+		defer stopWatch()
 	}
 
 	// 4. Heartbeat Loop
@@ -724,6 +782,10 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 			return nil
 		case <-reconnectCh:
 			return ErrReconnect
+		case <-rejoinCh:
+			*carry = sessionCarry{runtime: rtManager, specMgr: specMgr, scenarios: scenarios, machineID: mID, name: helloName}
+			keepRuntime = true
+			return ErrRejoin
 		case passport := <-activationCh:
 			// IN-PLACE PROMOTION
 			if isSessionActive && runtimeStarted {
@@ -765,12 +827,14 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 			}
 			telBus := bus.NewNatsBus("flux-telemetry")
 			_ = telBus.Connect(cfg.Snake.URL, bus.ConnectOptions{
-				Name:              clientName + "-telemetry",
-				ConnectTimeout:    connectTimeout,
-				ReconnectWait:     reconnectWait,
-				Domain:            cfg.Snake.Domain,
-				InactiveThreshold: inactiveThreshold,
-				RootCA:            cfg.Snake.RootCAFile,
+				Name:                 clientName + "-telemetry",
+				ConnectTimeout:       connectTimeout,
+				ReconnectWait:        reconnectWait,
+				Domain:               cfg.Snake.Domain,
+				InactiveThreshold:    inactiveThreshold,
+				InitialRetryWait:     initialRetryWait,
+				InitialRetryAttempts: initialRetryAttempts,
+				RootCA:               cfg.Snake.RootCAFile,
 			})
 
 			sDown, _ := telemetry.Init(context.Background(), telCfg, telBus, logBuffer, newGen)
@@ -802,6 +866,7 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 					continue
 				}
 				runtimeStarted = true
+				scenarios.save(logger, pendingPayload)
 			}
 
 			logger.Info("In-Place Promotion Complete. Path is Hot.")

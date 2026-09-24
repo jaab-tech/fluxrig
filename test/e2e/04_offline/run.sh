@@ -25,6 +25,15 @@ API_URL="http://localhost:8090/api/v1"
 MIXER_LOG="$WORK_DIR/mixer/logs/mixer.log"
 RACK_LOG="$WORK_DIR/rack/logs/rack.log"
 
+# Deadlines for the polling waits. The offline one is the contract under test: a
+# Rack holding a passport must be running without the Mixer well inside it, and it
+# stays clear of snake.offline_start_timeout (3s by default) plus process start.
+ONLINE_TIMEOUT=30
+OFFLINE_TIMEOUT=15
+# A Rack that started offline probes the bus every snake.offline_retry_interval (5s
+# by default), restarts its session and sends its first heartbeat.
+RECONNECT_TIMEOUT=30
+
 MIXER_PID=""
 RACK_PID=""
 
@@ -52,7 +61,7 @@ cd "${WORK_DIR}/mixer"
 "${ROOT_DIR}/bin/fluxrig-mixer" -c "mixer.toml" > "mixer.stdout" 2>&1 &
 MIXER_PID=$!
 cd "${BASE_DIR}"
-sleep 2
+wait_for_port 8090 30 || fail "Mixer API did not come up."
 
 log_info "Starting Rack (Online)..."
 cp "${BASE_DIR}/rack/rack.toml" "${WORK_DIR}/rack/rack.toml"
@@ -61,17 +70,15 @@ cd "${WORK_DIR}/rack"
 RACK_PID=$!
 cd "${BASE_DIR}"
 
-# Wait for Passport and Heartbeats (Interval is 2s, wait 6s for at least 2 heartbeats)
-sleep 6
-
-if grep -q "Passport Saved" "$RACK_LOG"; then
+# Wait for the Passport and for a heartbeat
+if wait_for_log "$RACK_LOG" "Passport Saved" "$ONLINE_TIMEOUT"; then
     log_success "Passport Acquired."
 else
     cat "$RACK_LOG"
     fail "Failed to acquire passport."
 fi
 
-if grep -q "Sent Heartbeat" "$RACK_LOG"; then
+if wait_for_log "$RACK_LOG" "Sent Heartbeat" "$ONLINE_TIMEOUT"; then
     log_success "Online Activity Verified (Sent Heartbeats)."
 else
     cat "$RACK_LOG"
@@ -98,10 +105,12 @@ cd "${WORK_DIR}/rack"
 RACK_PID=$!
 cd "${BASE_DIR}"
 
-sleep 2
-
 # 5. Verification
 LOG="$WORK_DIR/rack/rack.stdout"
+
+# The Rack must reach offline mode within the deadline, not after the bus retry
+# budget: wait for that line first, then check what else it logged.
+wait_for_log "$LOG" "Starting in OFFLINE Mode" "$OFFLINE_TIMEOUT" || true
 
 # Check 1: Loaded Cached Passport
 if grep -q "Loaded Cached Passport" "$LOG"; then
@@ -125,6 +134,32 @@ if ps -p $RACK_PID > /dev/null; then
 else
     cat "$LOG"
     fail "(3/3) Rack process DIED."
+fi
+
+# 6. Phase 3: The Mixer returns. The Rack that started offline must find it on its
+# own, without being restarted.
+log_info "--- Phase 3: Mixer Returns ---"
+RACK_STDOUT_SEEN=$(wc -l < "$LOG")
+RACK_LOG_SEEN=$(wc -l < "$RACK_LOG")
+
+log_info "Restarting Mixer..."
+cd "${WORK_DIR}/mixer"
+"${ROOT_DIR}/bin/fluxrig-mixer" -c "mixer.toml" >> "mixer.stdout" 2>&1 &
+MIXER_PID=$!
+cd "${BASE_DIR}"
+
+if wait_for_log "$LOG" "Bus reachable again" "$RECONNECT_TIMEOUT" "$RACK_STDOUT_SEEN"; then
+    log_success "(1/2) Rack noticed the Mixer is back."
+else
+    cat "$LOG"
+    fail "(1/2) Rack never noticed the Mixer is back."
+fi
+
+if wait_for_log "$RACK_LOG" "Sent Heartbeat" "$RECONNECT_TIMEOUT" "$RACK_LOG_SEEN"; then
+    log_success "(2/2) Rack is online again (Sent Heartbeats)."
+else
+    cat "$RACK_LOG"
+    fail "(2/2) Rack did not go back online."
 fi
 
 banner "Offline Mode Verified"

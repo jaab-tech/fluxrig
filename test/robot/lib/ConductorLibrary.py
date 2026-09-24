@@ -20,6 +20,8 @@ import time
 from robot.api import logger
 from robot.api.deco import keyword, library
 
+from binpaths import bin_dir
+
 
 @library(scope="GLOBAL")
 class ConductorLibrary:
@@ -28,7 +30,7 @@ class ConductorLibrary:
         root = os.path.abspath(
             os.path.join(os.path.dirname(os.path.realpath(__file__)), "../../..")
         )
-        self._tool = os.path.join(root, "bin", "iso8583-tool")
+        self._tool = os.path.join(bin_dir(root), "iso8583-tool")
 
     # --- Scheme hosts -----------------------------------------------------
 

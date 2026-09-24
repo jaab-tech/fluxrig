@@ -55,14 +55,16 @@ Setup CoatCheck Suite
     # Start Echo Server (External System)
     Start Echo Server    port=${ECHO_PORT}    log_file=${WORK_DIR}/echo_server.log
 
-    # Import Scenario
-    Import Scenario    mixer_port=${MIXER_PORT}    file_path=${SCENARIO_FILE}
-
-    # Start Rack
+    # Start Rack before scenario import: the Mixer validates deploy
+    # targets against enrolled racks at activate time, same order as
+    # the ISO suite.
     Start Rack    config_file=${RACK_CONFIG}    work_dir=${WORK_DIR}/rack    mixer_home=${WORK_DIR}/mixer    alias=rack
-    
+
     # Wait for Rack Registration
     Wait For Rack Registration    mixer_port=${MIXER_PORT}    rack_name=iso-node-01
+
+    # Import Scenario (rack iso-node-01 must be registered first)
+    Import Scenario    mixer_port=${MIXER_PORT}    file_path=${SCENARIO_FILE}
     Wait For Port    port=${ISO_PORT}    timeout=30
 
 Teardown CoatCheck Suite

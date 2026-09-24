@@ -19,7 +19,7 @@ class ApiKeywords:
     """
 
     @keyword
-    def wait_for_healthy(self, port: int, timeout: int = 30):
+    def wait_for_healthy(self, port: int, timeout: int = 30, snake_port: int = None):
         # Mixer serves health at /api/v1/health
         url = f"http://127.0.0.1:{port}/api/v1/health"
         start = time.time()
@@ -32,6 +32,18 @@ class ApiKeywords:
                 # -s silent, -f fail silently on server error, -o /dev/null discard output
                 subprocess.check_call(["curl", "-s", "-f", "-o", "/dev/null", url])
                 logger.info(f"Health check passed for port {port}")
+                
+                # If snake_port is provided, also verify NATS server is accepting connections
+                if snake_port is not None:
+                    if self._check_tcp_port("127.0.0.1", snake_port, timeout=5):
+                        logger.info(f"NATS server (snake) is accepting connections on port {snake_port}")
+                        return
+                    else:
+                        last_error = RuntimeError(f"NATS server not accepting connections on port {snake_port}")
+                        time.sleep(1)
+                        continue
+                
+                logger.info(f"Health check passed for port {port}")
                 return
             except subprocess.CalledProcessError as e:
                 last_error = e
@@ -43,6 +55,15 @@ class ApiKeywords:
                 time.sleep(1)
             
         raise RuntimeError(f"Timeout waiting for health on port {port}. Last Error: {last_error}")
+
+    def _check_tcp_port(self, host: str, port: int, timeout: int = 5) -> bool:
+        """Check if a TCP port is accepting connections."""
+        import socket
+        try:
+            with socket.create_connection((host, port), timeout=timeout):
+                return True
+        except (ConnectionRefusedError, socket.timeout, OSError):
+            return False
 
     @keyword
     def wait_for_rack_registration(self, mixer_port: int, rack_name: str, timeout: int = 30):
@@ -435,6 +456,28 @@ class ApiKeywords:
                 pass
             time.sleep(1)
         raise RuntimeError("No active racks found in registry")
+
+    @keyword
+    def wait_for_rack_active_by_name(self, mixer_port: int, rack_name: str, timeout: int = 60):
+        """Waits for a specific rack by name to become active."""
+        url = f"http://localhost:{mixer_port}/api/v1/racks"
+        start = time.time()
+        while time.time() - start < timeout:
+            try:
+                output = subprocess.check_output(["curl", "-s", "-f", url])
+                racks = json.loads(output)
+                for rack in racks:
+                    if rack.get("name") == rack_name:
+                        status = rack.get("status")
+                        if status == "active":
+                            logger.info(f"Rack '{rack_name}' is now active")
+                            return
+                        else:
+                            logger.debug(f"Rack '{rack_name}' status is '{status}', waiting for active...")
+            except Exception as e:
+                logger.debug(f"Failed to fetch racks: {e}")
+            time.sleep(1)
+        raise RuntimeError(f"Timeout waiting for rack '{rack_name}' to become active")
 
     @keyword
     def verify_any_entity_metric_present(self, mixer_port: int, metric_key: str, timeout: int = 30):

@@ -18,7 +18,6 @@
 #   fluxrig extensions (`x-fluxrig-*`): behavioural sections that drive fluxrig
 #     engines, namespaced so this document stays a valid core spec for other
 #     tooling. Currently `x-fluxrig-simulation` and `x-fluxrig-observability`.
-#     See ADR 0049 for the open/closed boundary.
 #
 # Conventions:
 #   - `scope` defaults to `public`. Mark `private` for proprietary extensions that

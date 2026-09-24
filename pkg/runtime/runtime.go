@@ -4,6 +4,7 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -32,9 +33,11 @@ import (
 
 // Manager orchestrates the lifecycle of Gears on a Rack.
 type Manager struct {
-	bus                bus.Bus
-	idGen              *idgen.IDGenerator // Wrapper that satisfies sdk.IDGenerator
-	mgr                manager.Manager    // Spec/Scenario Manager
+	bus                bus.Bus // always a *busRef, so the bus can be replaced under the gears
+	busRef             *busRef
+	control            *ctrl.LateControlPlane // the control plane every gear holds; its connection can come late
+	idGen              *idgen.IDGenerator     // Wrapper that satisfies sdk.IDGenerator
+	mgr                manager.Manager        // Spec/Scenario Manager
 	factory            *gears.Factory
 	machineID          uuid.UUID
 	rackName           string
@@ -47,6 +50,8 @@ type Manager struct {
 	gearIDs       map[string]uuid.UUID            // gear -> entityID
 	activeSubs    []bus.Subscription
 	hotSubjects   map[string]chan struct{}
+	lane          *localLane      // the hot lane: wires inside this Rack, through memory
+	busSubjects   map[string]bool // subjects that are also published to the bus; guarded by portsMu
 	trace         bool
 	debug         bool
 	clusterPubKey []byte
@@ -55,8 +60,11 @@ type Manager struct {
 }
 
 func NewManager(machineID uuid.UUID, name string, b bus.Bus, ig *idgen.IDGenerator, specMgr manager.Manager, opTimeout, convTimeout, handshakeInterval time.Duration, trace, debug bool, clusterPubKey []byte) *Manager {
-	return &Manager{
-		bus:                b,
+	ref := newBusRef(b)
+	m := &Manager{
+		bus:                ref,
+		busRef:             ref,
+		control:            ctrl.NewLateControlPlane(),
 		idGen:              ig,
 		mgr:                specMgr,
 		factory:            gears.NewFactory(),
@@ -72,7 +80,43 @@ func NewManager(machineID uuid.UUID, name string, b bus.Bus, ig *idgen.IDGenerat
 		gearPorts:          make(map[string]map[string]uuid.UUID),
 		gearIDs:            make(map[string]uuid.UUID),
 		hotSubjects:        make(map[string]chan struct{}),
+		busSubjects:        make(map[string]bool),
 	}
+	m.lane = newLocalLane(0, 0, m.logger)
+	return m
+}
+
+// SetBus replaces the bus under the gears that are already running. A Rack that
+// started without the Mixer runs a scenario on a bus that never connected; when the
+// Mixer returns and the Rack has a connected bus it hands it over here, and the
+// gears use it from then on without being started again. The control plane the
+// gears hold is bound to the new connection, so the commands the Mixer sends reach
+// them too.
+func (m *Manager) SetBus(b bus.Bus) {
+	m.busRef.set(b)
+	m.bindControlPlane()
+}
+
+// SameIdentity reports whether the Manager was built for this machine, name and Mixer
+// key. A Rack that rejoins the Mixer keeps its Manager, and its running gears, when it
+// is.
+func (m *Manager) SameIdentity(machineID uuid.UUID, name string, clusterPubKey []byte) bool {
+	return m.machineID == machineID && m.rackName == name && bytes.Equal(m.clusterPubKey, clusterPubKey)
+}
+
+// bindControlPlane gives the control plane every gear holds the bus connection, when
+// the bus has one.
+func (m *Manager) bindControlPlane() {
+	if conn, ok := m.bus.Core().(*nats.Conn); ok && conn != nil {
+		m.control.Bind(conn)
+	}
+}
+
+// SetLaneConfig sets the queue size of each hot lane wire and how long a gear that
+// emits waits for room in a full queue. A value that is not positive selects the
+// default. It applies to the wires made by the next ApplyScenario.
+func (m *Manager) SetLaneConfig(queueSize int, sendTimeout time.Duration) {
+	m.lane.configure(queueSize, sendTimeout)
 }
 
 // Start initiates the active lifecycle of the data-plane.
@@ -184,8 +228,13 @@ func (m *Manager) publishPort(ctx context.Context, gearName, port string, msg *f
 	})
 
 	if tm := telemetry.GetMetrics(); tm != nil {
+		// flux.id must travel with flux.name: without it the record
+		// lands on the rack's entity ID under the gear's name, and
+		// first-writer-wins keeps the rack's own entity out of the
+		// cache forever (the messages_in site below already does this).
 		tm.GearMessagesOut.Add(ctx, 1, metric.WithAttributes(
 			attribute.String("gear", gearName),
+			attribute.String("flux.id", m.gearID(gearName).String()),
 			attribute.String("flux.name", gearName),
 		))
 	}
@@ -201,6 +250,25 @@ func (m *Manager) publishPort(ctx context.Context, gearName, port string, msg *f
 	)
 	defer span.End()
 
+	// Inside the Rack the message goes through memory. It goes to the bus as well only
+	// when something outside this Rack's memory consumes it: a gear on another Rack, or
+	// a wire that asked for the guaranteed lane. Nothing else is stored or sent.
+	delivered, lerr := m.lane.publish(emitCtx, subject, msg)
+	if lerr != nil {
+		m.logger().Error("emit failed", "gear", gearName, "port", port, "error", lerr)
+		if tm := telemetry.GetMetrics(); tm != nil {
+			tm.GearErrors.Add(context.Background(), 1,
+				metric.WithAttributes(attribute.String("gear", gearName)))
+		}
+		return fmt.Errorf("emit %s.%s: %w", gearName, port, lerr)
+	}
+	if !m.publishesToBus(subject) {
+		if delivered == 0 {
+			m.logger().Debug("emission has no consumer, dropped", "gear", gearName, "port", port)
+		}
+		return nil
+	}
+
 	if perr := m.bus.Publish(emitCtx, subject, msg); perr != nil {
 		m.logger().Error("emit failed", "gear", gearName, "port", port, "error", perr)
 		if tm := telemetry.GetMetrics(); tm != nil {
@@ -210,6 +278,13 @@ func (m *Manager) publishPort(ctx context.Context, gearName, port string, msg *f
 		return fmt.Errorf("emit %s.%s: %w", gearName, port, perr)
 	}
 	return nil
+}
+
+// publishesToBus reports whether an emission on subject must also go to the bus.
+func (m *Manager) publishesToBus(subject string) bool {
+	m.portsMu.RLock()
+	defer m.portsMu.RUnlock()
+	return m.busSubjects[subject]
 }
 
 // GearContextImpl implements sdk.GearContext
@@ -272,18 +347,20 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err
 	// 1. Stop Existing
 	m.stopAll()
 
+	// 1b. Build Gear Deployment Map (name -> rack) for global wire resolution
+	gearDeploy := deployMap(sc)
+
+	// Which wires stay in this Rack's memory and which subjects also go to the bus.
+	// A scenario whose wires all stay inside the Rack never touches the bus.
+	needsBus := scenarioNeedsBus(sc, m.rackName, gearDeploy)
+	m.portsMu.Lock()
+	m.busSubjects = busEmitSubjects(sc, m.rackName, gearDeploy)
+	m.portsMu.Unlock()
+
 	// Purge NATS stream to ensure no stale messages interfere with the new scenario
-	if b := m.bus; b != nil {
+	if b := m.bus; b != nil && needsBus {
 		if n, ok := b.(interface{ Purge(context.Context) error }); ok {
 			_ = n.Purge(ctx)
-		}
-	}
-
-	// 1b. Build Gear Deployment Map (name -> rack) for global wire resolution
-	gearDeploy := make(map[string]string)
-	for _, g := range sc.Gears {
-		if target, ok := g.Deploy.(string); ok {
-			gearDeploy[g.Name] = target
 		}
 	}
 
@@ -369,12 +446,11 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err
 			bindings:      portBindings[gSpec.Name],
 		}
 
-		// MANDATORY: Check for NATS core before initializing Control Plane
-		if core := m.bus.Core(); core != nil {
-			if conn, ok := core.(*nats.Conn); ok {
-				gCtx.ctrl = ctrl.NewNATSControlPlane(conn)
-			}
-		}
+		// Every gear holds the same control plane. It is bound to the bus connection when
+		// there is one, and carries commands in memory between the gears of this Rack
+		// until there is.
+		m.bindControlPlane()
+		gCtx.ctrl = m.control
 
 		if err = gear.Init(gCtx); err != nil {
 			return fmt.Errorf("init gear %s error: %w", gSpec.Name, err)
@@ -434,8 +510,7 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err
 			wireLabel = fmt.Sprintf("%x", wire.ID)
 		}
 
-		var sub bus.Subscription
-		sub, err = m.bus.Subscribe(subject, func(ctx context.Context, msg *fluxmsg.FluxMsg) {
+		handler := func(ctx context.Context, msg *fluxmsg.FluxMsg) {
 			if msg == nil {
 				m.logger().Error("Subscribe Handler Triggered with nil msg", "subject", subject)
 				return
@@ -466,7 +541,7 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err
 					"wire", wireLabel,
 					"gear", toGear,
 					"port_id", portID.String(),
-					"payload_hex", fmt.Sprintf("0x%x", msg.RawPayload),
+					"payload_hex", fmt.Sprintf("0x%x", logger.MaskPAN(msg.RawPayload)),
 					"meta", fmt.Sprintf("%v", msg.Metadata),
 					"path", formatHops(msg.Path),
 				)
@@ -550,13 +625,25 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err
 				}
 				_ = m.publishPort(processCtx, toGear, "out", resp)
 			}
-		})
-		if err != nil {
-			return fmt.Errorf("subscribe wire %s->%s error: %w", wire.From, wire.To, err)
+		}
+
+		// A wire inside this Rack goes through memory; one that comes from another
+		// Rack, or asked for the guaranteed lane, goes over the bus and has to be
+		// confirmed hot before gears start.
+		lane := registry.LaneGuaranteed
+		var sub bus.Subscription
+		if wireOnLane(wire, sourceRack, m.rackName) {
+			lane = registry.LaneHot
+			sub = m.lane.subscribe(subject, handler)
+		} else {
+			sub, err = m.bus.Subscribe(subject, handler)
+			if err != nil {
+				return fmt.Errorf("subscribe wire %s->%s error: %w", wire.From, wire.To, err)
+			}
+			m.hotSubjects[subject] = make(chan struct{})
 		}
 		m.activeSubs = append(m.activeSubs, sub)
-		m.hotSubjects[subject] = make(chan struct{})
-		m.logger().Info("wired", "wire", wireLabel, "subject", subject)
+		m.logger().Info("wired", "wire", wireLabel, "subject", subject, "lane", lane)
 	}
 
 	// 4. Wait for connectivity convergence
@@ -604,6 +691,12 @@ func (m *Manager) Drain(ctx context.Context) error {
 
 	m.logger().Info("Draining Runtime Manager (Graceful Shutdown)")
 
+	// What is queued between the gears on the hot lane is delivered before they are
+	// drained: it is held nowhere else, so a stop that dropped it would lose it.
+	if err := m.lane.quiesce(ctx); err != nil {
+		m.logger().Warn("Runtime Manager Drain: hot lane not empty", "error", err)
+	}
+
 	var wg sync.WaitGroup
 	var errs []error
 	var errMu sync.Mutex
@@ -635,6 +728,11 @@ func (m *Manager) Drain(ctx context.Context) error {
 
 	select {
 	case <-done:
+		// Gears that were draining may have emitted a last message.
+		if err := m.lane.quiesce(ctx); err != nil {
+			m.logger().Warn("Runtime Manager Drain: hot lane not empty after the gears drained", "error", err)
+			return err
+		}
 		m.logger().Info("Runtime Manager Drained Successfully")
 	case <-ctx.Done():
 		m.logger().Warn("Runtime Manager Drain Timeout/Context Canceled", "error", ctx.Err())
@@ -655,6 +753,8 @@ func (m *Manager) stopAll() {
 
 	for name, g := range m.activeGears {
 		_ = g.Stop()
+		// A gear that is gone must not keep listening for its commands.
+		m.control.Release(name)
 		m.logger().Debug("gear stopped", "name", name)
 	}
 	m.activeGears = make(map[string]sdk.NativeGear)
@@ -663,6 +763,7 @@ func (m *Manager) stopAll() {
 	m.portsMu.Lock()
 	m.gearPorts = make(map[string]map[string]uuid.UUID)
 	m.gearIDs = make(map[string]uuid.UUID)
+	m.busSubjects = make(map[string]bool)
 	m.portsMu.Unlock()
 	m.hotSubjects = make(map[string]chan struct{})
 }

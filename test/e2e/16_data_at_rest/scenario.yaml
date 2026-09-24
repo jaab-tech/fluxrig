@@ -1,0 +1,33 @@
+# Copyright (c) 2026 JAAB Tech SAS, Uruguay
+# SPDX-License-Identifier: Apache-2.0
+
+meta:
+  name: "cross_rack"
+  version: "1.0.0"
+
+racks:
+  - name: "rack-a"
+  - name: "rack-b"
+
+gears:
+  - name: "gw-a"
+    type: "io_tcp"
+    deploy: "rack-a"
+    config:
+      mode: "server"
+      bind: ":9621"
+      delimiter: "\n"
+      delimiter_append: true
+  - name: "gw-b"
+    type: "io_tcp"
+    deploy: "rack-b"
+    config:
+      mode: "server"
+      bind: ":9622"
+      delimiter: "\n"
+      delimiter_append: true
+
+wires:
+  # A message that crosses from one Rack to the other travels over the Mixer's bus.
+  - from: "gw-a.out"
+    to: "gw-b.in"

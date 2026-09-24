@@ -22,9 +22,12 @@ Starts a live **Mixer** process and tests the HTTP API:
 
 | Test | Description |
 |------|-------------|
-| **Scenario Import** | `POST /api/v1/scenario/import?activate=true` with a YAML scenario file |
+| **Activation needs an enrolled Rack** | `POST /api/v1/scenario/import?activate=true` for a scenario that deploys to `rack-1`, before `rack-1` exists, answers `409`. The scenario stays filed and none becomes active |
+| **Scenario Import and Activation** | With `rack-1` enrolled (the Mixer adopts it), the same request answers `200` |
 | **Topology Status** | `GET /api/v1/topology/status` returns `active_ver` and `sync_status` |
 | **Persistence** | Scenario is written to disk (verifies `scenarios/active` file exists) |
+
+The test checks the Mixer side only. The scenario names a spec (`visa:v1.0.0`) that lives in the Mixer's store, so the Rack logs that it could not apply it; nothing here asserts on the Rack's runtime.
 
 ### 3. Concurrent Access (CLI + Mixer)
 

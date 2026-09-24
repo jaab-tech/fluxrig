@@ -9,12 +9,15 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/moov-io/iso8583"
+	"github.com/moov-io/iso8583/encoding"
 	"github.com/moov-io/iso8583/field"
+	"github.com/moov-io/iso8583/prefix"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -97,6 +100,12 @@ func (g *Gear) Init(ctx sdk.GearContext) error {
 	}
 	g.moovSpec = moovSpec
 	g.meta = meta
+
+	// Patch once here, not per message: both encode and decode need
+	// nil-safe Enc/Pref/Packer, and the encode path never patched at
+	// all (every encode through a field with nil Enc panicked in
+	// moov's default packer).
+	g.patchMoovSpecForDecode()
 
 	// 2. Config options
 	g.direction, _ = config["direction"].(string)
@@ -275,10 +284,45 @@ func (g *Gear) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.Flux
 // have in common: the version and the message class.
 const mtiClassLen = 2
 
-func (g *Gear) decode(msg *fluxmsg.FluxMsg) (string, []int, error) {
+func (g *Gear) decode(msg *fluxmsg.FluxMsg) (_ string, _ []int, err error) {
+	if g.moovSpec == nil {
+		return "", nil, fmt.Errorf("moovSpec not initialized")
+	}
 	isoMsg := iso8583.NewMessage(g.moovSpec)
-	if err := isoMsg.Unpack(msg.RawPayload); err != nil {
-		return "", nil, fmt.Errorf("unpack failed: %w", err)
+	if isoMsg == nil {
+		return "", nil, fmt.Errorf("failed to create isoMsg from moovSpec")
+	}
+	// Panic recovery for the rest of this function (Unpack has its own recovery
+	// below, closer to the panic). A named error return, set here, is required:
+	// with unnamed returns a recovered panic falls through to the zero values
+	// ("", nil, nil), which is exactly the "panic reads as a successful decode"
+	// bug 4c9d2b6 fixed for Unpack, reopened one function-scope out for any
+	// panic in the field-extraction loop below (a malformed spec, a nil bitmap
+	// edge case, a future moov-io change).
+	defer func() {
+		if r := recover(); r != nil {
+			g.logger.Error("decode panic recovered",
+				"panic", r,
+				"raw_payload_len", len(msg.RawPayload),
+				"stack", string(debug.Stack()))
+			err = fmt.Errorf("panic during decode: %v", r)
+		}
+	}()
+	// Panic recovery for Unpack. A panic must become the unpack error: leaving
+	// unpackErr at its zero value would let the caller treat a message that
+	// paniced mid-parse as successfully decoded.
+	var unpackErr error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				g.logger.Error("unpack panic recovered", "panic", r, "raw_payload_len", len(msg.RawPayload), "stack", string(debug.Stack()))
+				unpackErr = fmt.Errorf("panic during unpack: %v", r)
+			}
+		}()
+		unpackErr = isoMsg.Unpack(msg.RawPayload)
+	}()
+	if unpackErr != nil {
+		return "", nil, fmt.Errorf("unpack failed: %w", unpackErr)
 	}
 
 	mti, _ := isoMsg.GetString(0)
@@ -289,12 +333,17 @@ func (g *Gear) decode(msg *fluxmsg.FluxMsg) (string, []int, error) {
 	}
 	presentFields := make([]int, 0)
 
+	bitmap := isoMsg.Bitmap()
+	if bitmap == nil {
+		g.logger.Warn("decode: bitmap is nil, cannot iterate fields")
+		return mti, presentFields, nil
+	}
+
 	// Bitmap starts at field 1, but MTI is field 0
 	for i := 0; i <= 128; i++ {
-		if i > 0 && !isoMsg.Bitmap().IsSet(i) {
+		if i > 0 && !bitmap.IsSet(i) {
 			continue
 		}
-		presentFields = append(presentFields, i)
 
 		// Map to Data using Alias if available
 		val, err := isoMsg.GetString(i)
@@ -313,26 +362,55 @@ func (g *Gear) decode(msg *fluxmsg.FluxMsg) (string, []int, error) {
 		key := fmt.Sprintf("iso8583.field.%d", i)
 		_ = msg.Set(key, stored)
 
+		// presentFields reports what actually landed in Data — not what the
+		// bitmap promised. A failed GetString above skips the field, and
+		// logging the bitmap here once sent a debug session after fields
+		// that were never emitted.
+		presentFields = append(presentFields, i)
+
 		// Subfield Extraction
 		f := isoMsg.GetField(i)
-		if comp, ok := f.(*field.Composite); ok {
+		if f == nil {
+			continue
+		}
+		if comp, ok := f.(*field.Composite); ok && comp != nil {
+			// Ranging a nil map is a no-op; no nil check needed.
 			for subKey, subField := range comp.GetSubfields() {
-				subVal, err := subField.String()
-				if err != nil {
+				if subField == nil {
 					continue
 				}
-				subRaw, subRawErr := subField.Bytes()
-				subStored := storable(subVal, subRaw, subRawErr)
-
-				// 1. Raw Subfield ID
-				_ = msg.Set(fmt.Sprintf("iso8583.field.%d.%s", i, subKey), subStored)
-
-				// 2. Alias for Subfield (if defined)
-				if subAliases, hasSubAliases := g.meta.SubAliases[i]; hasSubAliases {
-					if alias, hasAlias := subAliases[subKey]; hasAlias {
-						_ = msg.Set(alias, subStored)
-					}
+				// Additional safety: check subfield spec is not nil
+				if subField.Spec() == nil {
+					g.logger.Warn("decode: subfield has nil spec, skipping", "field", i, "subfield", subKey)
+					continue
 				}
+				// Per-subfield panic recovery
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							g.logger.Error("subfield processing panic recovered", "field", i, "subfield", subKey, "panic", r)
+						}
+					}()
+					subVal, err := subField.String()
+					if err != nil {
+						return
+					}
+					subRaw, subRawErr := subField.Bytes()
+					if subRawErr != nil {
+						return
+					}
+					subStored := storable(subVal, subRaw, subRawErr)
+
+					// 1. Raw Subfield ID
+					_ = msg.Set(fmt.Sprintf("iso8583.field.%d.%s", i, subKey), subStored)
+
+					// 2. Alias for Subfield (if defined)
+					if subAliases, hasSubAliases := g.meta.SubAliases[i]; hasSubAliases {
+						if alias, hasAlias := subAliases[subKey]; hasAlias {
+							_ = msg.Set(alias, subStored)
+						}
+					}
+				}()
 			}
 		}
 	}
@@ -340,6 +418,74 @@ func (g *Gear) decode(msg *fluxmsg.FluxMsg) (string, []int, error) {
 	g.preserveUnknownTags(isoMsg, msg)
 
 	return mti, presentFields, nil
+}
+
+// patchMoovSpecForDecode patches the moovSpec to ensure all field specs have proper Enc/Pref
+// before decoding. This prevents nil pointer dereferences in the moov library's Unpack method.
+//
+// Deliberately never assigns spec.Pad: moov unpads on unpack whenever Pad
+// is set, so a default Pad would strip leading zeros from every decoded
+// value ("0110"->"110", "00"->""). Packing pads inline through safePacker
+// below instead, which reads spec.Pad without writing it.
+func (g *Gear) patchMoovSpecForDecode() {
+	if g.moovSpec == nil {
+		return
+	}
+	// Pack-only safe packer: pads inline when the spec declares a Pad,
+	// passes through otherwise. Never assigns spec.Pad (see above).
+	safePacker := field.PackerFunc(func(data []byte, spec *field.Spec) ([]byte, error) {
+		enc := spec.Enc
+		if enc == nil {
+			enc = encoding.ASCII
+		}
+		pref := spec.Pref
+		if pref == nil {
+			pref = prefix.ASCII.Fixed
+		}
+		if spec.Pad != nil {
+			data = spec.Pad.Pad(data, spec.Length)
+		}
+		encodedValue, err := enc.Encode(data)
+		if err != nil {
+			return nil, fmt.Errorf("failed to encode content: %w", err)
+		}
+		lengthPrefix, err := pref.EncodeLength(spec.Length, len(data))
+		if err != nil {
+			return nil, fmt.Errorf("failed to encode length: %w", err)
+		}
+		return append(lengthPrefix, encodedValue...), nil
+	})
+	// Recursive function to patch a field and its subfields
+	var patchField func(fld field.Field)
+	patchField = func(fld field.Field) {
+		if fld == nil {
+			return
+		}
+		spec := fld.Spec()
+		if spec == nil {
+			return
+		}
+		// Set default encoding if missing
+		if spec.Enc == nil {
+			spec.Enc = encoding.ASCII
+		}
+		// Set default prefix if missing
+		if spec.Pref == nil {
+			spec.Pref = prefix.ASCII.Fixed
+		}
+		// Pack through the nil-safe packer. Composite fields ignore
+		// spec.Packer (they assemble subfields directly), so setting
+		// it here is harmless for them.
+		spec.Packer = safePacker
+		// Recursively patch subfields
+		for _, subField := range spec.Subfields {
+			patchField(subField)
+		}
+	}
+	// Patch all fields in the moovSpec
+	for _, fld := range g.moovSpec.Fields {
+		patchField(fld)
+	}
 }
 
 // storable picks the representation a decoded value must take to survive the
@@ -427,6 +573,16 @@ func (g *Gear) encode(msg *fluxmsg.FluxMsg) (string, []int, error) {
 			continue
 		}
 
+		// Binary payloads arrive as bytes (see decode) and must be set as
+		// such: Sprintf would render them as "[82 83 ...]" and corrupt the
+		// field on the wire. Same guard as the raw-field loop below.
+		if raw, isBytes := toBytes(val); isBytes {
+			if err := isoMsg.BinaryField(id, raw); err != nil {
+				return mti, presentFields, fmt.Errorf("failed to set raw field %d (%s): %w", id, alias, err)
+			}
+			presentFields = append(presentFields, id)
+			continue
+		}
 		strVal := fmt.Sprintf("%v", val)
 		if err := isoMsg.Field(id, strVal); err != nil {
 			return mti, presentFields, fmt.Errorf("failed to set field %d (%s): %w", id, alias, err)

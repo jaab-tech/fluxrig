@@ -10,6 +10,8 @@ import tomli
 from robot.api import logger
 from robot.api.deco import keyword
 
+from binpaths import bin_dir
+
 class ProcessKeywords:
     """
     Keywords for managing fluxrig processes (Mixer, Rack) and workspace.
@@ -122,7 +124,7 @@ class ProcessKeywords:
         target_dir = os.path.join(work_dir, "data")
         os.makedirs(target_dir, exist_ok=True)
         
-        bin_path = os.path.join(self.root_dir, "bin", "fluxrig")
+        bin_path = os.path.join(bin_dir(self.root_dir), "fluxrig")
         key_path = os.path.join(target_dir, "cluster.key")
         
         cmd = [bin_path, "keys", "gen-cluster", "-o", key_path]
@@ -137,13 +139,14 @@ class ProcessKeywords:
         Starts the fluxrig Mixer process.
         Uses CWD Isolation so TOML relative paths populate the component directory.
         """
-        bin_path = os.path.join(self.root_dir, "bin", "fluxrig-mixer")
+        bin_path = os.path.join(bin_dir(self.root_dir), "fluxrig-mixer")
         if not os.path.isabs(config_file):
             config_file = os.path.abspath(config_file)
             
         # Parse TOML for Port and Log File
         cfg = self._parse_toml(config_file)
         port = cfg.get("api", {}).get("port", 8090)
+        snake_port = cfg.get("snake", {}).get("port", 4222)
         log_rel_path = cfg.get("logging", {}).get("filename", "logs/mixer.log")
 
         # work_dir IS the component home now
@@ -189,7 +192,7 @@ class ProcessKeywords:
         # Call wait_for_healthy (must be available in the main class or mixin)
         # Since this is a mixin, self.wait_for_healthy works if guaranteed to exist.
         if hasattr(self, 'wait_for_healthy'):
-            self.wait_for_healthy(port)
+            self.wait_for_healthy(port, snake_port=snake_port)
         else:
             logger.warn("wait_for_healthy not found, skipping health check.")
 
@@ -199,7 +202,7 @@ class ProcessKeywords:
         Starts a fluxrig Rack process.
         Uses CWD Isolation.
         """
-        bin_path = os.path.join(self.root_dir, "bin", "fluxrig")
+        bin_path = os.path.join(bin_dir(self.root_dir), "fluxrig")
         if not os.path.isabs(config_file):
             config_file = os.path.abspath(config_file)
 
@@ -291,7 +294,7 @@ class ProcessKeywords:
         """
         Runs 'fluxrig check' to verify the environment health.
         """
-        bin_path = os.path.join(self.root_dir, "bin", "fluxrig")
+        bin_path = os.path.join(bin_dir(self.root_dir), "fluxrig")
         if not os.path.isabs(config_file):
             config_file = os.path.abspath(config_file)
             

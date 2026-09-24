@@ -15,6 +15,7 @@ import (
 	"github.com/warpstreamlabs/bento/public/service"
 
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
+	"github.com/jaab-tech/fluxrig/pkg/logger"
 	"github.com/jaab-tech/fluxrig/pkg/sdk"
 )
 
@@ -292,7 +293,12 @@ func (i *fluxInput) Read(ctx context.Context) (*service.Message, service.AckFunc
 			return nil, nil, service.ErrEndOfInput
 		}
 		bMsg := ToBentoMessage(msg)
-		i.g.logger.Info("Bento Input Read", "id", msg.FluxID, "payload", string(msg.RawPayload))
+		// The payload is logged only at TRACE, with card numbers masked.
+		if i.g.logger.Enabled(ctx, logger.LevelTrace) {
+			i.g.logger.Log(ctx, logger.LevelTrace, "Bento Input Read", "id", msg.FluxID, "payload", logger.MaskPANString(string(msg.RawPayload)))
+		} else {
+			i.g.logger.Debug("Bento Input Read", "id", msg.FluxID, "size", len(msg.RawPayload))
+		}
 		return bMsg, func(ctx context.Context, err error) error { return nil }, nil
 	case <-ctx.Done():
 		return nil, nil, service.ErrEndOfInput

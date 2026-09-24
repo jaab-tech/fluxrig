@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -70,9 +72,14 @@ func TestInspectLogs_Success(t *testing.T) {
 }
 
 func TestInspectLogs_NotFound(t *testing.T) {
+	// A path below a regular file cannot be opened or created by any user. A missing
+	// directory under the root of the disk can, when the tests run as root.
+	blocker := filepath.Join(t.TempDir(), "blocker")
+	require.NoError(t, os.WriteFile(blocker, nil, 0o600))
+
 	var out bytes.Buffer
 	var errOut bytes.Buffer
-	err := inspectLogs("/non/existent/path/that/does/not/exist", &out, &errOut)
+	err := inspectLogs(filepath.Join(blocker, "wal"), &out, &errOut)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to open WAL")
 }

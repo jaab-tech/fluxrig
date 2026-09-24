@@ -96,6 +96,26 @@ wait_for_port() {
     return 1
 }
 
+# Wait until a log file contains a pattern, polling until a deadline.
+# With $SKIP_LINES, lines already in the file at that point are ignored, so a
+# pattern an earlier phase of the test logged cannot satisfy a later wait.
+# Usage: wait_for_log $LOG_FILE $PATTERN [$MAX_SECONDS] [$SKIP_LINES]
+wait_for_log() {
+    local log_file="$1"
+    local pattern="$2"
+    local max_seconds="${3:-30}"
+    local skip_lines="${4:-0}"
+    local deadline=$((SECONDS + max_seconds))
+
+    while (( SECONDS < deadline )); do
+        if [ -f "$log_file" ] && grep -q "$pattern" <(tail -n +$((skip_lines + 1)) "$log_file"); then
+            return 0
+        fi
+        sleep 0.2
+    done
+    return 1
+}
+
 # Setup temporal workspace with symlink
 # Usage: setup_workspace $TEST_NAME $BASE_DIR
 # Sets: WORK_DIR
@@ -184,6 +204,22 @@ check_log() {
     fi
 }
 
+# Wait until a file exists, polling until a deadline
+# Usage: wait_for_file $FILE_PATH [$MAX_SECONDS]
+wait_for_file() {
+    local file_path="$1"
+    local max_seconds="${2:-30}"
+    local deadline=$((SECONDS + max_seconds))
+
+    while (( SECONDS < deadline )); do
+        if [ -f "$file_path" ]; then
+            return 0
+        fi
+        sleep 0.2
+    done
+    return 1
+}
+
 # Verify file exists
 # Usage: verify_file $FILE_PATH $DESCRIPTION
 verify_file() {
@@ -198,6 +234,14 @@ verify_file() {
     fi
 }
 
+# Directory that holds the binaries under test: this repository's bin/ unless
+# FLUXRIG_BIN_DIR points at another set with the same file names (fluxrig,
+# fluxrig-mixer, iso8583-tool). A test kept in another repository uses it to run
+# against a build this repository does not produce.
+bin_dir() {
+    echo "${FLUXRIG_BIN_DIR:-${ROOT_DIR}/bin}"
+}
+
 # Start Mixer and wait for health
 # Usage: start_mixer $CONFIG_PATH $LOG_PATH $API_URL
 # Sets global MIXER_PID
@@ -205,9 +249,9 @@ start_mixer() {
     local config="$1"
     local log_path="$2"
     local api_url="$3"
-    
+
     log_info "Starting Mixer..."
-    "${ROOT_DIR}/bin/fluxrig-mixer" -c "$config" > "$log_path" 2>&1 &
+    "$(bin_dir)/fluxrig-mixer" -c "$config" > "$log_path" 2>&1 &
     MIXER_PID=$!
     log_info "Mixer PID: $MIXER_PID"
     
@@ -222,7 +266,7 @@ start_rack() {
     local log_path="$2"
     
     log_info "Starting Rack..."
-    "${ROOT_DIR}/bin/fluxrig" rack -c "$config" > "$log_path" 2>&1 &
+    "$(bin_dir)/fluxrig" rack -c "$config" > "$log_path" 2>&1 &
     RACK_PID=$!
     log_info "Rack PID: $RACK_PID"
 }
@@ -233,7 +277,7 @@ gen_keys() {
     local output_path="$1"
     
     log_info "Generating Cluster Keys..."
-    "${ROOT_DIR}/bin/fluxrig" keys gen-cluster -o "$output_path" > /dev/null
+    "$(bin_dir)/fluxrig" keys gen-cluster -o "$output_path" > /dev/null
     verify_file "$output_path" "Cluster key generated."
 }
 

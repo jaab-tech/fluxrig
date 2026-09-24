@@ -1,0 +1,25 @@
+# Copyright (c) 2026 JAAB Tech SAS, Uruguay
+# SPDX-License-Identifier: Apache-2.0
+
+meta:
+  name: "guaranteed_lane"
+  version: "1.0.0"
+
+racks:
+  - name: "rack-hot"
+
+gears:
+  # A TCP server whose output is wired back to its input: an echo inside one Rack.
+  - name: "gateway"
+    type: "io_tcp"
+    deploy: "rack-hot"
+    config:
+      mode: "server"
+      bind: ":9612"
+      delimiter: "\n"
+      delimiter_append: true
+
+wires:
+  - from: "gateway.out"
+    to: "gateway.in"
+    lane: "guaranteed"
