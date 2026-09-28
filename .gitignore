@@ -53,8 +53,6 @@ pkg/telemetry/logs/
 scratch/
 
 # Unit Test Artifacts
-pkg/ingest/comprehensive-mixer/
-pkg/ingest/test-mixer/
 .cache/
 
 # Local workspace configuration (never commit — contains sibling repo paths)

@@ -524,7 +524,16 @@ func toBytes(v any) ([]byte, bool) {
 	}
 }
 
-// preserveUnknownTags copies retained unknown TLV tags into the fluxMsg.
+// preserveUnknownTags copies retained unknown TLV tags into the fluxMsg, for a
+// downstream gear to inspect (logging, routing, an audit trail) without having
+// to re-parse the raw bytes of whatever composite field carried them.
+//
+// It does not affect whether those tags survive re-encoding: they already do,
+// because the composite field's own raw bytes (stored under iso8583.field.N by
+// the loop above, via GetBytes) already include every subfield the wire
+// unpacked into it, known or not, and BinaryField/encode round-trips those
+// bytes whole (see TestTLVSurvivesTheBus). This is a second, independent copy
+// for visibility, not the mechanism fidelity depends on.
 //
 // Values are stored as []byte on purpose. A fluxMsg crosses gear and rack
 // boundaries as CBOR, which encodes a Go string as a text string and therefore
@@ -545,7 +554,15 @@ func (g *Gear) preserveUnknownTags(isoMsg *iso8583.Message, msg *fluxmsg.FluxMsg
 		tags[path] = raw
 	}
 	if len(tags) > 0 {
-		msg.Data[unknownTagsKey] = tags
+		// Set, not a direct msg.Data[unknownTagsKey] assignment: unknownTagsKey
+		// contains a dot, and every reader in this codebase (Get, and anything
+		// built on it) resolves a dotted key by descending into nested maps, not
+		// by treating the dots as part of one flat key. decode's own field loop
+		// already made Data["iso8583"] a nested map via the same Set convention,
+		// so a flat assignment here landed a second, sibling top-level key that
+		// Get("iso8583.unknown_tags") could never reach: it looks for
+		// Data["iso8583"]["unknown_tags"], not Data["iso8583.unknown_tags"].
+		_ = msg.Set(unknownTagsKey, tags)
 	}
 }
 

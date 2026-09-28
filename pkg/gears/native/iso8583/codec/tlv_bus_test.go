@@ -153,6 +153,34 @@ func TestTLVSurvivesTheBus(t *testing.T) {
 		"the undeclared tag must still be on the wire")
 }
 
+// TestDecodeExposesUnknownTagsThroughTheStandardAccessor is a regression test
+// for a real bug: preserveUnknownTags stored the retained tags with a direct
+// msg.Data[unknownTagsKey] assignment, where unknownTagsKey ("iso8583.unknown_tags")
+// contains a dot. Every other reader in this codebase — Get, and everything
+// built on it — resolves a dotted key by descending into nested maps
+// (decode's own field loop already makes Data["iso8583"] one such nested map,
+// via the same Set it now uses too), so the flat assignment landed a second,
+// sibling top-level key nothing standard could ever reach.
+func TestDecodeExposesUnknownTagsThroughTheStandardAccessor(t *testing.T) {
+	path := writeSpec(t, emvTLVSpec)
+	g := newTLVCodec(t, path)
+
+	icc := "9F0206000000000501" + "9F1F04DEADBEEF" + "5F2A020858"
+	original := buildISO(t, path, "0100", "4111111111111111", icc)
+
+	in := &fluxmsg.FluxMsg{Data: map[string]any{}, Metadata: map[string]string{}, RawPayload: original}
+	_, _, err := g.decode(in)
+	require.NoError(t, err)
+
+	val, ok := in.Get("iso8583.unknown_tags")
+	require.True(t, ok, "the standard dot-aware accessor must find what preserveUnknownTags stored")
+
+	tags, ok := val.(map[string][]byte)
+	require.True(t, ok, "expected map[string][]byte, got %T", val)
+	require.Contains(t, tags, "55.9F1F")
+	assert.Equal(t, "deadbeef", hex.EncodeToString(tags["55.9F1F"]))
+}
+
 // TestTLVArrivalOrderIsCanonicalized pins a limit of the fidelity above, so it
 // is discovered here rather than against a scheme.
 //

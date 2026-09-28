@@ -41,6 +41,10 @@ const (
 	TicketClosed
 	// TicketExpired: TTL elapsed without a matching reply.
 	TicketExpired
+	// TicketReleased: the caller undid a Park before anything reached the
+	// destination (see Engine.Release). Unlike TicketExpired, no request was
+	// ever actually sent for this ticket.
+	TicketReleased
 )
 
 func (s TicketState) String() string {
@@ -51,6 +55,8 @@ func (s TicketState) String() string {
 		return "closed"
 	case TicketExpired:
 		return "expired"
+	case TicketReleased:
+		return "released"
 	default:
 		return "unknown"
 	}

@@ -9,6 +9,15 @@ import (
 	"fmt"
 )
 
+// maxScanTokenSize bounds bufio.Scanner's internal buffer for both the server
+// and client read loops. bufio.Scanner defaults to bufio.MaxScanTokenSize
+// (64KiB) and silently fails with bufio.ErrTooLong above that, well below what
+// the length-prefix splitter itself already accepts (up to a 4-byte header
+// plus the 1MB payload makeLengthPrefixSplitter checks for below): without
+// this, a legitimate message between those two sizes was rejected by the
+// scanner before it ever reached the splitter's own size check.
+const maxScanTokenSize = 4 + 1024*1024 // largest header (length_prefix4) + largest payload
+
 // MakeSplitter returns a bufio.SplitFunc based on configuration.
 func MakeSplitter(cfg *Config) bufio.SplitFunc {
 	// Length-prefixed framing

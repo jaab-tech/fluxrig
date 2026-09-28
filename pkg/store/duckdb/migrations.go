@@ -7,6 +7,9 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"path/filepath"
+
+	"github.com/jaab-tech/fluxrig/pkg/lockfile"
 )
 
 // Migration defines a single database state transition.
@@ -29,7 +32,31 @@ var migrations = []Migration{
 }
 
 // Migrate runs pending migrations.
+//
+// The version-check-then-apply sequence below is not atomic on its own: two
+// callers racing it can both read the same currentVersion and both attempt
+// migrateV1, which seeds fixed-PK rows a second insert conflicts on. A Mutex
+// closes that within one process; a store opened by two Mixer processes
+// against the same data directory is not stopped by a Mutex, since each
+// process has its own, so a flock-based advisory lock on a file beside the
+// store closes it across processes too. An in-memory store cannot be shared
+// across processes in the first place, so it skips the file lock.
 func (s *Store) Migrate(ctx context.Context) error {
+	s.migrateMu.Lock()
+	defer s.migrateMu.Unlock()
+
+	if !s.isMemory {
+		lock, err := lockfile.Acquire(filepath.Join(s.dataDir, ".migrate.lock"))
+		if err != nil {
+			return fmt.Errorf("failed to acquire migration lock (is another Mixer process running against %s?): %w", s.dataDir, err)
+		}
+		defer func() {
+			if errRel := lock.Release(); errRel != nil {
+				s.log.Error("failed to release migration lock", "error", errRel)
+			}
+		}()
+	}
+
 	s.log.Info("checking database migrations")
 
 	// 0. Ensure Version Table Exists

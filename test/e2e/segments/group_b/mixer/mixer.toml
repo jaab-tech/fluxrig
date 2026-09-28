@@ -1,0 +1,18 @@
+[logging]
+level = "debug"
+filename = "logs/mixer.log"
+
+[api]
+port = 8093
+
+[snake]
+port = 4224
+url = "nats://localhost:4224"
+
+[store]
+dir = "./data"
+database_file = "flux.duckdb"
+cluster_key_file = "cluster.key"
+
+[enrollment]
+auto_adopt = false

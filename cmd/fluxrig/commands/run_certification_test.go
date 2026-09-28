@@ -96,7 +96,7 @@ func TestCLI_RunCertification(t *testing.T) {
 		defer cancel()
 
 		machineID := uuid.New()
-		err := sendHeartbeat(ctx, managedBus, machineID, cfg, idGen)
+		err := sendHeartbeat(ctx, managedBus, machineID, "test-secret", cfg, idGen)
 		assert.NoError(t, err)
 	})
 

@@ -196,8 +196,19 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	s.flushBuffer(conn)
 
 	scanner := bufio.NewScanner(conn)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxScanTokenSize)
 	scanner.Split(MakeSplitter(s.config))
-	for scanner.Scan() {
+	idleTimeout := time.Duration(s.config.IdleTimeout)
+	for {
+		// Refreshed before every message, not just once: idle_timeout bounds
+		// the gap between messages, not the life of the connection. It was
+		// parsed and defaulted (60s) but never enforced anywhere before this.
+		if idleTimeout > 0 {
+			_ = conn.SetReadDeadline(time.Now().Add(idleTimeout))
+		}
+		if !scanner.Scan() {
+			break
+		}
 		data := scanner.Bytes()
 		payload := make([]byte, len(data))
 		copy(payload, data) // Copy because buffer is reused
@@ -244,7 +255,11 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	}
 
 	if err := scanner.Err(); err != nil {
-		s.log.Warn("connection error", "error", err, "conn_id", connID)
+		if ne, ok := err.(net.Error); ok && ne.Timeout() {
+			s.log.Warn("connection idle past idle_timeout, closing", "timeout", idleTimeout, "conn_id", connID)
+		} else {
+			s.log.Warn("connection error", "error", err, "conn_id", connID)
+		}
 	} else {
 		s.log.Info("connection closed", "conn_id", connID)
 	}
@@ -318,7 +333,7 @@ func (s *Server) writeTo(ctx context.Context, conn *Connection, msg *fluxmsg.Flu
 		s.log.Debug("sending message", "conn_id", conn.id, "size", len(msg.RawPayload))
 	}
 
-	outbound, err := s.frameOutbound(msg.RawPayload)
+	outbound, err := frameOutbound(s.config.Framing, msg.RawPayload)
 	if err != nil {
 		return err
 	}
@@ -343,10 +358,11 @@ func (s *Server) writeTo(ctx context.Context, conn *Connection, msg *fluxmsg.Flu
 }
 
 // frameOutbound applies the configured framing to payload. The one place this
-// logic lives: Process, flushBuffer and soleActiveConnection's caller all
-// route outbound bytes through it, so a framing fix or a new mode is made once.
-func (s *Server) frameOutbound(payload []byte) ([]byte, error) {
-	switch s.config.Framing {
+// logic lives: Server.Process, flushBuffer, soleActiveConnection's caller, and
+// Client.Process all route outbound bytes through it, so a framing fix or a new
+// mode is made once, for both modes this gear can run in, not just one of them.
+func frameOutbound(framing string, payload []byte) ([]byte, error) {
+	switch framing {
 	case FramingLengthPrefix2:
 		if len(payload) > 65535 {
 			return nil, fmt.Errorf("message too large for 2-byte length prefix: %d bytes", len(payload))
@@ -425,7 +441,7 @@ func (s *Server) flushBuffer(conn net.Conn) {
 	s.log.Info("flushing buffered messages", "count", len(pending))
 
 	for i, payload := range pending {
-		outbound, err := s.frameOutbound(payload)
+		outbound, err := frameOutbound(s.config.Framing, payload)
 		if err != nil {
 			s.log.Error("dropping buffered message: cannot frame it", "error", err)
 			continue

@@ -255,6 +255,46 @@ func (e *Engine) Redeem(ctx context.Context, key string, outcome *fluxmsg.FluxMs
 	return t, nil
 }
 
+// Release undoes a Park that committed a ticket whose request was never
+// actually sent, typically because the caller's own follow-up action (routing
+// the request to its destination) failed right after Park returned Parked.
+// Left in place, that ticket would sit open until its TTL expires, and a
+// retry of the same request in the meantime would find it via Park's
+// AttachedOpen path and be silently absorbed as a harmless duplicate, even
+// though nothing was ever sent for the original attempt. Release removes it
+// so the retry parks fresh and the caller's follow-up action runs again.
+//
+// It returns ErrUnmatched when key has no open ticket: already redeemed,
+// already expired, or never parked. The caller has nothing left to undo in
+// that case, and should not treat it as a failure.
+func (e *Engine) Release(ctx context.Context, key string) error {
+	if key == "" {
+		return fmt.Errorf("valet: release: empty key")
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if e.state == engineClosed {
+		return ErrClosed
+	}
+
+	t, err := e.store.Take(ctx, key)
+	if errors.Is(err, ErrTicketNotFound) {
+		return ErrUnmatched
+	}
+	if err != nil {
+		return fmt.Errorf("valet: release: %w", err)
+	}
+
+	if t.timer != nil {
+		t.timer.Stop()
+	}
+	t.setState(TicketReleased)
+	e.decOpenLocked(t)
+	return nil
+}
+
 // expire transitions an open ticket to expired when its TTL fires. A ticket
 // redeemed between timer fire and lock acquisition is left alone.
 func (e *Engine) expire(t *Ticket) {

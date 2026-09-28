@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fxamacker/cbor/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -28,16 +29,27 @@ func laneMsg(seq int) *fluxmsg.FluxMsg {
 	return m
 }
 
+// laneEncodedItem builds a laneItem the way localLane.publish would: encoded
+// bytes deliver decodes, not the zero-value laneItem an enqueue call passing
+// only a context produces, which fails to decode and never reaches the handler.
+func laneEncodedItem(t *testing.T, ctx context.Context, seq int) laneItem {
+	t.Helper()
+	data, err := cbor.Marshal(laneMsg(seq))
+	require.NoError(t, err)
+	return laneItem{ctx: ctx, data: data}
+}
+
 // collector gathers what a handler receives.
 type collector struct {
 	mu   sync.Mutex
 	msgs []*fluxmsg.FluxMsg
 }
 
-func (c *collector) handle(_ context.Context, m *fluxmsg.FluxMsg) {
+func (c *collector) handle(_ context.Context, m *fluxmsg.FluxMsg) error {
 	c.mu.Lock()
 	c.msgs = append(c.msgs, m)
 	c.mu.Unlock()
+	return nil
 }
 
 func (c *collector) count() int {
@@ -80,13 +92,14 @@ func TestLane_EachSubscriberGetsItsOwnCopy(t *testing.T) {
 	l := testLane(8, time.Second)
 	var mu sync.Mutex
 	seen := map[string]string{}
-	handler := func(name string) func(context.Context, *fluxmsg.FluxMsg) {
-		return func(_ context.Context, m *fluxmsg.FluxMsg) {
+	handler := func(name string) func(context.Context, *fluxmsg.FluxMsg) error {
+		return func(_ context.Context, m *fluxmsg.FluxMsg) error {
 			mu.Lock()
 			seen[name] = m.Metadata["who"] // what the message said when it arrived
 			mu.Unlock()
 			m.Metadata["who"] = name // and then this gear changes it
 			m.RawPayload[0] = 'X'
+			return nil
 		}
 	}
 	a := l.subscribe("s", handler("a"))
@@ -109,9 +122,10 @@ func TestLane_EmitterChangesAfterPublishDoNotReachTheHandler(t *testing.T) {
 	l := testLane(8, time.Second)
 	release := make(chan struct{})
 	got := make(chan string, 1)
-	sub := l.subscribe("s", func(_ context.Context, m *fluxmsg.FluxMsg) {
+	sub := l.subscribe("s", func(_ context.Context, m *fluxmsg.FluxMsg) error {
 		<-release
 		got <- string(m.RawPayload)
+		return nil
 	})
 	defer func() { _ = sub.Unsubscribe() }()
 
@@ -139,12 +153,13 @@ func TestLane_FullQueueFailsTheEmitterAfterTheTimeout(t *testing.T) {
 	l := testLane(1, 50*time.Millisecond)
 	block := make(chan struct{})
 	entered := make(chan struct{}, 1)
-	sub := l.subscribe("s", func(context.Context, *fluxmsg.FluxMsg) {
+	sub := l.subscribe("s", func(context.Context, *fluxmsg.FluxMsg) error {
 		select {
 		case entered <- struct{}{}:
 		default:
 		}
 		<-block
+		return nil
 	})
 	defer func() { close(block); _ = sub.Unsubscribe() }()
 
@@ -161,16 +176,63 @@ func TestLane_FullQueueFailsTheEmitterAfterTheTimeout(t *testing.T) {
 	assert.GreaterOrEqual(t, time.Since(start), 50*time.Millisecond, "it waited the whole timeout before giving up")
 }
 
-func TestLane_EmitterContextEndsTheWait(t *testing.T) {
+// TestLaneSub_EnqueueReturnsErrLaneClosedNotNilWhenTornDownMidSend is a
+// regression test for a real bug: enqueue's <-s.done branch returned a bare nil,
+// and publish counts every nil enqueue as delivered. A message queued for a wire
+// that was unsubscribed while the send was still in flight was never actually
+// delivered, but was reported as if it had been.
+func TestLaneSub_EnqueueReturnsErrLaneClosedNotNilWhenTornDownMidSend(t *testing.T) {
+	original := unsubscribeWait
+	unsubscribeWait = 50 * time.Millisecond // the handler below never returns on its own
+	defer func() { unsubscribeWait = original }()
+
 	l := testLane(1, time.Minute)
 	block := make(chan struct{})
 	entered := make(chan struct{}, 1)
-	sub := l.subscribe("s", func(context.Context, *fluxmsg.FluxMsg) {
+	sub := l.subscribe("s", func(context.Context, *fluxmsg.FluxMsg) error {
 		select {
 		case entered <- struct{}{}:
 		default:
 		}
 		<-block
+		return nil
+	})
+	defer close(block)
+
+	ctx := context.Background()
+	// Pulled straight into the handler, which then blocks; the queue is empty again.
+	require.NoError(t, sub.enqueue(ctx, laneEncodedItem(t, ctx, 1), time.Minute))
+	<-entered
+	// Fills the now-empty one-slot queue.
+	require.NoError(t, sub.enqueue(ctx, laneEncodedItem(t, ctx, 2), time.Minute))
+
+	// This one must block: the handler is stuck and the queue is full. Whenever
+	// it actually runs, the queue stays full for the rest of the test (the
+	// handler never drains it), so it can only leave the second select via
+	// <-s.done, whether that is already closed by the time this starts or not.
+	third := laneEncodedItem(t, ctx, 3)
+	done := make(chan error, 1)
+	go func() {
+		done <- sub.enqueue(ctx, third, time.Minute)
+	}()
+
+	require.NoError(t, sub.Unsubscribe())
+
+	err := <-done
+	assert.ErrorIs(t, err, ErrLaneClosed, "a message dropped because the wire was torn down must not report success")
+}
+
+func TestLane_EmitterContextEndsTheWait(t *testing.T) {
+	l := testLane(1, time.Minute)
+	block := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	sub := l.subscribe("s", func(context.Context, *fluxmsg.FluxMsg) error {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-block
+		return nil
 	})
 	defer func() { close(block); _ = sub.Unsubscribe() }()
 	_, _ = l.publish(context.Background(), "s", laneMsg(1))
@@ -204,7 +266,7 @@ func TestLane_UnsubscribeStopsDeliveryAndForgetsWhatWasQueued(t *testing.T) {
 func TestLane_QuiesceWaitsForWhatIsInFlight(t *testing.T) {
 	l := testLane(16, time.Second)
 	release := make(chan struct{})
-	sub := l.subscribe("s", func(context.Context, *fluxmsg.FluxMsg) { <-release })
+	sub := l.subscribe("s", func(context.Context, *fluxmsg.FluxMsg) error { <-release; return nil })
 	defer func() { _ = sub.Unsubscribe() }()
 	_, _ = l.publish(context.Background(), "s", laneMsg(1))
 	_, _ = l.publish(context.Background(), "s", laneMsg(2))
@@ -222,11 +284,11 @@ func TestLane_QuiesceWaitsForWhatIsInFlight(t *testing.T) {
 func TestLane_HandlerPanicKeepsTheSubscriptionAlive(t *testing.T) {
 	l := testLane(16, time.Second)
 	c := &collector{}
-	sub := l.subscribe("s", func(ctx context.Context, m *fluxmsg.FluxMsg) {
+	sub := l.subscribe("s", func(ctx context.Context, m *fluxmsg.FluxMsg) error {
 		if m.Metadata["seq"] == "1" {
 			panic("gear blew up")
 		}
-		c.handle(ctx, m)
+		return c.handle(ctx, m)
 	})
 	defer func() { _ = sub.Unsubscribe() }()
 
@@ -249,9 +311,10 @@ func TestLane_HandlerContextKeepsValuesAndSurvivesTheEmitter(t *testing.T) {
 		err   error
 	}
 	got := make(chan result, 1)
-	sub := l.subscribe("s", func(ctx context.Context, _ *fluxmsg.FluxMsg) {
+	sub := l.subscribe("s", func(ctx context.Context, _ *fluxmsg.FluxMsg) error {
 		<-release
 		got <- result{ctx.Value(ctxKey{}), ctx.Err()}
+		return nil
 	})
 	defer func() { _ = sub.Unsubscribe() }()
 
@@ -270,7 +333,7 @@ func TestLane_HandlerContextKeepsValuesAndSurvivesTheEmitter(t *testing.T) {
 // an invalid message through.
 func TestLane_RefusesAnInvalidMessage(t *testing.T) {
 	l := testLane(8, time.Second)
-	sub := l.subscribe("s", func(context.Context, *fluxmsg.FluxMsg) {})
+	sub := l.subscribe("s", func(context.Context, *fluxmsg.FluxMsg) error { return nil })
 	defer func() { _ = sub.Unsubscribe() }()
 
 	bad := fluxmsg.New()
@@ -289,12 +352,13 @@ func TestLane_PublishReachesHealthySubscribersDespiteOneStuckOne(t *testing.T) {
 	l := testLane(1, 30*time.Millisecond)
 	block := make(chan struct{})
 	entered := make(chan struct{}, 1)
-	stuck := l.subscribe("s", func(context.Context, *fluxmsg.FluxMsg) {
+	stuck := l.subscribe("s", func(context.Context, *fluxmsg.FluxMsg) error {
 		select {
 		case entered <- struct{}{}:
 		default:
 		}
 		<-block
+		return nil
 	})
 	healthy := &collector{}
 	sub := l.subscribe("s", healthy.handle)
@@ -330,12 +394,13 @@ func TestLane_UnsubscribeGivesUpAfterTheWaitInsteadOfBlockingForever(t *testing.
 	l := testLane(1, time.Second)
 	entered := make(chan struct{}, 1)
 	neverReturns := make(chan struct{}) // deliberately never closed
-	sub := l.subscribe("s", func(context.Context, *fluxmsg.FluxMsg) {
+	sub := l.subscribe("s", func(context.Context, *fluxmsg.FluxMsg) error {
 		select {
 		case entered <- struct{}{}:
 		default:
 		}
 		<-neverReturns
+		return nil
 	})
 
 	_, err := l.publish(context.Background(), "s", laneMsg(1))

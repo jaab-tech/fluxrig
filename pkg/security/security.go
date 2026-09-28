@@ -5,6 +5,7 @@ package security
 
 import (
 	"crypto/ed25519"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"os"
@@ -88,4 +89,19 @@ func MaskPAN(pan string) string {
 // MaskCVV always returns masked CVV (never expose).
 func MaskCVV(_ string) string {
 	return "***"
+}
+
+// SecretsEqual reports whether a and b are equal, in constant time, so
+// comparing a caller-supplied secret against the real one does not leak how
+// many leading bytes matched through response timing. Two empty strings never
+// match: an empty secret proves nothing about who sent it. The one shared
+// implementation for every secret comparison in the Mixer (API bearer token,
+// re-registration bootstrap secret, heartbeat secret) — three independent
+// copies of this same five-line function once drifted enough to prompt this
+// consolidation.
+func SecretsEqual(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }

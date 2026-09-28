@@ -169,7 +169,7 @@ func (c *ScenarioController) Import(ctx context.Context, content []byte, dryRun 
 	if scenarioName == "" {
 		scenarioName = fmt.Sprintf("scenario-%s", s.Meta.Version)
 	}
-	safeName := c.sanitizeName(scenarioName)
+	safeName := sanitizeName(scenarioName)
 
 	scenarioFile := filepath.Join(c.repoPath, safeName+".yaml")
 	if err := os.WriteFile(scenarioFile, content, 0600); err != nil {
@@ -260,7 +260,7 @@ func (c *ScenarioController) Activate(ctx context.Context, name string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	safeName := c.sanitizeName(name)
+	safeName := sanitizeName(name)
 	scenarioFile := filepath.Join(c.repoPath, safeName+".yaml")
 
 	// 1. Load scenario from disk
@@ -284,26 +284,33 @@ func (c *ScenarioController) Activate(ctx context.Context, name string) error {
 		return fmt.Errorf("deploy target validation failed: %w", err)
 	}
 
-	// 2. Update active pointer
+	// 2. Register entities in DuckDB (if store available), before anything is
+	// committed. The registry is the source of truth the rest of the Mixer
+	// reads to know what is actually deployed, so a scenario must not be
+	// declared active - on disk or in memory - while a failure here leaves
+	// that registry half-cleared or never updated: validate the swap by
+	// making it first, then commit, rather than committing and hoping.
+	if c.store != nil && c.idGen != nil {
+		// Clean up existing scenario entities (gears, ports, wires, scenarios) to avoid name conflicts
+		if err := c.store.ClearScenarioEntities(ctx); err != nil {
+			return fmt.Errorf("failed to clear existing scenario entities: %w", err)
+		}
+
+		if err := c.registerScenarioEntities(ctx, &s); err != nil {
+			return fmt.Errorf("failed to register scenario entities: %w", err)
+		}
+	}
+
+	// 3. Update active pointer. The registry above already reflects this
+	// scenario, so committing the pointer here cannot leave the two
+	// disagreeing.
 	activeFile := filepath.Join(c.repoPath, "active")
 	if err := os.WriteFile(activeFile, []byte(safeName), 0600); err != nil {
 		c.log.Warn("failed to write active scenario pointer", "error", err)
 	}
 
-	// 3. Set as active scenario in memory
+	// 4. Set as active scenario in memory
 	c.active = &s
-
-	// 4. Register entities in DuckDB (if store available)
-	if c.store != nil && c.idGen != nil {
-		// Clean up existing scenario entities (gears, ports, wires, scenarios) to avoid name conflicts
-		if err := c.store.ClearScenarioEntities(ctx); err != nil {
-			c.log.Warn("failed to clear existing scenario entities", "error", err)
-		}
-
-		if err := c.registerScenarioEntities(ctx, &s); err != nil {
-			c.log.Warn("failed to register scenario entities", "error", err)
-		}
-	}
 
 	// 5. Push scenario to connected racks via NATS. The active pointer, the
 	// in-memory scenario and the registry entities above are already
@@ -357,9 +364,13 @@ func (c *ScenarioController) GetActiveName() string {
 	return strings.TrimSpace(string(data))
 }
 
-// sanitizeName makes a scenario name safe for filesystem use.
-// It removes any characters that could be used for path traversal.
-func (c *ScenarioController) sanitizeName(name string) string {
+// sanitizeName makes a caller-supplied name safe wherever this package uses
+// one structurally: as a filesystem path component (scenario storage) or as a
+// NATS subject token (the enrollment reply topic). Restricting to
+// alphanumeric, hyphens and underscores happens to satisfy both: neither path
+// traversal characters nor the subject separators/wildcards (".", "*", ">")
+// survive it.
+func sanitizeName(name string) string {
 	// 1. Remove any path-related characters
 	safeName := strings.ReplaceAll(name, "..", "")
 	safeName = strings.ReplaceAll(safeName, "/", "_")
@@ -372,7 +383,7 @@ func (c *ScenarioController) sanitizeName(name string) string {
 	// 3. Trim and ensure not empty
 	safeName = strings.Trim(safeName, "_-")
 	if safeName == "" {
-		safeName = "unnamed_scenario"
+		safeName = "unnamed"
 	}
 
 	return safeName
@@ -392,17 +403,15 @@ func (c *ScenarioController) registerScenarioEntities(ctx context.Context, s *re
 	}
 	c.log.Info("registered scenario", "name", scenarioName, "eid", scenarioEID)
 
-	// Build a map of rack name -> machineID and activate racks defined in scenario
+	// Build a map of rack name -> machineID. Never transition rack status
+	// here: an operator approves a Rack (pending -> active) through its own
+	// deliberate flow, not as a side effect of importing a scenario that
+	// happens to name it. waitForRack (via GetRackByName) only matches an
+	// already-active Rack, so one that is still pending times out here with
+	// a clear error instead of being silently promoted.
 	rackMachineIDs := make(map[string]uuid.UUID)
 	for _, rack := range s.Racks {
 		if rack.Name != "" {
-			// Activate the rack (promote from pending to active)
-			if err := c.store.ActivateRack(ctx, rack.Name); err != nil {
-				c.log.Warn("failed to activate rack", "name", rack.Name, "error", err)
-			} else {
-				c.log.Info("activated rack", "name", rack.Name)
-			}
-
 			// Get the rack's machine_id with a short retry to handle bootstrap races
 			machineID, err := c.waitForRack(ctx, rack.Name)
 			if err != nil {

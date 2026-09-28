@@ -18,12 +18,275 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 | Version | Date | Status | Summary |
 | :--- | :--- | :--- | :--- |
+| [v0.11.0](#v0110) | 2026-09-24 | Delivered | The message store is encrypted at rest, wires choose a lane (hot or guaranteed), and the first licensed enterprise gears ship alongside the core release |
 | [v0.10.0](#v0100) | 2026-09-07 | Delivered | The semantic layer stops being documentation: a spec's rules are enforced on traffic |
 | [v0.9.0](#v090) | 2026-09-03 | Delivered | Enrichment from outside the message, and correlation keys that survive a bus hop |
 | [v0.8.0](#v080) | 2026-08-24 | Delivered | EMV chip data: BER-TLV parsing with unknown-tag preservation |
 | [v0.7.1](#v071) | 2026-08-10 | Delivered | ISO 8583 TLV length hardening |
 | [v0.7.0](#v070) | 2026-08-01 | Delivered | Payment switch: Conductor gear, gear manifests, ISO 8583 TLS |
 
+
+## [v0.12.0] - 2026-09-28 {#v0120}
+
+**Before upgrading.** Most of the changes below are self-resolving once
+both sides run the new version, or a one-time config change. One is not:
+it is permanent and needs a manual, per-row fix. Look for **"Permanent,
+needs a manual fix"** below and act on it first.
+
+- **A coatcheck or conductor correlation key built from more than one field
+  now joins them differently, and an entry stored under the old key is
+  unreadable until it expires.** Key parts used to be joined with a fixed
+  separator (`_` in coatcheck, the conductor's own `\x1f`) that a field's own
+  bytes (a PAN, a Track2 blob, binary PIN/MAC/EMV data) could themselves
+  contain, making two different sets of parts collide on the same key. Parts
+  are now joined unambiguously (length-prefixed), so a value stored by an
+  older version is not found by this one; it is not lost, just unreachable
+  until its `coatcheck.ttl` passes and a fresh one is written under the new
+  key.
+- **`coatcheck restore`'s `on_missing` now defaults to `error`, not
+  `forward`.** An unset `on_missing` used to forward the reply on as if
+  nothing were missing, silently sending a PAN-stripped (or otherwise
+  incomplete) reply onward. A scenario that relied on the old default must
+  now set `on_missing: forward` explicitly. An unrecognized value is now
+  also an error, where it used to behave like `forward` too.
+- **`io_tcp` in client mode now applies configured framing to outbound
+  writes.** It used to write `RawPayload` straight to the socket with no
+  framing at all, while server mode framed correctly; a client-mode
+  connection to a peer expecting the configured framing (length-prefix,
+  delimiter, fixed-length) now sends properly framed bytes where it
+  previously sent raw, unframed ones.
+- **`io_tcp`'s `idle_timeout` (default 60s) is now actually enforced.** It
+  was parsed and defaulted but never applied to the connection; a
+  connection idle past it is now closed. A long-lived but genuinely idle
+  connection that relied on this never firing needs `idle_timeout` raised
+  or set to `0` to disable it.
+- **A conductor reply's origin stamp must now look like a peer identifier
+  (letters, digits, `-`, `_`, up to 128 characters), and can optionally be
+  checked against a `known_origins` allowlist.** The origin arrives in the
+  request's own metadata, sender-controlled, and used to be built directly
+  into a wire port name with no validation; a mesh whose peer names happen
+  to use another character will need renaming, and setting `known_origins`
+  is opt-in for narrowing further. A rejected origin now emits on the error
+  port with the new reason `invalid_origin`, so a consumer that switches on
+  `error.reason` needs to account for it alongside the existing values.
+- **The Mixer's management API now requires authentication, and refuses to
+  start without it.** Every route but `/api/v1/health` now requires
+  `Authorization: Bearer <api.auth_token>`, compared in constant time. Set
+  `api.auth_token` before upgrading, or the Mixer will not start; the
+  explicit opt-out is `api.auth_disabled_dangerously = true`, which logs a
+  warning on every start and is not recommended.
+- **A Rack's heartbeat is now authenticated against its own registered
+  secret, and is silently dropped if it does not match.** Before, any caller
+  who learned a Rack's `machine_id` (previously readable from the
+  unauthenticated `/racks` endpoint above) could forge its liveness and
+  overwrite its stats and config with none of its own. Upgrade the Mixer
+  and its Racks together, or close together: a Rack still on the previous
+  binary sends no `secret` in its heartbeat and every one of its heartbeats
+  will be rejected until it is upgraded too.
+- **Permanent, needs a manual fix: a registry row with an empty stored
+  secret can no longer heartbeat or re-register.** Upgrading the Rack does
+  not fix it, and there is no automatic migration: an empty secret never
+  matches anything, by design, on either side. Find affected rows with a
+  direct query against the Mixer's registry store (`store.database_file`,
+  `flux.duckdb` by default): `duckdb flux.duckdb "SELECT machine_id, name
+  FROM registry WHERE type_id = 4 AND (secret IS NULL OR secret = '');"`.
+  For each row returned, `admin racks remove <machine_id>` and let it
+  re-enroll as a fresh Zero-Config identity; this version issues it a real
+  secret on the way back.
+- **A brand-new Rack identity must now present the shared bootstrap secret
+  on its first Hello.** It used to be accepted with an empty secret
+  regardless of what was already on file for that name, which let a second
+  caller claim an existing Rack's identity. `rack.bootstrap_secret` is a new
+  Rack-side setting (default `"fluxrig"`, matching the Mixer's
+  `enrollment.bootstrap_secret` default) so Zero-Config enrollment keeps
+  working unconfigured; set both to a non-default, matching value for
+  anything beyond a trial deployment. A Rack whose registration was removed
+  (`admin racks remove`) and that still holds a stale Passport now gets an
+  explicit "denied" reply and re-provisions as fresh Zero-Config, instead of
+  retrying silently forever.
+- **Importing or activating a scenario no longer promotes a `pending` Rack
+  it names to `active`.** That promotion used to happen as a side effect of
+  the import; approving a Rack is now only ever the operator's own
+  deliberate action (`admin racks activate`). A scenario that names a
+  still-`pending` Rack now fails to find it (a timeout, with a clear error)
+  instead of silently activating it first.
+- **A scenario activation no longer purges every Rack's traffic on the shared
+  bus stream.** It used to call a blanket purge of the whole `flux-msg` stream
+  whenever it needed the bus, discarding every other Rack's queued
+  guaranteed-lane messages along with the activating Rack's own. It now purges
+  only that Rack's own subjects.
+- **A guaranteed-lane message is now acked only after its handler succeeds,
+  and a failed handler gets up to 5 redeliveries before JetStream gives up on
+  it.** It used to ack immediately on receipt, before decoding or handling —
+  any failure after that point (a panic further down the call chain, a
+  downstream publish error) silently lost the message while looking like a
+  success. A message that fails every one of its 5 attempts is now dropped
+  after the last one, the same outcome as before, but only after retrying.
+  The retry count isn't config-exposed yet.
+- **Applying a new scenario or shutting down now waits up to 5 seconds for
+  the hot lane to drain before tearing it down.** It used to unsubscribe
+  immediately, dropping whatever was still queued. A teardown that used to be
+  instant can now take up to 5 seconds; this timeout isn't config-exposed
+  yet.
+- **A Rack timeout or interval set to `0s` (or a negative value) now silently
+  falls back to its documented default instead of misbehaving.** Depending on
+  the setting, `0s` used to fire instantly on every message, panic a ticker
+  on startup, or block a connection attempt forever. Six settings that were
+  previously parsed ad hoc with the parse error discarded outright
+  (`snake.connect_timeout`, `snake.reconnect_wait`,
+  `rack.enrollment_timeout`, `rack.enrollment_interval`,
+  `rack.heartbeat_interval`, `snake.inactive_threshold`) now go through the
+  same validation as the rest and fail loudly on a genuine typo instead of
+  silently reading as zero. `snake.initial_retry_wait`,
+  `snake.initial_retry_attempts`, `snake.offline_start_timeout`,
+  `snake.offline_retry_interval` and `rack.lane_send_timeout` are unchanged:
+  `0`/`0s` is their documented sentinel for "use the built-in default" or
+  "disabled", not a mistake to clamp.
+- **Two `pkg/bus` Go signatures changed, for anyone building against this
+  package directly rather than through a scenario.** `bus.Handler` now
+  returns `error` (the ack-after-success fix above is what a returned error
+  drives); `NatsBus.Purge` now takes a `subject string` parameter (the
+  scoped-purge fix above), where it used to take none.
+- **Environment-variable overrides that previously matched nothing now
+  take effect.** The Mixer's env mapper had no per-section handling at
+  all, so a multi-word field (`FLUXRIG_SNAKE_STREAM_MAX_BYTES` and
+  similar) silently changed nothing; the Rack's mapper was missing a
+  `telemetry_` entry, so every `FLUXRIG_TELEMETRY_*` multi-word field did
+  the same. Both are fixed. If you were relying on the Mixer or Rack
+  ignoring one of these env vars, it will not ignore it anymore — check
+  your deployment's environment before upgrading. A list-valued field
+  (`stream_subjects`) set via env var now actually splits on commas too;
+  it previously became a single, wrong entry.
+- **`fluxrig admin racks remove/suspend/activate/shutdown` now prompt for
+  confirmation.** Pass `--force` (`-f`) in a script or any other
+  non-interactive caller. Without a terminal attached and without
+  `--force`, the command now aborts instead of hanging or proceeding.
+- **An entity ID minted before a Rack has a machine ID (Zero-Config,
+  before enrollment assigns one) now carries different bits in its
+  machine-hint region.** It used to be zero-filled from the Nil machine
+  ID; it is now `uuid.NewV7`'s own random bytes, left alone instead of
+  overwritten. IDs already issued by an earlier version are unaffected;
+  this only changes what a not-yet-enrolled Rack mints from this version
+  on.
+- **`idgen.IDGenerator.NewEntityID` now panics if `uuid.NewV7` fails,
+  instead of silently minting an ID from a zero UUID.** `NextEntityID`
+  (the entry point most of the codebase actually calls — scenario apply,
+  gear/port/session IDs, the Mixer's own entity ID) is a thin wrapper
+  around it and inherits the same panic. The rest of `idgen` is
+  unaffected. `NewV7`'s only failure mode is the entropy source itself
+  (`crypto/rand`) failing, which is fatal for the rest of the process
+  too; this is a new crash path, intentionally fail-fast rather than
+  issuing an ID that was never really a V7 UUID.
+- **A Rack now pins the Mixer's signing key the first time it accepts a
+  passport, and rejects any later passport signed by a different key.**
+  Before, the key embedded in the passport itself was trusted for every
+  verification, so a self-signed envelope on disk would have verified.
+  Nothing to do for an already-enrolled Rack: the pin is taken from the
+  first cached passport it already has.
+- **The Snake now refuses a plaintext connection once TLS certs are
+  configured, unless `snake.allow_non_tls` is set.** It used to accept
+  plaintext alongside TLS whenever certs were present, with no way to
+  turn that off.
+- **A KV bucket the Mixer provisions (currently only `wasm_catalog`) is
+  now capped** (`snake.kv_max_bytes`, `snake.kv_max_value_size`,
+  `snake.kv_ttl`; defaults 1 GiB / 1 MiB / no expiry). An existing bucket
+  picks up a changed limit on the next start, the same way a stream
+  already does.
+- **`archiver_buffer` is now actually flushed to Parquet under
+  `<data_dir>/messages/`.** A bug in how a wire ID was read back
+  (`store/duckdb`) meant every flush silently failed and the buffer was
+  never drained; expect real disk growth there that a prior version
+  never produced, and expect old, unflushed rows to appear once on the
+  first start of this version.
+- **Scenario activation that reaches no target Rack now answers `202
+  Accepted`, not `500`.** The scenario is genuinely active either way; a
+  Rack that enrolls afterwards still receives it. A caller that treated
+  any non-200 as a hard failure needs to accept 202 as success too.
+
+### Added
+
+- `conductor`: `known_origins`, an optional allowlist of peer Conductor
+  names a reply's origin stamp must match.
+- `conductor`: new `error.reason` value `invalid_origin`, emitted when a
+  reply's origin stamp fails the format check or the `known_origins`
+  allowlist.
+- `api.auth_token`, `api.auth_disabled_dangerously`: gate the management
+  API. See "Before upgrading".
+- `rack.bootstrap_secret`: the shared secret a Rack presents on its first
+  Hello. See "Before upgrading".
+- `test/e2e/20_security_regression`: standalone coverage for the
+  auth/secret-redaction behavior above, without needing the full
+  regression sweep.
+- `runtime.ErrLaneClosed`: returned to an emitting gear when the hot lane's
+  subscription was unsubscribed while the message was still on its way to
+  the queue. A bare `nil` used to be returned instead, which counted as a
+  successful delivery to a wire that was actually torn down mid-send.
+- `snake.tls_ca_file` / `snake.tls_verify`: wires the mTLS client-cert
+  verification that already existed in code but had no config surface.
+
+### Fixed
+
+- `io_tcp` (client and server): the scanner buffer is now sized to accept
+  the largest message the configured framing allows (up to ~1MB), instead
+  of `bufio.Scanner`'s ~64KiB default; a message near or above that size
+  used to fail to scan.
+- `coatcheck`'s per-message TTL override (`Metadata["coatcheck.ttl"]`) is
+  now honored regardless of `include_values`. It was only decoded and
+  applied when `include_values` was set (default `false`), so a scenario
+  relying on the override without also asking for full values had it
+  silently ignored in favor of `default_ttl`.
+- The TTL override itself is now always carried into the daemon's stored
+  partial clone. It previously survived only when the override's field
+  happened to also be listed in `value_fields`, which nothing documents
+  and no scenario configuring `value_fields` for an unrelated reason would
+  think to do — so the fix above had nothing to read for most callers
+  until this one landed too.
+- `iso8583.unknown_tags`, once preserved, is now actually reachable through
+  `Get("iso8583.unknown_tags")` (and coatcheck's `key_fields`/
+  `value_fields`, which resolve through the same helper). It was stored as
+  a flat key containing a literal dot, which every dotted-path reader in
+  the codebase resolves as nested maps, not a flat string — so the lookup
+  a downstream gear would actually make could never find it.
+- `Secret`, `BootstrapSecret` and `AuthToken` are never serialized
+  (`json:"-"`, and explicitly `cbor:"-"` alongside it) anywhere they appear
+  in a registry record or config struct — protecting every API handler and
+  wire payload that touches one, present or future, rather than each call
+  site remembering to redact it.
+- All secret comparisons (API token, re-registration bootstrap secret,
+  heartbeat secret) go through one constant-time helper
+  (`security.SecretsEqual`), closing a timing side-channel that a
+  byte-by-byte `==` comparison leaves open. It started as three
+  independent, identical copies of the same function across three
+  packages; consolidated into one shared implementation so a future fix
+  or audit only has one place to look.
+- A fresh registration now issues a unique, `crypto/rand`-generated secret
+  instead of persisting the caller's bootstrap secret as the new identity's
+  own secret; every Zero-Config Rack sharing the same default bootstrap
+  secret could otherwise let a second caller adopt an already-enrolled
+  name later.
+- The enrollment reply topic is now built from a sanitized name and nonce
+  on both the success and denial paths, closing a subject-injection path a
+  `.` or a NATS wildcard in either field used to open.
+- An undecodable or otherwise invalid message on the bus is now explicitly
+  terminated (`Term`) instead of acked; it never redelivered either way, but
+  it no longer looks identical to a message a handler actually processed.
+- The OTel trace context is now injected before a message is serialized, so
+  it actually reaches the wire; it used to be injected after serialization
+  and was silently dropped.
+- A gear emitting the same message to more than one port, or retrying an
+  emission with the message it still holds, no longer races on it: the
+  message is cloned before its `FluxID` is set and a hop appended. The clone
+  covers `Path` only — `Data` and `Metadata` are not deep-copied and can
+  still be mutated by a concurrent emission sharing the original message.
+- Telemetry dials for the deferred telemetry bus connections now carry
+  the same TLS posture (`insecure_skip_verify`) as the main bus dial;
+  they previously carried `root_ca_file` only.
+- Telemetry: a bad row no longer aborts the rest of its batch; a
+  nil-entity metric is now logged instead of dropped silently; `Stop()`
+  flushes once, guarded against being called twice.
+- `pkg/store/duckdb`: `Migrate()` is now safe under concurrent access
+  (in-process and cross-process); `FlushTelemetry`/`FlushArchiverBuffer`
+  use bound query parameters instead of formatting values into SQL text.
 
 ## [v0.11.0] - 2026-09-24 {#v0110}
 
@@ -424,6 +687,8 @@ The payment-switch release: the **Conductor** transaction switch, a manifest sys
 - **Snake Protocol**: Secure tunneling implementation for Rack-to-Mixer connectivity.
 - **FluxMsg**: Canonical JSON schema for inter-gear communication.
 
+[Unreleased]: https://github.com/jaab-tech/fluxrig/compare/v0.12.0...HEAD
+[v0.12.0]: https://github.com/jaab-tech/fluxrig/releases/tag/v0.12.0
 [v0.7.0]: https://github.com/jaab-tech/fluxrig/releases/tag/v0.7.0
 [v0.6.1]: https://github.com/jaab-tech/fluxrig/releases/tag/v0.6.1
 [v0.6.0]: https://github.com/jaab-tech/fluxrig/releases/tag/v0.6.0

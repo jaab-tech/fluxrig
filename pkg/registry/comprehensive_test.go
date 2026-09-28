@@ -24,6 +24,7 @@ func TestRegistry_Comprehensive(t *testing.T) {
 	if errMig := s.Migrate(context.Background()); errMig != nil {
 		t.Fatalf("Migrate failed: %v", errMig)
 	}
+	s.SetBootstrapSecret("rack")
 
 	var reg registry.Registry = s
 
@@ -47,13 +48,15 @@ func TestRegistry_Comprehensive(t *testing.T) {
 
 	mixerID := uuid.New()
 	machineID1 := uuid.New()
-	_, err = reg.Register(ctx, machineID1, "dup-name", "rack", "1.2.3.4", 8080, "v1", map[string]any{"v": "v1"}, mixerID)
+	firstReg, err := reg.Register(ctx, machineID1, "dup-name", "rack", "1.2.3.4", 8080, "v1", map[string]any{"v": "v1"}, mixerID)
 	if err != nil {
 		t.Fatalf("First register failed: %v", err)
 	}
 
-	// Re-registering same machineID should NOT fail
-	_, err = reg.Register(ctx, machineID1, "dup-name", "rack", "1.2.3.4", 8080, "v1", map[string]any{"v": "v1"}, mixerID)
+	// Re-registering same machineID should NOT fail, using the secret that
+	// registration actually issued: "rack" was only the one-time bootstrap
+	// gate, and is never the identity's own secret from here on.
+	_, err = reg.Register(ctx, machineID1, "dup-name", firstReg.Secret, "1.2.3.4", 8080, "v1", map[string]any{"v": "v1"}, mixerID)
 	if err != nil {
 		t.Errorf("Re-registering same machine should not fail: %v", err)
 	}

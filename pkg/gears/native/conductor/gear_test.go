@@ -5,6 +5,7 @@ package conductor
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"sync"
@@ -31,13 +32,18 @@ type emitRec struct {
 }
 
 type capEmitter struct {
-	mu    sync.Mutex
-	emits []emitRec
+	mu       sync.Mutex
+	emits    []emitRec
+	failNext int // Emit fails this many more times before it starts succeeding.
 }
 
 func (c *capEmitter) Emit(port string, m *fluxmsg.FluxMsg) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.failNext > 0 {
+		c.failNext--
+		return errors.New("synthetic emit failure")
+	}
 	c.emits = append(c.emits, emitRec{port: port, msg: m})
 	return nil
 }
@@ -298,6 +304,40 @@ func TestRetransmissionAbsorbed(t *testing.T) {
 	emits := em.take()
 	if len(emits) != 1 {
 		t.Fatalf("emits = %d, want exactly 1 (no double routing)", len(emits))
+	}
+}
+
+// TestFailedEmitReleasesTicketForRetry is a regression test for the finding
+// that a failed emit on a freshly parked ticket left it stuck open: a retry
+// of the same request (e.g. a bus redelivery after the failed emit made
+// ProcessPort return an error) hit AttachedOpen and was absorbed as a
+// harmless duplicate, even though nothing was ever actually sent. The
+// request then silently waited out its full TTL instead of being retried.
+func TestFailedEmitReleasesTicketForRetry(t *testing.T) {
+	g, em := newTestGear(t, newFakeClock(), nil)
+	ctx := context.Background()
+	em.failNext = 1
+
+	if err := g.ProcessPort(ctx, "in", request("000099")); err == nil {
+		t.Fatal("first attempt: want the emit failure to surface as an error")
+	}
+	if emits := em.take(); len(emits) != 0 {
+		t.Fatalf("emits after failed send = %+v, want none", emits)
+	}
+	if g.engine.InFlight() != 0 {
+		t.Fatalf("InFlight = %d after a failed emit, want 0 (ticket released)", g.engine.InFlight())
+	}
+
+	// Simulate the bus redelivering the same original request.
+	if err := g.ProcessPort(ctx, "in", request("000099")); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	emits := em.take()
+	if len(emits) != 1 {
+		t.Fatalf("emits after retry = %d, want exactly 1 (the retry actually sent, not absorbed)", len(emits))
+	}
+	if g.engine.InFlight() != 1 {
+		t.Fatalf("InFlight = %d after retry, want 1", g.engine.InFlight())
 	}
 }
 
@@ -728,5 +768,103 @@ func TestReplyMTINotClobberedByReturnContext(t *testing.T) {
 	// The return context still routes home: the origin conn.id wins.
 	if got := emits[0].msg.Metadata["conn.id"]; got != "terminal-7" {
 		t.Fatalf("conn.id = %q, want the origin terminal-7", got)
+	}
+}
+
+// TestResponsePortFor is a regression test for a real bug: the origin stamp a
+// reply's return context carries arrives in the request's own metadata, set
+// by whoever sent it, never authenticated, and responsePortFor used to build
+// an output port name from it unfiltered. A malicious or misconfigured peer
+// could name any string as the port to route its reply to, and since ports
+// are lazily created for any name seen, an unbounded source of new ones too.
+func TestResponsePortFor(t *testing.T) {
+	g := &Gear{origin: "self"}
+
+	cases := []struct {
+		name      string
+		returnCtx map[string]string
+		known     []string
+		wantPort  string
+		wantErr   bool
+	}{
+		{"no origin stamp: the plain response port", map[string]string{}, nil, portResponse, false},
+		{"this gear's own origin: the plain response port", map[string]string{metaOrigin: "self"}, nil, portResponse, false},
+		{"valid peer, no allowlist configured", map[string]string{metaOrigin: "peer-A"}, nil, portResponse + "_peer-A", false},
+		{"valid peer, allowlisted", map[string]string{metaOrigin: "peer-A"}, []string{"peer-A", "peer-B"}, portResponse + "_peer-A", false},
+		{"valid format but not an allowlisted peer", map[string]string{metaOrigin: "peer-Z"}, []string{"peer-A"}, "", true},
+		{"a dot would be read as a rack/gear/port separator", map[string]string{metaOrigin: "evil.rack.gear"}, nil, "", true},
+		{"the old (false) 'cannot occur' separator byte", map[string]string{metaOrigin: "evil\x1fbyte"}, nil, "", true},
+		{"absurdly long is refused, not silently truncated or accepted", map[string]string{metaOrigin: strings.Repeat("a", 200)}, nil, "", true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			g.knownOrigins = nil
+			if tc.known != nil {
+				g.knownOrigins = make(map[string]bool, len(tc.known))
+				for _, k := range tc.known {
+					g.knownOrigins[k] = true
+				}
+			}
+			port, err := g.responsePortFor(&valet.Ticket{ReturnCtx: tc.returnCtx})
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected an error, got port %q", port)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if port != tc.wantPort {
+				t.Fatalf("port = %q, want %q", port, tc.wantPort)
+			}
+		})
+	}
+}
+
+// TestBuildKeyNoSeparatorCollisionForBinaryFields is a regression test for a
+// real bug: buildKey joined correlation-key parts with "\x1f" on the claim
+// that byte "cannot occur in structured field values of the supported
+// dialects" -- false for a binary field (a PIN block, a MAC, an EMV tag),
+// which can contain any byte at all. Two different correlation tuples must
+// never join to the same key.
+func TestBuildKeyNoSeparatorCollisionForBinaryFields(t *testing.T) {
+	g := &Gear{corrKey: []string{"a", "b"}}
+
+	msg1 := fluxmsg.New()
+	_ = msg1.Set("a", []byte("A\x1fB"))
+	_ = msg1.Set("b", []byte("C"))
+
+	msg2 := fluxmsg.New()
+	_ = msg2.Set("a", []byte("A"))
+	_ = msg2.Set("b", []byte("B\x1fC"))
+
+	key1, err := g.buildKey(msg1)
+	if err != nil {
+		t.Fatalf("buildKey(msg1): %v", err)
+	}
+	key2, err := g.buildKey(msg2)
+	if err != nil {
+		t.Fatalf("buildKey(msg2): %v", err)
+	}
+	if key1 == key2 {
+		t.Fatalf("buildKey collided: %q == %q for two different correlation tuples", key1, key2)
+	}
+}
+
+// TestFieldToKeyPartAgreesAcrossGears is a regression test for the other half
+// of the same finding: coatcheck's extractKey and the conductor's own key
+// building each rendered a []byte field value their own way (fmt.Sprint's
+// bracketed decimal list vs a raw byte-to-string cast), so the same field
+// value produced two different key parts depending on which gear derived it.
+// Both must now agree, since the same field can feed a correlation key on
+// either side of a topology that uses both gears.
+func TestFieldToKeyPartAgreesAcrossGears(t *testing.T) {
+	track2 := []byte{0x82, 0xE7, 0x05, 0x00, 0x1F}
+	got := sdk.FieldToKeyPart(track2)
+	want := string(track2)
+	if got != want {
+		t.Fatalf("FieldToKeyPart(%v) = %q, want %q (the raw bytes as a string)", track2, got, want)
 	}
 }

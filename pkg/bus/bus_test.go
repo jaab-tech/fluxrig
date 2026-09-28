@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
@@ -45,9 +46,10 @@ func TestMockBus(t *testing.T) {
 	wg.Add(1)
 	var received *fluxmsg.FluxMsg
 
-	sub, err := mb.Subscribe("test.async", func(ctx context.Context, m *fluxmsg.FluxMsg) {
+	sub, err := mb.Subscribe("test.async", func(ctx context.Context, m *fluxmsg.FluxMsg) error {
 		received = m
 		wg.Done()
+		return nil
 	})
 	if err != nil {
 		t.Fatalf("Subscribe failed: %v", err)
@@ -142,9 +144,10 @@ func TestNatsBus_Integration(t *testing.T) {
 	wg.Add(1)
 	var received *fluxmsg.FluxMsg
 
-	sub, err := nb.Subscribe("flux.test.bus", func(ctx context.Context, m *fluxmsg.FluxMsg) {
+	sub, err := nb.Subscribe("flux.test.bus", func(ctx context.Context, m *fluxmsg.FluxMsg) error {
 		received = m
 		wg.Done()
+		return nil
 	})
 	if err != nil {
 		t.Fatalf("Subscribe failed: %v", err)
@@ -184,4 +187,59 @@ func TestNatsBus_Integration(t *testing.T) {
 	if err := nbErr.PublishRaw(context.Background(), "any", nil, uuid.Nil); err == nil {
 		t.Error("Expected error on PublishRaw with disconnected bus")
 	}
+}
+
+// TestNatsBus_PurgeScopesToSubject is a regression test for a real bug: Purge took
+// no subject and always purged the whole stream, so a Rack applying its own
+// scenario wiped every other Rack's guaranteed-lane traffic sharing that stream,
+// not just its own stale messages.
+func TestNatsBus_PurgeScopesToSubject(t *testing.T) {
+	s, err := snake.NewServer(context.Background(), snake.Config{
+		Port:        -1,
+		ClusterName: "purge-test",
+		StoreDir:    t.TempDir(),
+	})
+	require.NoError(t, err)
+	defer s.Shutdown()
+
+	nb := NewNatsBus("flux")
+	require.NoError(t, nb.Connect(s.ClientURL(), ConnectOptions{
+		Name:           "purge-test-client",
+		ConnectTimeout: 5 * time.Second,
+		ReconnectWait:  1 * time.Second,
+	}))
+	defer nb.Close()
+
+	nc, err := nats.Connect(s.ClientURL())
+	require.NoError(t, err)
+	defer nc.Close()
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+	_, err = js.CreateStream(context.Background(), jetstream.StreamConfig{
+		Name:     "flux",
+		Subjects: []string{"flux.>"},
+	})
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	require.NoError(t, nb.Publish(ctx, "flux.msg.rack1.gearA.out", fluxmsg.New()))
+	require.NoError(t, nb.Publish(ctx, "flux.msg.rack2.gearB.out", fluxmsg.New()))
+
+	stream, err := js.Stream(ctx, "flux")
+	require.NoError(t, err)
+	info, err := stream.Info(ctx)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, info.State.Msgs, "both messages landed in the shared stream before the purge")
+
+	require.NoError(t, nb.Purge(ctx, "flux.msg.rack1.>"))
+
+	info, err = stream.Info(ctx)
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, info.State.Msgs, "purging rack1's subject must not touch rack2's message")
+
+	_, err = stream.GetLastMsgForSubject(ctx, "flux.msg.rack2.gearB.out")
+	assert.NoError(t, err, "rack2's message must still be in the stream")
+
+	_, err = stream.GetLastMsgForSubject(ctx, "flux.msg.rack1.gearA.out")
+	assert.Error(t, err, "rack1's message must be gone")
 }

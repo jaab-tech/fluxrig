@@ -404,7 +404,7 @@ func VerifyConnectivity(ctx context.Context, b bus.Bus, nodeName string, handsha
 	slog.Info("Waiting for telemetry-plane convergence", "subject", subject)
 
 	hotCh := make(chan struct{})
-	sub, err := b.Subscribe(subject, func(_ context.Context, msg *fluxmsg.FluxMsg) {
+	sub, err := b.Subscribe(subject, func(_ context.Context, msg *fluxmsg.FluxMsg) error {
 		if msg.Flags&fluxmsg.FlagSyncProbe != 0 {
 			select {
 			case <-hotCh:
@@ -413,6 +413,7 @@ func VerifyConnectivity(ctx context.Context, b bus.Bus, nodeName string, handsha
 				close(hotCh)
 			}
 		}
+		return nil
 	})
 	if err != nil {
 		return fmt.Errorf("failed to subscribe to telemetry sync on %s: %w", subject, err)

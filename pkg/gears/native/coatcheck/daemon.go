@@ -110,22 +110,26 @@ func (d *DaemonLogic) scheduleExpiry(key string, value []byte, emit func(*fluxms
 	// Calculate Timeout Duration
 	ttl := d.gear.config.DefaultTTL
 
-	// Optimization: Partial Decode to check for Override
-	if d.gear.config.IncludeValues {
-		var msg fluxmsg.FluxMsg
-		// We ignore error here to allow robust governance (fallback to default TTL)
-		if err := cbor.Unmarshal(value, &msg); err == nil {
-			// Check Metadata override
-			if val, ok := msg.Metadata[fluxmsg.MetaCoatCheckTTL]; ok {
-				if parsed, parseErr := time.ParseDuration(val); parseErr == nil {
-					ttl = parsed
-				} else {
-					d.gear.ctx.Logger().Warn("ttl override parse failed", "key", key, "val", val, "error", parseErr)
-				}
+	// The per-message TTL override must be honored regardless of
+	// include_values: that setting controls only whether handleTimeout's
+	// emitted event carries the full original value, a separate concern from
+	// whether this entry's own expiry respects what the scenario asked for.
+	// Decoding here used to be skipped unless include_values was set, which
+	// silently ignored a documented, correctly-stored override for the
+	// (default) common case.
+	var msg fluxmsg.FluxMsg
+	// We ignore error here to allow robust governance (fallback to default TTL)
+	if err := cbor.Unmarshal(value, &msg); err == nil {
+		// Check Metadata override
+		if val, ok := msg.Metadata[fluxmsg.MetaCoatCheckTTL]; ok {
+			if parsed, parseErr := time.ParseDuration(val); parseErr == nil {
+				ttl = parsed
+			} else {
+				d.gear.ctx.Logger().Warn("ttl override parse failed", "key", key, "val", val, "error", parseErr)
 			}
-		} else {
-			d.gear.ctx.Logger().Warn("daemon unmarshal failed", "key", key, "error", err)
 		}
+	} else {
+		d.gear.ctx.Logger().Warn("daemon unmarshal failed", "key", key, "error", err)
 	}
 
 	// SAFETY CAP: Enforce MaxTTL to avoid long-lived keys if users request excessive TTLs

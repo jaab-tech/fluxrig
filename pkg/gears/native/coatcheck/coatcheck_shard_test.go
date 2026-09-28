@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/jaab-tech/fluxrig/pkg/bus"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
@@ -56,8 +57,9 @@ func TestCoatCheck_Certification(t *testing.T) {
 		assert.Nil(t, out) // Handled by emit
 		assert.NotNil(t, emitted)
 
-		// Verify KV contains the coat
-		val, _, _ := mockBus.KV().Get(context.Background(), "TEST_BUCKET", "MTIz") // "123" base64
+		// Verify KV contains the coat. The key is base64 of JoinKeys("123"),
+		// the netstring-length-prefixed form ("3:123"), not "123" itself.
+		val, _, _ := mockBus.KV().Get(context.Background(), "TEST_BUCKET", "MzoxMjM")
 		assert.NotNil(t, val)
 	})
 
@@ -103,6 +105,39 @@ func TestCoatCheck_Certification(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Nil(t, out)
 	})
+}
+
+// TestCoatCheck_RestoreDefaultsOnMissingToErrorWhenUnset is a regression test
+// for a real bug: an unset on_missing fell into the same case as an explicit
+// "forward", so a scenario that never configured the policy silently sent a
+// reply on with its stripped fields (a PAN, typically) never reattached,
+// exactly as if restoration had succeeded.
+func TestCoatCheck_RestoreDefaultsOnMissingToErrorWhenUnset(t *testing.T) {
+	mockBus := bus.NewMockBus()
+	ctx := &mockGearContext{
+		bus: mockBus,
+		config: map[string]any{
+			"mode":       "restore",
+			"bucket":     "TEST_BUCKET_UNSET",
+			"key_fields": []string{"meta.id"},
+			// on_missing intentionally omitted.
+		},
+	}
+
+	g := New().(*CoatCheckGear)
+	require.NoError(t, g.Init(ctx))
+	require.Equal(t, "", g.config.OnMissing, "the test must exercise the actually-unset zero value")
+	require.NoError(t, g.Start(context.Background(), func(*fluxmsg.FluxMsg) {}))
+
+	msg := fluxmsg.New()
+	msg.Metadata["id"] = "does-not-exist"
+
+	var emitted *fluxmsg.FluxMsg
+	g.emit = func(m *fluxmsg.FluxMsg) { emitted = m }
+
+	_, err := g.Process(context.Background(), msg)
+	require.Error(t, err, "an unset on_missing must fail closed, not silently forward the stripped reply")
+	assert.Nil(t, emitted, "nothing should have been forwarded")
 }
 
 // ------ Mocks ------

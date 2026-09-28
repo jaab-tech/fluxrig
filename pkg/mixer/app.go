@@ -121,6 +121,7 @@ func (a *App) Run(ctx context.Context) error {
 	}
 	a.log.Info("Setting auto_adopt", "enabled", a.cfg.Enrollment.AutoAdopt)
 	store.SetAutoAdopt(a.cfg.Enrollment.AutoAdopt)
+	store.SetBootstrapSecret(a.cfg.Enrollment.BootstrapSecret)
 
 	// 2. Identity Management (Sovereign Passport)
 	keyPath := filepath.Join(a.cfg.Store.Dir, a.cfg.Store.ClusterKeyFile)
@@ -190,10 +191,17 @@ func (a *App) Run(ctx context.Context) error {
 	if errMaxAge != nil {
 		return errMaxAge
 	}
+	kvTTL, errKVTTL := parseKVTTL(a.cfg.Snake.KVTTL)
+	if errKVTTL != nil {
+		return errKVTTL
+	}
 	if storeKey == "" {
 		a.log.Warn("Snake store encryption is OFF: every message on a wire rests in clear on this disk", "setting", "snake.store_encryption")
 	} else {
 		a.log.Info("Snake store is encrypted at rest", "cipher", a.cfg.Snake.StoreCipher, "key", storeKeySource)
+	}
+	if a.cfg.Snake.AllowNonTLS && a.cfg.Snake.TLSCertFile != "" {
+		a.log.Warn("Snake accepts plaintext clients alongside TLS ones", "setting", "snake.allow_non_tls")
 	}
 
 	snakeSrv, err := snake.NewServer(ctx, snake.Config{
@@ -203,12 +211,18 @@ func (a *App) Run(ctx context.Context) error {
 		StreamSubjects: subjects,
 		TLSCert:        a.cfg.Snake.TLSCertFile,
 		TLSKey:         a.cfg.Snake.TLSKeyFile,
+		TLSCA:          a.cfg.Snake.TLSCAFile,
+		TLSVerify:      a.cfg.Snake.TLSVerify,
+		AllowNonTLS:    a.cfg.Snake.AllowNonTLS,
 		LogLevel:       a.cfg.Logging.Level,
 		StoreKey:       storeKey,
 		StoreOldKey:    storeOldKey,
 		StoreCipher:    a.cfg.Snake.StoreCipher,
 		StreamMaxAge:   streamMaxAge,
 		StreamMaxBytes: a.cfg.Snake.StreamMaxBytes,
+		KVMaxBytes:     a.cfg.Snake.KVMaxBytes,
+		KVMaxValueSize: a.cfg.Snake.KVMaxValueSize,
+		KVTTL:          kvTTL,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to start snake: %w", err)

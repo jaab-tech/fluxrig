@@ -14,17 +14,31 @@ import (
 var (
 	ErrNotFound     = errors.New("entity not found")
 	ErrNameConflict = errors.New("entity name already exists")
+	// ErrBootstrapSecretMismatch is returned when a MachineID never seen
+	// before (including one whose prior registration was removed) presents
+	// a secret that is not the current bootstrap secret. Distinct from
+	// ErrNameConflict so the caller can be told to drop its stale identity
+	// and re-provision, rather than treated as a silent hijack attempt.
+	ErrBootstrapSecretMismatch = errors.New("registration denied: invalid or missing bootstrap secret")
 )
 
 // Rack represents a physical or virtual compute node.
 type Rack struct {
-	MachineID   uuid.UUID      `json:"machine_id"`
-	Name        string         `json:"name"`
-	Status      string         `json:"status"` // pending, active, offline
-	Version     string         `json:"version"`
-	IP          string         `json:"ip"`
-	Port        int            `json:"port"`
-	Secret      string         `json:"secret"`
+	MachineID uuid.UUID `json:"machine_id"`
+	Name      string    `json:"name"`
+	Status    string    `json:"status"` // pending, active, offline
+	Version   string    `json:"version"`
+	IP        string    `json:"ip"`
+	Port      int       `json:"port"`
+	// Secret never serializes: every management-API handler that encodes a
+	// Rack (list, approve, ...) shares this struct, and none of them has a
+	// legitimate reason to hand a bearer secret back over HTTP. A caller with
+	// a real need for it (the enrollment controller, building a passport)
+	// still reads the Go field directly; only marshaling is blocked. cbor:"-"
+	// is explicit rather than relied on: fxamacker/cbor falls back to the
+	// json tag when no cbor tag is present, which already covers this today,
+	// but that is an implicit library behavior to lean on for a secret.
+	Secret      string         `json:"-" cbor:"-"`
 	FirstSeen   time.Time      `json:"first_seen"`
 	LastSeen    time.Time      `json:"last_seen"`
 	UpdateCount int            `json:"update_count"`
@@ -95,6 +109,7 @@ type Registry interface {
 	UpdateStatus(ctx context.Context, id uuid.UUID, status string) error
 	UpdateStatusEntity(ctx context.Context, typeID uint8, id uuid.UUID, status string) error
 	SetAutoAdopt(enabled bool)
+	SetBootstrapSecret(secret string)
 
 	// Telemetry Queries
 	QueryLogs(ctx context.Context, q LogQuery) ([]LogEntry, error)

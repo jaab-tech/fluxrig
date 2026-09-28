@@ -26,6 +26,7 @@ func setupTestRegistry(t *testing.T) (registry.Registry, func()) {
 	}
 
 	store.SetAutoAdopt(true)
+	store.SetBootstrapSecret("rack")
 	return store, func() { _ = store.Close() }
 }
 

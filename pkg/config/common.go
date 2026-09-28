@@ -67,6 +67,21 @@ type SnakeConfig struct {
 	TLSKeyFile                string   `koanf:"tls_key_file"`
 	InsecureSkipVerify        bool     `koanf:"insecure_skip_verify"`
 	StreamSubjects            []string `koanf:"stream_subjects"`
+	// AllowNonTLS lets a plaintext client connect alongside a TLS one once
+	// TLSCertFile/TLSKeyFile are set. Mixer-side only: false by default, so
+	// configuring TLS actually requires it instead of just offering it.
+	AllowNonTLS bool `koanf:"allow_non_tls" example:"false"`
+	// TLSCAFile and TLSVerify enable mTLS: the CA a Rack's own client
+	// certificate is verified against, and whether presenting one is
+	// required. Mixer-side only.
+	TLSCAFile string `koanf:"tls_ca_file"`
+	TLSVerify bool   `koanf:"tls_verify" example:"false"`
+	// KVMaxBytes, KVMaxValueSize and KVTTL cap every KV bucket the Mixer
+	// provisions, the same way StreamMaxAge/StreamMaxBytes cap every stream.
+	// Mixer-side only.
+	KVMaxBytes     int64  `koanf:"kv_max_bytes" example:"1073741824"`
+	KVMaxValueSize int32  `koanf:"kv_max_value_size" example:"1048576"`
+	KVTTL          string `koanf:"kv_ttl" example:"0s"`
 }
 
 // TelemetryConfig configures self-reporting metrics and logs.

@@ -157,7 +157,7 @@ func TestInstrumentedBus_Forensic(t *testing.T) {
 	})
 
 	t.Run("Subscribe", func(t *testing.T) {
-		_, err := ibus.Subscribe("test.sub", func(ctx context.Context, msg *fluxmsg.FluxMsg) {})
+		_, err := ibus.Subscribe("test.sub", func(ctx context.Context, msg *fluxmsg.FluxMsg) error { return nil })
 		assert.NoError(t, err)
 	})
 
@@ -167,7 +167,7 @@ func TestInstrumentedBus_Forensic(t *testing.T) {
 	})
 
 	t.Run("SubscribeDurable", func(t *testing.T) {
-		_, err := ibus.SubscribeDurable("test.dur", "durable", func(ctx context.Context, msg *fluxmsg.FluxMsg) {})
+		_, err := ibus.SubscribeDurable("test.dur", "durable", func(ctx context.Context, msg *fluxmsg.FluxMsg) error { return nil })
 		assert.NoError(t, err)
 	})
 }

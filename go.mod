@@ -8,7 +8,7 @@ require (
 	github.com/ThreeDotsLabs/watermill-nats/v2 v2.2.0
 	github.com/duckdb/duckdb-go/v2 v2.10505.0
 	github.com/fatih/color v1.19.0
-	github.com/fxamacker/cbor/v2 v2.9.3
+	github.com/fxamacker/cbor/v2 v2.9.4
 	github.com/go-viper/mapstructure/v2 v2.5.0
 	github.com/google/uuid v1.6.0
 	github.com/knadh/koanf/parsers/toml v0.1.0
@@ -17,8 +17,8 @@ require (
 	github.com/knadh/koanf/v2 v2.3.6
 	github.com/mitchellh/mapstructure v1.5.0
 	github.com/moov-io/iso8583 v0.26.1
-	github.com/nats-io/nats-server/v2 v2.14.6
-	github.com/nats-io/nats.go v1.53.1
+	github.com/nats-io/nats-server/v2 v2.15.0
+	github.com/nats-io/nats.go v1.54.0
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.12.1
@@ -54,7 +54,7 @@ require (
 	github.com/Masterminds/semver/v3 v3.3.0 // indirect
 	github.com/Masterminds/sprig/v3 v3.3.0 // indirect
 	github.com/OneOfOne/xxhash v1.2.8 // indirect
-	github.com/antithesishq/antithesis-sdk-go v0.7.2-default-no-op // indirect
+	github.com/antithesishq/antithesis-sdk-go v0.8.0-default-no-op // indirect
 	github.com/apache/arrow-go/v18 v18.6.0 // indirect
 	github.com/aymerick/douceur v0.2.0 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
@@ -104,7 +104,7 @@ require (
 	github.com/itchyny/gojq v0.12.19 // indirect
 	github.com/itchyny/timefmt-go v0.1.8 // indirect
 	github.com/jmespath/go-jmespath v0.4.0 // indirect
-	github.com/klauspost/compress v1.19.2 // indirect
+	github.com/klauspost/compress v1.20.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
 	github.com/klauspost/pgzip v1.2.6 // indirect
 	github.com/knadh/koanf/maps v0.1.2 // indirect
@@ -160,12 +160,12 @@ require (
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
-	golang.org/x/crypto v0.55.0 // indirect
+	golang.org/x/crypto v0.57.0 // indirect
 	golang.org/x/exp v0.0.0-20260508232706-74f9aab9d74a // indirect
 	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
-	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/text v0.41.0 // indirect
+	golang.org/x/sync v0.23.0 // indirect
+	golang.org/x/text v0.42.0 // indirect
 	golang.org/x/tools v0.49.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect

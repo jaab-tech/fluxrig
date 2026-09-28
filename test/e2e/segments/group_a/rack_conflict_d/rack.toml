@@ -1,0 +1,14 @@
+[logging]
+level = "debug"
+filename = "logs/rack.log"
+
+[store]
+dir = "./data"
+state_file = "state.flux"
+
+[rack]
+name = ""
+name_prefix = "probes-"
+
+[rack.bus]
+url = "nats://localhost:4223"

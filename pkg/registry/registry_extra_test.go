@@ -18,6 +18,7 @@ func TestRegistry_Approve_Errors(t *testing.T) {
 
 	// 1. Initial Reg (Pending)
 	reg.SetAutoAdopt(false)
+	reg.SetBootstrapSecret("sec")
 	id1 := uuid.New()
 	p1, err := reg.Register(ctx, id1, "pending-1", "sec", "ip", 0, "v1", nil, mixerID)
 	if err != nil {
@@ -44,6 +45,7 @@ func TestRegistry_Register_Conflict(t *testing.T) {
 	ctx := context.Background()
 	mixerID := uuid.New()
 
+	reg.SetBootstrapSecret("secret1")
 	id := uuid.New()
 	r1, err := reg.Register(ctx, id, "fixed", "secret1", "ip", 0, "v1", nil, mixerID)
 	if err != nil {

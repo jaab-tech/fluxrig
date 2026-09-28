@@ -161,6 +161,12 @@ class ProcessKeywords:
         # Remove any lingering overrides if they exist in shell
         env.pop("FLUXRIG_STORE_DIR", None)
         env.pop("FLUXRIG_LOGGING_FILENAME", None)
+        # The suites run every Mixer on 127.0.0.1 in an ephemeral, fully local,
+        # trusted environment: exactly the deliberate opt-out
+        # api.auth_disabled_dangerously exists for. Real deployments set a
+        # real api.auth_token instead; Start() refuses to run without one of
+        # the two.
+        env["FLUXRIG_API_AUTH_DISABLED_DANGEROUSLY"] = "true"
 
         cmd = [bin_path, "-c", config_file]
         if extra_args:

@@ -1,0 +1,14 @@
+[logging]
+level = "debug"
+filename = "logs/rack.log"
+
+[store]
+dir = "./data"
+state_file = "state.flux"
+
+[rack]
+name = "" # Force empty to trigger Zero Config logic
+name_prefix = "probes-" # Arbitrary Prefix Test
+
+[rack.bus]
+url = "nats://localhost:4223"

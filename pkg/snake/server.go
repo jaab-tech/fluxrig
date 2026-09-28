@@ -29,6 +29,13 @@ type Server struct {
 	// Limits applied to every stream this server provisions. Zero means none.
 	streamMaxAge   time.Duration
 	streamMaxBytes int64
+
+	// Limits applied to every KV bucket this server provisions. Zero means
+	// none for kvTTL (keys never expire); kvMaxBytes/kvMaxValueSize follow
+	// NATS's own convention where zero is also "unlimited" for that field.
+	kvMaxBytes     int64
+	kvMaxValueSize int32
+	kvTTL          time.Duration
 }
 
 // storeEncryptedMarker is left in the store directory once a store has been
@@ -53,6 +60,7 @@ type Config struct {
 	TLSKey         string
 	TLSCA          string
 	TLSVerify      bool
+	AllowNonTLS    bool
 	LogLevel       string
 
 	// StoreKey encrypts the JetStream store on disk when it is not empty: every
@@ -71,6 +79,12 @@ type Config struct {
 	// Zero means no limit.
 	StreamMaxAge   time.Duration
 	StreamMaxBytes int64
+
+	// KVMaxBytes, KVMaxValueSize and KVTTL limit every KV bucket the server
+	// provisions, the same way StreamMaxAge/StreamMaxBytes limit streams.
+	KVMaxBytes     int64
+	KVMaxValueSize int32
+	KVTTL          time.Duration
 }
 
 // NewServer creates and starts an embedded NATS server with JetStream enabled.
@@ -148,7 +162,10 @@ func NewServer(ctx context.Context, cfg Config) (*Server, error) {
 
 		// DO NOT set opts.TLS = true
 		// DO NOT set opts.TLSCert / opts.TLSKey (as they force TLS)
-		opts.AllowNonTLS = true // Allows plain connections alongside TLS
+		// AllowNonTLS defaults to false: configuring TLS makes it required,
+		// not merely offered. A caller must opt in explicitly (snake.allow_non_tls)
+		// to keep accepting plaintext clients alongside TLS ones.
+		opts.AllowNonTLS = cfg.AllowNonTLS
 		opts.TLSVerify = cfg.TLSVerify
 	}
 
@@ -189,12 +206,20 @@ func NewServer(ctx context.Context, cfg Config) (*Server, error) {
 	case isReady := <-ready:
 		if !isReady {
 			ns.Shutdown()
-			return nil, fmt.Errorf("nats server failed to start on port %d (timeout)", cfg.Port)
+			return nil, fmt.Errorf("nats server failed to start on port %d (timeout): every other startup check already passed, so this usually means the store in %s could not be opened or recovered in time; if it keeps happening, move the directory away to start an empty store", cfg.Port, cfg.StoreDir)
 		}
 	}
 	slog.Info("NATS server is ready")
 
-	s := &Server{ns: ns, domain: cfg.ClusterName, streamMaxAge: cfg.StreamMaxAge, streamMaxBytes: cfg.StreamMaxBytes}
+	s := &Server{
+		ns:             ns,
+		domain:         cfg.ClusterName,
+		streamMaxAge:   cfg.StreamMaxAge,
+		streamMaxBytes: cfg.StreamMaxBytes,
+		kvMaxBytes:     cfg.KVMaxBytes,
+		kvMaxValueSize: cfg.KVMaxValueSize,
+		kvTTL:          cfg.KVTTL,
+	}
 
 	// 4. Provision Streams
 	if cfg.StreamName != "" {
@@ -204,7 +229,13 @@ func NewServer(ctx context.Context, cfg Config) (*Server, error) {
 			if _, errMarker := os.Stat(markerPath); cfg.StoreKey != "" && errMarker == nil {
 				return nil, fmt.Errorf("snake: the store in %s did not open with the current key, and it was encrypted before: the cluster key or the store key file has changed since. Put the previous key back, or name it in the store's old key file to rotate to the new one, or move the directory away to start an empty store: %w", cfg.StoreDir, err)
 			}
-			return nil, err
+			// Not a key problem: whatever is wrong with the store in
+			// cfg.StoreDir (a corrupted or otherwise unreadable stream),
+			// there is no automatic recovery here on purpose - discarding a
+			// store that might still hold undelivered guaranteed messages
+			// without an operator's say-so is its own kind of data loss.
+			// Moving the directory away starts a genuinely empty store.
+			return nil, fmt.Errorf("snake: failed to provision stream %q in %s: %w (if the store cannot be repaired, move the directory away to start an empty one)", cfg.StreamName, cfg.StoreDir, err)
 		}
 		slog.Info("Streams provisioned")
 	}
@@ -227,7 +258,7 @@ func (s *Server) ProvisionStream(ctx context.Context, name string, subjects []st
 	var err error
 	slog.Info("Snake connecting in-process for provisioning")
 	for i := 1; i <= 3; i++ {
-		nc, err = s.InProcessConn(nats.InProcessServer(s.ns))
+		nc, err = s.InProcessConn()
 		if err == nil {
 			break
 		}
@@ -302,7 +333,7 @@ func (s *Server) ProvisionKV(ctx context.Context, bucket string) error {
 	var err error
 	slog.Info("Snake connecting in-process for KV provisioning")
 	for i := 1; i <= 3; i++ {
-		nc, err = s.InProcessConn(nats.InProcessServer(s.ns))
+		nc, err = s.InProcessConn()
 		if err == nil {
 			break
 		}
@@ -327,19 +358,18 @@ func (s *Server) ProvisionKV(ctx context.Context, bucket string) error {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	// Check if exists
-	_, err = js.KeyValue(ctx, bucket)
-	if err == nil {
-		slog.Info("KV bucket exists", "bucket", bucket)
-		return nil
-	}
-
-	// Create
-	slog.Info("Provisioning JetStream KV bucket", "bucket", bucket)
-	_, err = js.CreateKeyValue(ctx, jetstream.KeyValueConfig{
-		Bucket:   bucket,
-		Storage:  jetstream.FileStorage,
-		Replicas: 1,
+	// Create or update: applied unconditionally, like the stream limits
+	// above, so an operator who tightens a limit on an already-provisioned
+	// bucket expects the next start to apply it, not to silently keep
+	// whatever the bucket already has forever.
+	slog.Info("Provisioning JetStream KV bucket", "bucket", bucket, "max_bytes", s.kvMaxBytes, "max_value_size", s.kvMaxValueSize, "ttl", s.kvTTL)
+	_, err = js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{
+		Bucket:       bucket,
+		Storage:      jetstream.FileStorage,
+		Replicas:     1,
+		MaxBytes:     s.kvMaxBytes,
+		MaxValueSize: s.kvMaxValueSize,
+		TTL:          s.kvTTL,
 	})
 
 	if err != nil {
@@ -362,14 +392,16 @@ func (s *Server) ClientURL() string {
 	return s.ns.ClientURL()
 }
 
-// InProcessConn returns a NATS connection directly bound to the embedded server.
+// InProcessConn returns a NATS connection bound to the embedded server
+// through nats-server's own net.Pipe-based transport (*server.Server
+// already implements nats.InProcessConnProvider), never through its TCP
+// listener. That keeps this connection outside the TLS/AllowNonTLS policy
+// entirely: it is not a network client the security posture is about, and,
+// unlike a URL rewritten from "tls://" to "nats://" and dialed for real,
+// it cannot be refused or forced into a certificate check by that policy.
 func (s *Server) InProcessConn(natsOpts ...nats.Option) (*nats.Conn, error) {
-	url := s.ns.ClientURL()
-	// Force plain protocol to bypass any automatic TLS negotiation
-	if i := len("tls://"); len(url) > i && url[:i] == "tls://" {
-		url = "nats://" + url[i:]
-	}
-	return nats.Connect(url, natsOpts...)
+	opts := append([]nats.Option{nats.InProcessServer(s.ns)}, natsOpts...)
+	return nats.Connect(nats.DefaultURL, opts...) // URL is unused once InProcessServer is set
 }
 
 // ClientInfo holds metrics for an individual connection.

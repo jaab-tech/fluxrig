@@ -180,6 +180,39 @@ func TestServer_StreamLimits(t *testing.T) {
 	assert.Equal(t, int64(1<<20), info2.Config.MaxBytes)
 }
 
+// A KV bucket the server provisions is capped the same way a stream is: the
+// value size, total size and TTL are the ones this start configured, and a
+// bucket that already exists takes the limits of the new start rather than
+// keeping whatever it was created with.
+func TestServer_KVLimits(t *testing.T) {
+	dir := t.TempDir()
+	s := startSnake(t, dir, Config{KVMaxBytes: 64 << 20, KVMaxValueSize: 1 << 20, KVTTL: time.Hour})
+	require.NoError(t, s.ProvisionKV(context.Background(), "test_bucket"))
+	js, closeNC := jsOf(t, s)
+	st, err := js.Stream(context.Background(), "KV_test_bucket")
+	require.NoError(t, err)
+	info, err := st.Info(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, int64(64<<20), info.Config.MaxBytes)
+	assert.Equal(t, int32(1<<20), info.Config.MaxMsgSize)
+	assert.Equal(t, time.Hour, info.Config.MaxAge)
+	closeNC()
+	s.Shutdown()
+
+	again := startSnake(t, dir, Config{KVMaxBytes: 1 << 20, KVMaxValueSize: 4096, KVTTL: 2 * time.Hour})
+	defer again.Shutdown()
+	require.NoError(t, again.ProvisionKV(context.Background(), "test_bucket"))
+	js2, closeNC2 := jsOf(t, again)
+	defer closeNC2()
+	st2, err := js2.Stream(context.Background(), "KV_test_bucket")
+	require.NoError(t, err)
+	info2, err := st2.Info(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, int64(1<<20), info2.Config.MaxBytes)
+	assert.Equal(t, int32(4096), info2.Config.MaxMsgSize)
+	assert.Equal(t, 2*time.Hour, info2.Config.MaxAge)
+}
+
 // Opening an encrypted store without its key would show an empty stream. It is an
 // error instead, and the right key opens it again.
 func TestServer_RefusesAnEncryptedStoreWithoutItsKey(t *testing.T) {
@@ -208,6 +241,25 @@ func TestServer_WrongKeyFailsTheStart(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "did not open with the current key", "the operator is told what happened and what to do")
 	assert.Contains(t, err.Error(), "old key")
+}
+
+// A store the server cannot open for any other reason must fail the start
+// with a message that says what to do about it, the same as the encrypted-
+// store and wrong-key cases above, not a bare, low-level NATS error. A
+// regular file where the server needs to create its jetstream directory
+// blocks it the same way real corruption would, without needing to
+// reproduce nats-server's own on-disk format.
+func TestServer_UnopenableStoreFailsTheStartWithRecoveryGuidance(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "jetstream"), []byte("blocking file"), 0o644))
+
+	_, err := NewServer(context.Background(), Config{
+		Port: -1, ClusterName: "unopenable-test", StoreDir: dir,
+		StreamName: "flux-msg", StreamSubjects: []string{"flux.msg.>"},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), dir, "the operator is told which directory is the problem")
+	assert.Contains(t, err.Error(), "move the directory away", "the operator is told what to do about it")
 }
 
 // The Coat Check gear parks context in a key-value bucket of the bus, which lives in

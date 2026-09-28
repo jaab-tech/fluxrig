@@ -4,7 +4,11 @@
 package commands
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -17,6 +21,7 @@ import (
 	"github.com/jaab-tech/fluxrig/pkg/config"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/jaab-tech/fluxrig/pkg/idgen"
+	"github.com/jaab-tech/fluxrig/pkg/pki"
 	"github.com/jaab-tech/fluxrig/pkg/snake"
 )
 
@@ -131,7 +136,7 @@ func TestSendHeartbeat(t *testing.T) {
 	machineID := uuid.New()
 	gen, _ := idgen.New(uuid.New())
 	hbCfg := &config.RackConfig{}
-	if errHB := sendHeartbeat(context.Background(), b, machineID, hbCfg, gen); errHB != nil {
+	if errHB := sendHeartbeat(context.Background(), b, machineID, "test-secret", hbCfg, gen); errHB != nil {
 		t.Fatal(errHB)
 	}
 
@@ -160,5 +165,78 @@ func TestSendHeartbeat(t *testing.T) {
 
 	if _, ok := hb.Stats["goroutines"]; !ok {
 		t.Error("Missing goroutines stat")
+	}
+}
+
+// The heartbeat embeds cfg.Rack straight into its Config map
+// (fluxmsg.HeartbeatPayload.Config: map[string]any{"rack": cfg.Rack, ...}),
+// which is a different serialization path than the HTTP JSON responses
+// json:"-" already protects. This confirms the bootstrap secret does not
+// reach the wire through it either: fxamacker/cbor falls back to reading
+// the json tag when no cbor tag is present, so json:"-" already covers
+// this path too, but that is an implicit library behavior for a
+// security-sensitive field, not something the field's own tag says.
+func TestSendHeartbeat_NeverLeaksBootstrapSecret(t *testing.T) {
+	s, b, url := setupBus(t)
+	defer s.Shutdown()
+	defer b.Close()
+
+	nc, err := nats.Connect(url)
+	if err != nil {
+		t.Fatalf("NATS connect failed: %v", err)
+	}
+	defer nc.Close()
+	sub, _ := nc.SubscribeSync("flux.agent.heartbeat")
+	_ = nc.Flush()
+
+	hbCfg := &config.RackConfig{}
+	hbCfg.Rack.BootstrapSecret = "do-not-leak-bootstrap-secret"
+	gen, _ := idgen.New(uuid.New())
+	if errHB := sendHeartbeat(context.Background(), b, uuid.New(), "test-secret", hbCfg, gen); errHB != nil {
+		t.Fatal(errHB)
+	}
+
+	msg, err := sub.NextMsg(5 * time.Second)
+	if err != nil {
+		t.Fatal("No heartbeat received")
+	}
+
+	if bytes.Contains(msg.Data, []byte("do-not-leak-bootstrap-secret")) {
+		t.Errorf("bootstrap secret found in the raw heartbeat wire bytes")
+	}
+}
+
+// TestHandleEnrollmentDenial_RemovesPinnedKeyToo confirms a denial clears
+// the pinned Mixer key file, not only the passport. A leftover pin file
+// would reject the fresh identity's own first passport if the Mixer's
+// signing key had changed since the pin was set.
+func TestHandleEnrollmentDenial_RemovesPinnedKeyToo(t *testing.T) {
+	s, b, _ := setupBus(t)
+	defer s.Shutdown()
+	defer b.Close()
+
+	statePath := filepath.Join(t.TempDir(), "state.flux")
+	if err := os.WriteFile(statePath, []byte("stale-passport"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pinPath := pki.PinnedKeyPath(statePath)
+	if err := os.WriteFile(pinPath, []byte("stale-pinned-key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	cfg := &config.RackConfig{}
+	cfg.Rack.BootstrapSecret = "fluxrig"
+	hello := &fluxmsg.HelloPayload{Name: "rack-under-test"}
+	gen, _ := idgen.New(uuid.New())
+	reprovisioned := false
+
+	handleEnrollmentDenial(logger, statePath, cfg, hello, b, gen, "unit test denial", &reprovisioned)
+
+	if _, err := os.Stat(statePath); !os.IsNotExist(err) {
+		t.Errorf("passport file still exists after denial: %v", err)
+	}
+	if _, err := os.Stat(pinPath); !os.IsNotExist(err) {
+		t.Errorf("pinned key file still exists after denial: %v", err)
 	}
 }

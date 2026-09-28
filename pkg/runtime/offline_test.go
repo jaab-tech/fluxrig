@@ -134,10 +134,10 @@ func TestBusRef_WithoutABusFailsWithoutPanicking(t *testing.T) {
 	ref := newBusRef(nil)
 
 	assert.ErrorIs(t, ref.Publish(context.Background(), "s", fluxmsg.New()), errNoBus)
-	_, err := ref.Subscribe("s", func(context.Context, *fluxmsg.FluxMsg) {})
+	_, err := ref.Subscribe("s", func(context.Context, *fluxmsg.FluxMsg) error { return nil })
 	assert.ErrorIs(t, err, errNoBus)
 	assert.Nil(t, ref.KV())
 	assert.Nil(t, ref.Core())
-	assert.NoError(t, ref.Purge(context.Background()))
+	assert.NoError(t, ref.Purge(context.Background(), "flux.msg.test.>"))
 	ref.Close()
 }

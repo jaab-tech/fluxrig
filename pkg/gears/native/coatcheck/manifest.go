@@ -33,11 +33,11 @@ func (g *CoatCheckGear) Manifest() sdk.Manifest {
     "value_fields": { "type": "array", "items": { "type": "string" }, "description": "store mode: fields (or meta.*) to park under the key and restore later." },
     "default_ttl": { "type": "string", "pattern": "^[0-9]+(s|ms|m|h)$", "default": "1m", "description": "how long a parked entry lives before expiry, e.g. '30s'." },
     "max_ttl": { "type": "string", "pattern": "^[0-9]+(s|ms|m|h)$", "default": "5m", "description": "daemon mode: safety cap on any per-message TTL override." },
-    "on_missing": { "type": "string", "enum": ["error", "drop", "forward"], "description": "restore mode: what to do when no entry is found (expired/never stored): error, drop, or forward without context." },
+    "on_missing": { "type": "string", "enum": ["error", "drop", "forward"], "default": "error", "description": "restore mode: what to do when no entry is found (expired/never stored): error, drop, or forward without context. Forwarding a reply with its stripped fields unrestored must be requested by name." },
     "merge_strategy": { "type": "string", "description": "restore mode: overwrite replaces existing metadata; any other value preserves it." },
     "storage": { "type": "string", "enum": ["file", "memory"], "description": "bucket backing store: file (durable) or memory." },
     "replicas": { "type": "integer", "description": "daemon mode: KV bucket replica count." },
-    "include_values": { "type": "boolean", "default": false, "description": "daemon mode: read entry values (needed to honor per-message TTL overrides)." }
+    "include_values": { "type": "boolean", "default": false, "description": "daemon mode: include the expired entry's data (expired_ctx) in the timeout event this daemon emits. A per-message TTL override (meta.coatcheck.ttl) is honored either way." }
   },
   "required": ["mode", "bucket"]
 }`,

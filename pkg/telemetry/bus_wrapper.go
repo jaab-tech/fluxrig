@@ -124,7 +124,7 @@ func (ib *InstrumentedBus) PublishRaw(ctx context.Context, subject string, data 
 
 func (ib *InstrumentedBus) Subscribe(subject string, handler bus.Handler) (bus.Subscription, error) {
 	// Wrap handler to measure RX metrics & Extract Traces
-	wrappedHandler := func(ctx context.Context, msg *fluxmsg.FluxMsg) {
+	wrappedHandler := func(ctx context.Context, msg *fluxmsg.FluxMsg) error {
 		// 1. Extract Tracing Context
 		// NATS doesn't pass context over wire natively as header in our wrapper (cbor setup),
 		// so we rely on msg.Metadata carrying the W3C traceparent.
@@ -154,7 +154,7 @@ func (ib *InstrumentedBus) Subscribe(subject string, handler bus.Handler) (bus.S
 		}
 
 		// Call original handler with the TRACED context
-		handler(handlerCtx, msg)
+		return handler(handlerCtx, msg)
 	}
 	return ib.next.Subscribe(subject, wrappedHandler)
 }
@@ -166,7 +166,7 @@ func (ib *InstrumentedBus) SubscribeRaw(subject string, streamName string, handl
 }
 
 func (ib *InstrumentedBus) SubscribeDurable(subject, durableName string, handler bus.Handler) (bus.Subscription, error) {
-	wrappedHandler := func(ctx context.Context, msg *fluxmsg.FluxMsg) {
+	wrappedHandler := func(ctx context.Context, msg *fluxmsg.FluxMsg) error {
 		// 1. Extract Tracing Context
 		carrier := propagation.MapCarrier(msg.Metadata)
 		extractedCtx := otel.GetTextMapPropagator().Extract(ctx, carrier)
@@ -190,7 +190,7 @@ func (ib *InstrumentedBus) SubscribeDurable(subject, durableName string, handler
 			m.NatsMessagesReceived.Add(handlerCtx, 1, attrs)
 		}
 
-		handler(handlerCtx, msg)
+		return handler(handlerCtx, msg)
 	}
 	return ib.next.SubscribeDurable(subject, durableName, wrappedHandler)
 }

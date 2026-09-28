@@ -36,12 +36,12 @@ func TestInspectConfig_Success(t *testing.T) {
 
 	// 2. Execute Command
 	var out bytes.Buffer
-	err := showMixerConfig(context.Background(), ts.URL, &out)
+	err := showMixerConfig(context.Background(), ts.URL, "", &out)
 	assert.NoError(t, err)
 	assert.Contains(t, out.String(), `"version": "0.4.3"`)
 
 	out.Reset()
-	err = showRacksConfig(context.Background(), ts.URL, &out)
+	err = showRacksConfig(context.Background(), ts.URL, "", &out)
 	assert.NoError(t, err)
 	assert.Contains(t, out.String(), "rack1")
 	assert.Contains(t, out.String(), "online")

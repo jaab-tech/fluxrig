@@ -32,7 +32,7 @@ func (b *syncBus) Subscribe(_ string, h bus.Handler) (bus.Subscription, error) {
 
 func (b *syncBus) Publish(ctx context.Context, _ string, msg *fluxmsg.FluxMsg) error {
 	if b.handler != nil {
-		b.handler(ctx, msg)
+		_ = b.handler(ctx, msg)
 	}
 	return nil
 }

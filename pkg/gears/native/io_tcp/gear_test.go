@@ -185,6 +185,67 @@ func TestGear_E2E_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestGear_E2E_MessageAboveDefaultScannerBufferRoundTrips is a regression test
+// for a real bug: neither the server's nor the client's read loop ever called
+// bufio.Scanner.Buffer, so both defaulted to bufio.MaxScanTokenSize (64KiB) and
+// failed with bufio.ErrTooLong on any message above that — well under what the
+// length-prefix splitter's own size check already allows (a 4-byte header plus
+// a 1MB payload; length_prefix4, not length_prefix2, since a 2-byte length can
+// never exceed 65535 and so can never itself reach the old 64KiB ceiling).
+// This sends a 200KB message each way, comfortably above the old 64KiB
+// ceiling and comfortably under the splitter's own 1MB one.
+func TestGear_E2E_MessageAboveDefaultScannerBufferRoundTrips(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := l.Addr().String()
+	_ = l.Close()
+
+	s := &Gear{}
+	require.NoError(t, s.Init(&MockCtx{cfg: map[string]any{"mode": "server", "bind": addr, "framing": "length_prefix4"}}))
+	sReceived := make(chan *fluxmsg.FluxMsg, 5)
+	require.NoError(t, s.Start(context.Background(), func(m *fluxmsg.FluxMsg) { sReceived <- m }))
+	defer func() { _ = s.Stop() }()
+
+	c := &Gear{}
+	require.NoError(t, c.Init(&MockCtx{cfg: map[string]any{
+		"mode": "client", "connect": addr, "reconnect_wait": "10ms", "framing": "length_prefix4",
+	}}))
+	cReceived := make(chan *fluxmsg.FluxMsg, 5)
+	require.NoError(t, c.Start(context.Background(), func(m *fluxmsg.FluxMsg) { cReceived <- m }))
+	defer func() { _ = c.Stop() }()
+
+	time.Sleep(100 * time.Millisecond) // Allow connect
+
+	big := bytes.Repeat([]byte("x"), 200*1024)
+
+	_, err = c.Process(context.Background(), &fluxmsg.FluxMsg{RawPayload: big})
+	require.NoError(t, err)
+
+	var connID string
+	select {
+	case msg := <-sReceived:
+		require.Len(t, msg.RawPayload, len(big), "the server's scanner must not truncate or reject a message above 64KiB")
+		assert.Equal(t, big, msg.RawPayload)
+		connID = msg.Metadata["conn.id"]
+	case <-time.After(2 * time.Second):
+		t.Fatal("server never received the large message from the client")
+	}
+
+	_, err = s.Process(context.Background(), &fluxmsg.FluxMsg{
+		RawPayload: big,
+		Metadata:   map[string]string{"conn.id": connID},
+	})
+	require.NoError(t, err)
+
+	select {
+	case msg := <-cReceived:
+		require.Len(t, msg.RawPayload, len(big), "the client's scanner must not truncate or reject a message above 64KiB")
+		assert.Equal(t, big, msg.RawPayload)
+	case <-time.After(2 * time.Second):
+		t.Fatal("client never received the large message from the server")
+	}
+}
+
 // A drain that reports failure on every orderly shutdown is worse than no
 // drain: the runtime logs "Drain Gear Failed" and collects an error for what
 // was a clean stop. This asserts the three properties that were wrong.

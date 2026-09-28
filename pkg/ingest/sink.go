@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"math"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -54,6 +55,7 @@ type TelemetrySink struct {
 	subject       string
 	dataDir       string
 	stopCh        chan struct{}
+	stopOnce      sync.Once
 	flushInterval time.Duration
 	cache         *telemetry.MetricsCache
 }
@@ -118,15 +120,36 @@ func (s *TelemetrySink) Start(ctx context.Context) error {
 	return nil
 }
 
+// Stop is idempotent: closing stopCh a second time would panic, and a Rack
+// shutdown path plus a signal handler can both reach for it. It also gives
+// buffered telemetry one last, bounded flush, so data written since the
+// previous tick is not left for a flush that will never come.
 func (s *TelemetrySink) Stop() error {
-	close(s.stopCh)
-	if s.sub != nil {
-		return s.sub.Unsubscribe()
-	}
-	return nil
+	var err error
+	s.stopOnce.Do(func() {
+		close(s.stopCh)
+		if s.sub != nil {
+			if errUnsub := s.sub.Unsubscribe(); errUnsub != nil {
+				err = errUnsub
+			}
+		}
+
+		flushCtx, cancel := context.WithTimeout(context.Background(), s.flushInterval)
+		defer cancel()
+		if errFlush := s.store.FlushTelemetry(flushCtx, s.dataDir); errFlush != nil {
+			slog.Error("Failed to flush telemetry on stop", "error", errFlush)
+			if err == nil {
+				err = errFlush
+			}
+		}
+		if errArchive := s.store.FlushArchiverBuffer(flushCtx, s.dataDir); errArchive != nil {
+			slog.Debug("Archiver buffer flush skipped or failed on stop", "error", errArchive)
+		}
+	})
+	return err
 }
 
-func (s *TelemetrySink) handleMessage(ctx context.Context, msg *fluxmsg.FluxMsg) {
+func (s *TelemetrySink) handleMessage(ctx context.Context, msg *fluxmsg.FluxMsg) error {
 	msgType := msg.Metadata["type"]
 
 	var err error
@@ -144,6 +167,7 @@ func (s *TelemetrySink) handleMessage(ctx context.Context, msg *fluxmsg.FluxMsg)
 	if err != nil {
 		slog.Error("Failed to persist telemetry", "error", err, "type", msgType)
 	}
+	return err
 }
 
 func (s *TelemetrySink) persistLogs(msg *fluxmsg.FluxMsg) error {
@@ -194,6 +218,7 @@ func (s *TelemetrySink) persistLogs(msg *fluxmsg.FluxMsg) error {
 		}
 	}
 
+	var failed int
 	for _, log := range logs {
 		log = cleanMap(log).(map[string]any)
 
@@ -281,12 +306,18 @@ func (s *TelemetrySink) persistLogs(msg *fluxmsg.FluxMsg) error {
 			}
 		}
 
-		_, err := s.store.DB().Exec(queryInsertLog,
+		if _, errExec := s.store.DB().Exec(queryInsertLog,
 			ts, parseUUID("entity_id"), eType, eName, str("trace_id"), str("span_id"),
-			severity, sFile, sLine, sFunc, body, string(attrJSON))
-		if err != nil {
-			return err
+			severity, sFile, sLine, sFunc, body, string(attrJSON)); errExec != nil {
+			// One malformed row must not cost every other row in the same
+			// batch; a batch can hold logs from many gears and racks.
+			slog.Error("Failed to insert log", "error", errExec, "entity_name", eName)
+			failed++
+			continue
 		}
+	}
+	if failed > 0 {
+		return fmt.Errorf("failed to persist %d of %d log record(s)", failed, len(logs))
 	}
 	return nil
 }
@@ -317,6 +348,7 @@ func (s *TelemetrySink) persistMetrics(msg *fluxmsg.FluxMsg) error {
 		}
 	}
 
+	var failed int
 	for _, metric := range metrics {
 		metric = cleanMap(metric).(map[string]any)
 		str := func(k string) string { v, _ := metric[k].(string); return v }
@@ -388,14 +420,25 @@ func (s *TelemetrySink) persistMetrics(msg *fluxmsg.FluxMsg) error {
 		valFloat := f64("value")
 		attrJSON, _ := json.Marshal(cleanMap(metric["attributes"]))
 
-		if eID != uuid.Nil {
-			if _, err := s.store.DB().Exec(queryInsertMetric, ts, eID, eName, str("name"), str("description"), str("unit"), str("type"), valFloat, string(attrJSON)); err != nil {
-				slog.Error("Failed to insert metric", "error", err, "name", str("name"))
-			}
-			if s.cache != nil {
-				s.cache.SetGauge(eID, str("name"), valFloat, eName, "")
-			}
+		if eID == uuid.Nil {
+			// A metric with no entity to attribute it to cannot be stored;
+			// without this log the drop was silent and indistinguishable
+			// from a metric nobody sent.
+			slog.Warn("Dropping metric: missing or invalid entity_id", "name", str("name"))
+			continue
 		}
+
+		if _, errExec := s.store.DB().Exec(queryInsertMetric, ts, eID, eName, str("name"), str("description"), str("unit"), str("type"), valFloat, string(attrJSON)); errExec != nil {
+			slog.Error("Failed to insert metric", "error", errExec, "name", str("name"))
+			failed++
+			continue
+		}
+		if s.cache != nil {
+			s.cache.SetGauge(eID, str("name"), valFloat, eName, "")
+		}
+	}
+	if failed > 0 {
+		return fmt.Errorf("failed to persist %d of %d metric record(s)", failed, len(metrics))
 	}
 	return nil
 }
@@ -426,6 +469,7 @@ func (s *TelemetrySink) persistSpans(msg *fluxmsg.FluxMsg) error {
 		}
 	}
 
+	var failed int
 	for _, span := range spans {
 		span = cleanMap(span).(map[string]any)
 		str := func(k string) string { v, _ := span[k].(string); return v }
@@ -486,12 +530,17 @@ func (s *TelemetrySink) persistSpans(msg *fluxmsg.FluxMsg) error {
 			endTS /= 1000
 		}
 
-		if _, err := s.store.DB().Exec(queryInsertSpan,
+		if _, errExec := s.store.DB().Exec(queryInsertSpan,
 			str("trace_id"), str("span_id"), str("parent_span_id"), str("name"),
 			startTS, endTS,
-			parseUUID("entity_id"), str("entity_name"), string(attrJSON)); err != nil {
-			slog.Error("Failed to insert span", "error", err, "name", str("name"))
+			parseUUID("entity_id"), str("entity_name"), string(attrJSON)); errExec != nil {
+			slog.Error("Failed to insert span", "error", errExec, "name", str("name"))
+			failed++
+			continue
 		}
+	}
+	if failed > 0 {
+		return fmt.Errorf("failed to persist %d of %d span record(s)", failed, len(spans))
 	}
 	return nil
 }

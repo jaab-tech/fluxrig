@@ -64,3 +64,18 @@ func parseStreamMaxAge(s string) (time.Duration, error) {
 	}
 	return d, nil
 }
+
+// parseKVTTL reads snake.kv_ttl. Empty means keys never expire.
+func parseKVTTL(s string) (time.Duration, error) {
+	if s == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("snake.kv_ttl %q: %w", s, err)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("snake.kv_ttl %q is negative", s)
+	}
+	return d, nil
+}

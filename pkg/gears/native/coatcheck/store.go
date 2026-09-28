@@ -34,6 +34,15 @@ func (s *StoreLogic) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxms
 		partial.FluxID = msg.FluxID // Keep ID for reference
 		partial.TSInit = msg.TSInit
 
+		// The daemon's per-key TTL override travels in Metadata as a
+		// housekeeping signal for expiry, not business data. Without this it
+		// only survived into the stored blob when a scenario happened to also
+		// list it in value_fields, which nothing documents and no scenario
+		// configuring value_fields for an unrelated reason would think to do.
+		if ttl, ok := msg.Metadata[fluxmsg.MetaCoatCheckTTL]; ok {
+			partial.Metadata[fluxmsg.MetaCoatCheckTTL] = ttl
+		}
+
 		for _, field := range s.gear.config.ValueFields {
 			extracted, found := sdk.GetValue(msg, field)
 			if !found {

@@ -26,6 +26,72 @@ func TestLoadMixer_Defaults(t *testing.T) {
 	if cfg.Store.DatabaseFile != "flux.duckdb" {
 		t.Errorf("Default store database file mismatch: got %s", cfg.Store.DatabaseFile)
 	}
+	if cfg.Snake.AllowNonTLS {
+		t.Error("AllowNonTLS must default to false: configuring TLS should make it required")
+	}
+	if cfg.Snake.TLSVerify {
+		t.Error("TLSVerify must default to false")
+	}
+	if cfg.Snake.KVMaxBytes != 1073741824 {
+		t.Errorf("Default KVMaxBytes mismatch: got %d", cfg.Snake.KVMaxBytes)
+	}
+	if cfg.Snake.KVMaxValueSize != 1048576 {
+		t.Errorf("Default KVMaxValueSize mismatch: got %d", cfg.Snake.KVMaxValueSize)
+	}
+	if cfg.Snake.KVTTL != "0s" {
+		t.Errorf("Default KVTTL mismatch: got %s", cfg.Snake.KVTTL)
+	}
+}
+
+// Before this fix, snake.tls_ca_file and snake.tls_verify had no field on
+// SnakeConfig at all: the Go TLS logic that reads them existed, but nothing
+// in the Mixer's own config could ever populate them.
+func TestLoadMixer_SnakeTLSAndKVKeys(t *testing.T) {
+	content := `
+[snake]
+allow_non_tls = true
+tls_ca_file = "ca.pem"
+tls_verify = true
+kv_max_bytes = 2048
+kv_max_value_size = 512
+kv_ttl = "10m"
+`
+	tmpfile, err := os.CreateTemp("", "mixer.*.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Remove(tmpfile.Name()) }()
+
+	if _, errWr := tmpfile.Write([]byte(content)); errWr != nil {
+		t.Fatal(errWr)
+	}
+	if errClose := tmpfile.Close(); errClose != nil {
+		t.Fatal(errClose)
+	}
+
+	cfg, err := LoadMixer(tmpfile.Name())
+	if err != nil {
+		t.Fatalf("Failed to load file: %v", err)
+	}
+
+	if !cfg.Snake.AllowNonTLS {
+		t.Error("snake.allow_non_tls did not reach SnakeConfig.AllowNonTLS")
+	}
+	if cfg.Snake.TLSCAFile != "ca.pem" {
+		t.Errorf("snake.tls_ca_file did not reach SnakeConfig.TLSCAFile: got %q", cfg.Snake.TLSCAFile)
+	}
+	if !cfg.Snake.TLSVerify {
+		t.Error("snake.tls_verify did not reach SnakeConfig.TLSVerify")
+	}
+	if cfg.Snake.KVMaxBytes != 2048 {
+		t.Errorf("snake.kv_max_bytes did not reach SnakeConfig.KVMaxBytes: got %d", cfg.Snake.KVMaxBytes)
+	}
+	if cfg.Snake.KVMaxValueSize != 512 {
+		t.Errorf("snake.kv_max_value_size did not reach SnakeConfig.KVMaxValueSize: got %d", cfg.Snake.KVMaxValueSize)
+	}
+	if cfg.Snake.KVTTL != "10m" {
+		t.Errorf("snake.kv_ttl did not reach SnakeConfig.KVTTL: got %q", cfg.Snake.KVTTL)
+	}
 }
 
 func TestLoadMixer_File(t *testing.T) {
