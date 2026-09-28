@@ -370,6 +370,12 @@ const docTemplate = `{
                             "$ref": "#/definitions/api.ScenarioImportResponse"
                         }
                     },
+                    "202": {
+                        "description": "Imported and active, but not yet delivered: no target Rack was reachable",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
                     "400": {
                         "description": "The scenario could not be read or failed validation",
                         "schema": {
@@ -984,6 +990,11 @@ const docTemplate = `{
         "config.ApiConfig": {
             "type": "object",
             "properties": {
+                "authDisabledDangerously": {
+                    "description": "AuthDisabledDangerously must be set explicitly to start the Mixer with\nno AuthToken configured. Without either, Start refuses to run: silently\nserving the management API unauthenticated is the exact failure mode\nthis field exists to require an explicit, named opt-out from.",
+                    "type": "boolean",
+                    "example": false
+                },
                 "controlConfirmTimeout": {
                     "description": "ControlConfirmTimeout bounds how long a control-plane command (the\nsimulator start/stop/rate/reset endpoints) waits for a gear to\nacknowledge receiving it before the request answers that nobody is\nlistening, rather than the success a bare, unconfirmed publish would\nhave reported.",
                     "type": "string",
@@ -1055,11 +1066,6 @@ const docTemplate = `{
                     "description": "AutoAdopt, if true, will automatically mark newly enrolled Racks as 'active'.\nIf false (default), new Racks start as 'pending'.",
                     "type": "boolean",
                     "example": false
-                },
-                "bootstrapSecret": {
-                    "description": "BootstrapSecret is the shared secret used for zero-config enrollment and identity adoption.\nDefaults to 'fluxrig' if not specified.",
-                    "type": "string",
-                    "example": "fluxrig"
                 },
                 "pushDelay": {
                     "description": "PushDelay is the time to wait before pushing state to a newly enrolled Rack.",
@@ -1294,6 +1300,11 @@ const docTemplate = `{
         "config.SnakeConfig": {
             "type": "object",
             "properties": {
+                "allowNonTLS": {
+                    "description": "AllowNonTLS lets a plaintext client connect alongside a TLS one once\nTLSCertFile/TLSKeyFile are set. Mixer-side only: false by default, so\nconfiguring TLS actually requires it instead of just offering it.",
+                    "type": "boolean",
+                    "example": false
+                },
                 "connectTimeout": {
                     "type": "string",
                     "example": "10s"
@@ -1320,6 +1331,19 @@ const docTemplate = `{
                 },
                 "insecureSkipVerify": {
                     "type": "boolean"
+                },
+                "kvmaxBytes": {
+                    "description": "KVMaxBytes, KVMaxValueSize and KVTTL cap every KV bucket the Mixer\nprovisions, the same way StreamMaxAge/StreamMaxBytes cap every stream.\nMixer-side only.",
+                    "type": "integer",
+                    "example": 1073741824
+                },
+                "kvmaxValueSize": {
+                    "type": "integer",
+                    "example": 1048576
+                },
+                "kvttl": {
+                    "type": "string",
+                    "example": "0s"
                 },
                 "offlineRetryInterval": {
                     "type": "string",
@@ -1384,11 +1408,19 @@ const docTemplate = `{
                     "type": "string",
                     "example": "200ms"
                 },
+                "tlscafile": {
+                    "description": "TLSCAFile and TLSVerify enable mTLS: the CA a Rack's own client\ncertificate is verified against, and whether presenting one is\nrequired. Mixer-side only.",
+                    "type": "string"
+                },
                 "tlscertFile": {
                     "type": "string"
                 },
                 "tlskeyFile": {
                     "type": "string"
+                },
+                "tlsverify": {
+                    "type": "boolean",
+                    "example": false
                 },
                 "url": {
                     "type": "string",

@@ -38,7 +38,8 @@ type MockRegistry struct {
 	UpdateStatusFunc func(ctx context.Context, machineID uuid.UUID, status string) error
 }
 
-func (m *MockRegistry) SetAutoAdopt(enabled bool) {}
+func (m *MockRegistry) SetAutoAdopt(enabled bool)        {}
+func (m *MockRegistry) SetBootstrapSecret(secret string) {}
 
 func (m *MockRegistry) Register(ctx context.Context, machineID uuid.UUID, name string, secret string, ip string, port int, version string, config map[string]any, mixerID uuid.UUID) (*registry.Rack, error) {
 	return nil, nil // Not used in API server tests yet
@@ -580,23 +581,34 @@ func TestHandleScenarioImport(t *testing.T) {
 }
 
 // A deploy target that is not an active Rack is a state the caller can fix, so
-// the import that was filed but could not be activated answers 409; any other
-// activation failure stays a 500.
+// the import that was filed but could not be activated answers 409. Reaching
+// no target Rack at all is not a failure of anything - the scenario is active
+// and a Rack that enrolls later still gets it - so it answers 202, not 500.
+// Any other activation failure stays a 500.
 func TestHandleScenarioImport_ActivationFailures(t *testing.T) {
 	tests := []struct {
-		name       string
-		activate   error
-		wantStatus int
+		name           string
+		activate       error
+		wantStatus     int
+		wantBodySubstr string
 	}{
 		{
-			name:       "unknown deploy target",
-			activate:   fmt.Errorf("deploy target validation failed: %w", fmt.Errorf("gear g deploys to %w 'rack-1'", controller.ErrUnknownDeployTarget)),
-			wantStatus: http.StatusConflict,
+			name:           "unknown deploy target",
+			activate:       fmt.Errorf("deploy target validation failed: %w", fmt.Errorf("gear g deploys to %w 'rack-1'", controller.ErrUnknownDeployTarget)),
+			wantStatus:     http.StatusConflict,
+			wantBodySubstr: "Imported but activation failed",
 		},
 		{
-			name:       "any other failure",
-			activate:   errors.New("scenario not found: test-scenario"),
-			wantStatus: http.StatusInternalServerError,
+			name:           "no rack reached",
+			activate:       fmt.Errorf("scenario %q is active but was not delivered: %w", "test-scenario", controller.ErrNoRackReached),
+			wantStatus:     http.StatusAccepted,
+			wantBodySubstr: "Imported and active, but not yet delivered",
+		},
+		{
+			name:           "any other failure",
+			activate:       errors.New("scenario not found: test-scenario"),
+			wantStatus:     http.StatusInternalServerError,
+			wantBodySubstr: "Imported but activation failed",
 		},
 	}
 	for _, tc := range tests {
@@ -613,8 +625,8 @@ func TestHandleScenarioImport_ActivationFailures(t *testing.T) {
 			if w.Result().StatusCode != tc.wantStatus {
 				t.Errorf("Expected %d, got %d", tc.wantStatus, w.Result().StatusCode)
 			}
-			if !strings.Contains(w.Body.String(), "Imported but activation failed") {
-				t.Errorf("Body should say the scenario was imported, got %q", w.Body.String())
+			if !strings.Contains(w.Body.String(), tc.wantBodySubstr) {
+				t.Errorf("Body should contain %q, got %q", tc.wantBodySubstr, w.Body.String())
 			}
 		})
 	}

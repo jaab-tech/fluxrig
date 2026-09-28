@@ -1,0 +1,20 @@
+[logging]
+level = "debug"
+filename = "logs/mixer.log"
+
+[api]
+port = 8099
+auth_token = "test-secret-token-do-not-use-in-prod"
+
+[snake]
+port = 4299
+url = "nats://localhost:4299"
+
+[store]
+dir = "./data"
+database_file = "flux.duckdb"
+cluster_key_file = "cluster.key"
+
+[enrollment]
+auto_adopt = true
+bootstrap_secret = "regression-bootstrap"

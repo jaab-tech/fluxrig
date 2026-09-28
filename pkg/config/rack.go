@@ -4,8 +4,6 @@
 package config
 
 import (
-	"strings"
-
 	"github.com/google/uuid"
 	"github.com/knadh/koanf/parsers/toml"
 	"github.com/knadh/koanf/providers/env"
@@ -45,6 +43,14 @@ type RackSettings struct {
 	EnrollmentInterval string `koanf:"enrollment_interval"`
 	MaxHops            int    `koanf:"max_hops"`
 	MaxPayloadSize     int    `koanf:"max_payload_size"`
+	// BootstrapSecret is the shared secret this Rack presents on its very
+	// first Hello, before it has a Passport of its own. It must match the
+	// Mixer's enrollment.bootstrap_secret, which defaults to the same
+	// "fluxrig" value so Zero-Config enrollment keeps working with neither
+	// side configured. Once enrolled, the Rack presents the per-Rack secret
+	// from its Passport instead; this value only matters for that first
+	// contact. Never serialized.
+	BootstrapSecret string `koanf:"bootstrap_secret" json:"-" cbor:"-" example:"fluxrig"`
 }
 
 // LoadRack reads configuration from a TOML file and Environment Variables.
@@ -87,6 +93,7 @@ func LoadRack(path string) (*RackConfig, error) {
 	_ = k.Set("rack.enrollment_interval", "2s")
 	_ = k.Set("rack.max_hops", 64)
 	_ = k.Set("rack.max_payload_size", 2*1024*1024) // 2MB
+	_ = k.Set("rack.bootstrap_secret", "fluxrig")
 
 	_ = k.Set("snake.url", "nats://localhost:4222")
 	_ = k.Set("snake.domain", "flux")
@@ -111,40 +118,13 @@ func LoadRack(path string) (*RackConfig, error) {
 	}
 
 	// 3. Environment Variables (FLUXRIG_ prefix)
-	err := k.Load(env.Provider("FLUXRIG_", ".", func(s string) string {
-		s = strings.TrimPrefix(s, "FLUXRIG_")
-		s = strings.ToLower(s)
-
-		if s == "trace" {
-			return "logging.trace"
-		}
-		if s == "debug" {
-			return "logging.debug"
-		}
-		if s == "disable_telemetry" {
-			return "telemetry.disabled"
-		}
-
-		if strings.HasPrefix(s, "snake_") {
-			return strings.Replace(s, "snake_", "snake.", 1)
-		}
-		if strings.HasPrefix(s, "rack_bus_") || strings.HasPrefix(s, "bus_") {
-			return "snake." + strings.TrimPrefix(strings.TrimPrefix(s, "rack_bus_"), "bus_")
-		}
-		if strings.HasPrefix(s, "rack_") {
-			return strings.Replace(s, "rack_", "rack.", 1)
-		}
-		if strings.HasPrefix(s, "logging_") {
-			return strings.Replace(s, "logging_", "logging.", 1)
-		}
-		if strings.HasPrefix(s, "base_") {
-			return strings.Replace(s, "base_", "base.", 1)
-		}
-		if strings.HasPrefix(s, "store_") {
-			return strings.Replace(s, "store_", "store.", 1)
-		}
-		return strings.ReplaceAll(s, "_", ".")
-	}), nil)
+	// rack_bus_/bus_ is a legacy alias into "snake.", from before the Snake
+	// was named that; it is not part of RackConfig's own shape, so it stays
+	// a prefix alias rather than something the struct's own tags can find.
+	err := k.Load(env.Provider("FLUXRIG_", ".", newEnvKeyMapper(RackConfig{}, map[string]string{
+		"rack_bus_": "snake",
+		"bus_":      "snake",
+	})), nil)
 
 	if err != nil {
 		return nil, err
@@ -176,7 +156,7 @@ func LoadRack(path string) (*RackConfig, error) {
 	}
 
 	var cfg RackConfig
-	if err := k.Unmarshal("", &cfg); err != nil {
+	if err := cfg.Unmarshal(k); err != nil {
 		return nil, err
 	}
 

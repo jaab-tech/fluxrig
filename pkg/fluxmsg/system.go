@@ -34,9 +34,14 @@ type HelloPayload struct {
 
 // HeartbeatPayload is sent periodically by the Rack.
 type HeartbeatPayload struct {
-	MachineID uuid.UUID      `cbor:"machine_id"`
-	Stats     map[string]any `cbor:"stats"`
-	Config    map[string]any `cbor:"config"`
+	MachineID uuid.UUID `cbor:"machine_id"`
+	// Secret is the bearer secret the Rack received in its Passport at
+	// enrollment. The Mixer rejects a heartbeat naming a MachineID it does
+	// not match: without it, any caller who learned a MachineID could forge
+	// liveness and overwrite that Rack's stats and config.
+	Secret string         `cbor:"secret"`
+	Stats  map[string]any `cbor:"stats"`
+	Config map[string]any `cbor:"config"`
 }
 
 // ToData converts the struct to a map[string]any for FluxMsg.Data.
@@ -69,7 +74,7 @@ func ParseHeartbeat(data map[string]any) (*HeartbeatPayload, error) {
 
 // HelloResponse is sent by the Mixer to the Rack.
 type HelloResponse struct {
-	Status   string            `cbor:"status"`   // active, pending, inactive
+	Status   string            `cbor:"status"`   // active, pending, inactive, denied
 	Passport []byte            `cbor:"passport"` // Null if no new passport
 	Config   map[string]string `cbor:"config"`   // Dynamic Config (Optional)
 	Message  string            `cbor:"message"`  // Human readable status message

@@ -27,10 +27,12 @@ var configCmd = &cobra.Command{
 			apiURL = "http://localhost:8090"
 		}
 
+		token := resolveAPIToken(cmd)
+
 		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "[CLI] Querying Mixer Config at %s...\n", apiURL)
 		// 1. Get Mixer Config
 		_, _ = fmt.Fprintln(cmd.OutOrStdout(), "--- Mixer Configuration ---")
-		if err := showMixerConfig(cmd.Context(), apiURL, cmd.OutOrStdout()); err != nil {
+		if err := showMixerConfig(cmd.Context(), apiURL, token, cmd.OutOrStdout()); err != nil {
 			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Warning: failed to get mixer configuration: %v\n", err)
 		}
 		_, _ = fmt.Fprintln(cmd.OutOrStdout())
@@ -38,7 +40,7 @@ var configCmd = &cobra.Command{
 		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "[CLI] Querying Racks Config at %s...\n", apiURL)
 		// 2. Get Racks Config
 		_, _ = fmt.Fprintln(cmd.OutOrStdout(), "--- Racks Configuration ---")
-		if err := showRacksConfig(cmd.Context(), apiURL, cmd.OutOrStdout()); err != nil {
+		if err := showRacksConfig(cmd.Context(), apiURL, token, cmd.OutOrStdout()); err != nil {
 			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Warning: failed to get racks configuration: %v\n", err)
 		}
 
@@ -46,10 +48,13 @@ var configCmd = &cobra.Command{
 	},
 }
 
-func showMixerConfig(ctx context.Context, apiURL string, out io.Writer) error {
+func showMixerConfig(ctx context.Context, apiURL, token string, out io.Writer) error {
 	req, err := http.NewRequestWithContext(ctx, "GET", apiURL+"/api/v1/config", nil)
 	if err != nil {
 		return err
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -73,10 +78,13 @@ func showMixerConfig(ctx context.Context, apiURL string, out io.Writer) error {
 	return enc.Encode(config)
 }
 
-func showRacksConfig(ctx context.Context, apiURL string, out io.Writer) error {
+func showRacksConfig(ctx context.Context, apiURL, token string, out io.Writer) error {
 	req, err := http.NewRequestWithContext(ctx, "GET", apiURL+"/api/v1/racks", nil)
 	if err != nil {
 		return err
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -115,5 +123,6 @@ func showRacksConfig(ctx context.Context, apiURL string, out io.Writer) error {
 
 func init() {
 	configCmd.Flags().String("api-url", "", "Mixer API URL (overrides FLUXRIG_API_URL)")
+	addAPITokenFlag(configCmd, false)
 	rootCmd.AddCommand(configCmd)
 }

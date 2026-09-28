@@ -46,16 +46,17 @@ var tailCmd = &cobra.Command{
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 
-		sub, err := b.Subscribe(subject, func(ctx context.Context, msg *fluxmsg.FluxMsg) {
+		sub, err := b.Subscribe(subject, func(ctx context.Context, msg *fluxmsg.FluxMsg) error {
 			// Extract log record from FluxMsg
 			// Telemetry logs are usually map[string]interface{} in FluxMsg.Data
 			data := msg.Data
 			if data == nil {
-				return
+				return nil
 			}
 
 			// Format and print
 			printLogRecord(data)
+			return nil
 		})
 
 		if err != nil {

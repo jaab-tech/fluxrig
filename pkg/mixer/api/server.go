@@ -34,6 +34,7 @@ import (
 	"github.com/jaab-tech/fluxrig/pkg/mixer/api/docs" // Swagger docs
 	"github.com/jaab-tech/fluxrig/pkg/pki"
 	"github.com/jaab-tech/fluxrig/pkg/registry"
+	"github.com/jaab-tech/fluxrig/pkg/security"
 	"github.com/jaab-tech/fluxrig/pkg/telemetry"
 	"github.com/jaab-tech/fluxrig/pkg/version"
 )
@@ -96,10 +97,11 @@ func NewServer(reg registry.Registry, pub message.Publisher, signer *pki.Cluster
 	}
 }
 
-func (s *Server) Start(addr string) error {
+// Handler builds the full route table wrapped in authMiddleware, so a test
+// can exercise the real request path (including auth) without binding a
+// socket. Start serves exactly this handler.
+func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-
-	// Middleware: CORS/Recovery/Logging logic can be added here
 
 	mux.HandleFunc("GET /api/v1/health", s.handleHealth)
 	mux.HandleFunc("GET /api/v1/config", s.handleConfig)
@@ -126,6 +128,59 @@ func (s *Server) Start(addr string) error {
 
 	// Swagger UI
 	mux.Handle("/swagger/", httpSwagger.WrapHandler)
+
+	return s.authMiddleware(mux)
+}
+
+// authMiddleware requires "Authorization: Bearer <api.auth_token>" on every
+// route except health. A nil Server config, or a token that fails to compare,
+// fails closed (401): the one route this must never do is serve a mutating
+// request because a check could not run.
+func (s *Server) authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/health" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if s.cfg == nil || (s.cfg.API.AuthToken == "" && !s.cfg.API.AuthDisabledDangerously) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if s.cfg.API.AuthToken == "" {
+			// auth_disabled_dangerously was set explicitly; Start already
+			// logged the warning once at startup.
+			next.ServeHTTP(w, r)
+			return
+		}
+		const prefix = "Bearer "
+		auth := r.Header.Get("Authorization")
+		if !strings.HasPrefix(auth, prefix) ||
+			!security.SecretsEqual(strings.TrimPrefix(auth, prefix), s.cfg.API.AuthToken) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// Start serves Handler() on addr. It refuses to run with no auth token
+// configured unless api.auth_disabled_dangerously says so explicitly, so an
+// operator who forgets to set a token gets a refusal to start, not a silently
+// open management API.
+func (s *Server) Start(addr string) error {
+	if s.cfg == nil {
+		return fmt.Errorf("mixer API: no config; refusing to start")
+	}
+	if s.cfg.API.AuthToken == "" {
+		if !s.cfg.API.AuthDisabledDangerously {
+			return fmt.Errorf("mixer API: api.auth_token is not set; set it, or set " +
+				"api.auth_disabled_dangerously = true to run with no auth (not recommended)")
+		}
+		slog.Warn("Mixer management API starting with authentication disabled",
+			"setting", "api.auth_disabled_dangerously")
+	}
+
+	handler := s.Handler()
 
 	// Log using global/standard logger which is slog at this point
 	slog.Info("Mixer Control Plane listening", "addr", addr)
@@ -164,7 +219,7 @@ func (s *Server) Start(addr string) error {
 	readTimeout, _ := time.ParseDuration(s.cfg.API.ReadHeaderTimeout)
 	server := &http.Server{
 		Addr:              addr,
-		Handler:           mux,
+		Handler:           handler,
 		ReadHeaderTimeout: readTimeout,
 	}
 
@@ -574,6 +629,7 @@ func (s *Server) handleEntityStats(w http.ResponseWriter, r *http.Request) {
 // @Param activate query boolean false "Immediately activate after import"
 // @Param body body registry.Scenario true "Scenario YAML"
 // @Success 200 {object} ScenarioImportResponse
+// @Success 202 {string} string "Imported and active, but not yet delivered: no target Rack was reachable"
 // @Failure 400 {string} string "The scenario could not be read or failed validation"
 // @Failure 409 {string} string "Imported, but not activated: a gear deploys to a name that is not an active Rack"
 // @Failure 500 {string} string "Imported, but activation failed"
@@ -609,6 +665,15 @@ func (s *Server) handleScenarioImport(w http.ResponseWriter, r *http.Request) {
 	// Activate if requested and not dry-run
 	if shouldActivate && !dryRun {
 		if err := s.scenarioCtrl.Activate(r.Context(), name); err != nil {
+			if errors.Is(err, controller.ErrNoRackReached) {
+				// The scenario is active; delivery to a still-disconnected Rack
+				// is pending, not failed, and a Rack that enrolls afterwards
+				// still gets it. Neither a client nor a server fault.
+				slog.Info("Activated with no Rack currently reachable", "scenario", name, "detail", err)
+				http.Error(w, fmt.Sprintf("Imported and active, but not yet delivered: %v", err), http.StatusAccepted)
+				return
+			}
+
 			// A deploy target that is not an active Rack is a state the caller can
 			// fix by enrolling it, not a fault of the Mixer.
 			status := http.StatusInternalServerError

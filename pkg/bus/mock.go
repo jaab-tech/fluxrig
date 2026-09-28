@@ -58,7 +58,7 @@ func (m *MockBus) Publish(ctx context.Context, subject string, msg *fluxmsg.Flux
 	// Direct Loopback for testing handlers
 	// 1. Exact Match
 	if handler, ok := handlers[subject]; ok {
-		go handler(ctx, msg)
+		go func() { _ = handler(ctx, msg) }()
 		return nil
 	}
 
@@ -67,7 +67,7 @@ func (m *MockBus) Publish(ctx context.Context, subject string, msg *fluxmsg.Flux
 		if len(sub) > 1 && sub[len(sub)-1] == '>' {
 			prefix := sub[:len(sub)-1]
 			if len(subject) >= len(prefix) && subject[:len(prefix)] == prefix {
-				go handler(ctx, msg)
+				go func() { _ = handler(ctx, msg) }()
 			}
 		}
 	}

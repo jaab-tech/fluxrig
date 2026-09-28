@@ -1,0 +1,10 @@
+[store]
+dir = "./data"
+state_file = "state.flux"
+
+[rack]
+name = "rack-1"
+heartbeat_interval = "1s"
+
+[rack.bus]
+url = "nats://localhost:4223"

@@ -5,7 +5,9 @@ package duckdb
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,15 +23,19 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/jaab-tech/fluxrig/pkg/registry"
+	"github.com/jaab-tech/fluxrig/pkg/security"
 )
 
 // Store manages the DuckDB connection and implements registry.Registry.
 type Store struct {
-	db        *sql.DB
-	dataDir   string       // Directory containing the DB file and telemetry
-	log       *slog.Logger // Logger for store operations
-	mu        sync.RWMutex
-	autoAdopt bool
+	db              *sql.DB
+	dataDir         string       // Directory containing the DB file and telemetry
+	isMemory        bool         // true for an ephemeral :memory: store (nothing to lock across processes)
+	log             *slog.Logger // Logger for store operations
+	mu              sync.RWMutex
+	migrateMu       sync.Mutex // guards Migrate's version-check-then-apply sequence
+	autoAdopt       bool
+	bootstrapSecret string
 }
 
 // NewStore opens a DuckDB database file.
@@ -49,7 +55,7 @@ func NewStore(log *slog.Logger, path string) (*Store, error) {
 	if path != "" && path != ":memory:" {
 		dataDir = filepath.Dir(path)
 	}
-	return &Store{db: db, dataDir: dataDir, log: log.With("component", "STORE")}, nil
+	return &Store{db: db, dataDir: dataDir, isMemory: dsn == ":memory:", log: log.With("component", "STORE")}, nil
 }
 
 func (s *Store) Close() error {
@@ -65,6 +71,25 @@ func (s *Store) SetAutoAdopt(enabled bool) {
 	defer s.mu.Unlock()
 	s.autoAdopt = enabled
 	s.log.Info("SetAutoAdopt called", "enabled", enabled)
+}
+
+// SetBootstrapSecret sets the shared secret a first-ever Hello for a MachineID
+// must present before RegisterEntity creates a row for it. Nothing previously
+// compared this anywhere, so any MachineID could self-provision an identity.
+func (s *Store) SetBootstrapSecret(secret string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.bootstrapSecret = secret
+}
+
+// generateSecret returns a fresh, random per-identity bearer secret: 32 bytes
+// of CSPRNG output, hex-encoded.
+func generateSecret() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
 
 func (s *Store) Wipe(ctx context.Context) error {
@@ -119,8 +144,11 @@ func (s *Store) RegisterEntity(ctx context.Context, typeID uint8, machineID uuid
 	}
 
 	if err == nil {
-		// Entity exists with THIS MachineID, verify secret
-		if existingSecret != "" && existingSecret != secret {
+		// Entity exists with THIS MachineID, verify secret. An empty incoming
+		// secret is rejected too, not only a mismatched one: an empty secret
+		// proves nothing, and a row whose stored secret happens to be empty
+		// (a Hello that never set one) must not become a permanent bypass.
+		if !security.SecretsEqual(existingSecret, secret) {
 			return nil, errors.New("identity mismatch: incorrect secret for existing MachineID")
 		}
 		// Update (Preserve approved name from DB, don't overwrite with handshake name)
@@ -144,7 +172,7 @@ func (s *Store) RegisterEntity(ctx context.Context, typeID uint8, machineID uuid
 			errName := s.db.QueryRowContext(ctx, "SELECT secret, machine_id, type_id FROM registry WHERE name = ?", name).Scan(&conflictSecret, &conflictMachineID, &conflictTypeID)
 			if errName == nil {
 				// Name exists. Verify if it's the SAME type and secret matches for adoption.
-				if conflictTypeID == typeID && conflictSecret != "" && conflictSecret == secret {
+				if conflictTypeID == typeID && security.SecretsEqual(conflictSecret, secret) {
 					s.log.Info("Adopting existing name via Secret match", "name", name, "type_id", typeID, "old_machine_id", conflictMachineID, "new_machine_id", machineID)
 					// Update existing record with NEW machineID (Adoption)
 					_, err = s.db.ExecContext(ctx, `
@@ -172,7 +200,17 @@ func (s *Store) RegisterEntity(ctx context.Context, typeID uint8, machineID uuid
 			}
 		}
 
-		// Fresh Registration
+		// Fresh Registration. A MachineID never seen before must present the
+		// bootstrap secret: nothing compared it before this, so any caller who
+		// could reach the enrollment path could self-provision an identity.
+		s.mu.RLock()
+		bootstrapSecret := s.bootstrapSecret
+		s.mu.RUnlock()
+		if !security.SecretsEqual(secret, bootstrapSecret) {
+			s.log.Warn("Registration Denied: bootstrap secret mismatch", "name", name, "machine_id", machineID)
+			return nil, registry.ErrBootstrapSecretMismatch
+		}
+
 		if machineID == uuid.Nil {
 			machineID, _ = uuid.NewV7()
 			s.log.Info("Self-provisioning new MachineID", "name", name, "id", machineID)
@@ -183,10 +221,21 @@ func (s *Store) RegisterEntity(ctx context.Context, typeID uint8, machineID uuid
 		copy(eid[9:13], machineID[12:16]) // MachineID hint
 		eid[13] = typeID                  // EntityType
 
+		// The bootstrap secret only gates entry: every zero-config caller
+		// presents the same one, so storing it as this row's own secret would
+		// let a second caller "adopt" the first one's name later just by
+		// knowing the same public default. A freshly generated, unique secret
+		// becomes this identity's actual bearer credential from here on,
+		// returned to the caller in its Passport.
+		issuedSecret, errGen := generateSecret()
+		if errGen != nil {
+			return nil, fmt.Errorf("failed to issue a secret for the new registration: %w", errGen)
+		}
+
 		_, err = s.db.ExecContext(ctx, `
 			INSERT INTO registry (entity_id, type_id, machine_id, name, status, version, ip, port, secret, first_seen, last_seen, config, attributes, mixer_id)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`, eid, typeID, machineID, name, status, version, ip, port, secret, now, now, string(configJSON), string(attrsJSON), mixerID)
+		`, eid, typeID, machineID, name, status, version, ip, port, issuedSecret, now, now, string(configJSON), string(attrsJSON), mixerID)
 	}
 
 	if err != nil {
@@ -595,8 +644,14 @@ func (s *Store) ActivateRack(ctx context.Context, rackName string) error {
 	return s.mapError(err)
 }
 
+// GetRackByName only matches an active Rack. Scenario registration (its one
+// caller, via waitForRack) must never see a pending Rack as found: doing so
+// used to let scenario import promote it to active as a side effect, well
+// outside the approval flow. A pending Rack now reads exactly like a Rack
+// that has not enrolled yet, and the caller's own retry loop already handles
+// that by waiting up to its timeout.
 func (s *Store) GetRackByName(ctx context.Context, rackName string) (machineID uuid.UUID, err error) {
-	err = s.db.QueryRowContext(ctx, `SELECT machine_id FROM registry WHERE name = ? AND type_id = 4`, rackName).Scan(&machineID)
+	err = s.db.QueryRowContext(ctx, `SELECT machine_id FROM registry WHERE name = ? AND type_id = 4 AND status = 'active'`, rackName).Scan(&machineID)
 	return machineID, s.mapError(err)
 }
 
@@ -620,11 +675,14 @@ func (s *Store) FlushTelemetry(ctx context.Context, dataDir string) error {
 		_ = os.MkdirAll(dir, 0750)
 		path := filepath.Join(dir, fmt.Sprintf("%s_%d.parquet", dirName, ts.UnixNano()))
 		var count int
+		// table is a key of the tables map above, never external input: an
+		// identifier position, which a placeholder cannot fill in DuckDB or
+		// any SQL dialect. The file path is a value, and is bound as one.
 		_ = tx.QueryRowContext(ctx, fmt.Sprintf("SELECT count(*) FROM %s", table)).Scan(&count)
 		if count == 0 {
 			continue
 		}
-		if _, errExport := tx.ExecContext(ctx, fmt.Sprintf("COPY (SELECT * FROM %s) TO '%s' (FORMAT 'parquet', COMPRESSION 'zstd')", table, path)); errExport != nil {
+		if _, errExport := tx.ExecContext(ctx, fmt.Sprintf("COPY (SELECT * FROM %s) TO ? (FORMAT 'parquet', COMPRESSION 'zstd')", table), path); errExport != nil {
 			return errExport
 		}
 		if _, errTrunc := tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s", table)); errTrunc != nil {
@@ -646,9 +704,14 @@ func (s *Store) FlushArchiverBuffer(ctx context.Context, dataDir string) error {
 		return err
 	}
 	defer func() { _ = rows.Close() }()
-	var wireIDs []string
+	// Scanned as uuid.UUID, not string: this driver returns a UUID column's
+	// raw 16 bytes for a *string destination, not its canonical hyphenated
+	// form. Formatted straight into the old query text, those raw bytes
+	// produced a WHERE clause that could never match the row it came from,
+	// so a wire's archived messages were never actually being flushed by id.
+	var wireIDs []uuid.UUID
 	for rows.Next() {
-		var wid string
+		var wid uuid.UUID
 		if errScan := rows.Scan(&wid); errScan == nil {
 			wireIDs = append(wireIDs, wid)
 		}
@@ -657,10 +720,17 @@ func (s *Store) FlushArchiverBuffer(ctx context.Context, dataDir string) error {
 		return errRows
 	}
 	for _, wid := range wireIDs {
-		dir := filepath.Join(dataDir, "messages", wid, ts.Format("2006/01/02/15"))
+		dir := filepath.Join(dataDir, "messages", wid.String(), ts.Format("2006/01/02/15"))
 		_ = os.MkdirAll(dir, 0750)
 		path := filepath.Join(dir, fmt.Sprintf("messages_%s_%d.parquet", wid, ts.UnixNano()))
-		if _, errExport := tx.ExecContext(ctx, fmt.Sprintf("COPY (SELECT ts, flux_id, trace_id, subject, payload, meta FROM archiver_buffer WHERE wire_id = '%s') TO '%s' (FORMAT 'parquet', COMPRESSION 'zstd')", wid, path)); errExport != nil {
+		// wire_id and the file path are both values, bound as parameters
+		// rather than formatted into the query text. Named, not positional:
+		// a COPY with two "?" placeholders spanning the subquery and the TO
+		// clause binds them out of their textual order in this driver;
+		// $name avoids that ambiguity entirely.
+		if _, errExport := tx.ExecContext(ctx,
+			"COPY (SELECT ts, flux_id, trace_id, subject, payload, meta FROM archiver_buffer WHERE wire_id = $wire_id) TO $path (FORMAT 'parquet', COMPRESSION 'zstd')",
+			sql.Named("wire_id", wid), sql.Named("path", path)); errExport != nil {
 			return errExport
 		}
 	}

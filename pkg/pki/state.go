@@ -4,9 +4,11 @@
 package pki
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -123,8 +125,39 @@ type RackState struct {
 	ScenarioVer string            `cbor:"scenario_ver"` // Scenario version for quick check
 }
 
+// ErrPinMismatch means the envelope's claimed Mixer key does not match the
+// pinned trust anchor. This differs from a corrupt or tampered envelope,
+// such as a bad signature or a bad payload. A pin mismatch on a
+// well-formed, correctly-signed envelope looks like a Mixer key rotation.
+// It also looks like an attacker's own key. This file cannot distinguish
+// the two cases. An operator must decide whether to accept the new key.
+// See PinnedKeyPath.
+var ErrPinMismatch = errors.New("mixer public key does not match the pinned trust anchor")
+
 // Verify checks the envelope's signature using the embedded Public Key.
+//
+// This trusts whatever Mixer key the payload itself claims: an envelope that
+// carries its own key and a signature made with the matching private key
+// verifies here regardless of who wrote it. That makes Verify safe only for
+// a first, trust-on-first-use acceptance (initial enrollment) or for
+// diagnostics on a file whose origin is not being trusted for anything.
+// Every other caller must use VerifyPinned against a key it obtained
+// independently of this payload.
 func (e *StateEnvelope) Verify() (*RackState, error) {
+	return e.VerifyPinned(nil)
+}
+
+// VerifyPinned checks the envelope's signature, and, when pinned is not
+// empty, requires the payload's embedded Mixer key to equal it before the
+// signature is even checked. This is what keeps a locally pinned trust
+// anchor meaningful: without it, an envelope supplies both the key and the
+// signature that key must match, so anyone who can write an envelope can
+// always make it verify, no matter which private key they hold.
+//
+// Pass nil for pinned only on the first envelope ever accepted for a given
+// identity (trust-on-first-use); the caller is expected to persist the
+// returned state's MixerPublic as the pin for every verification after that.
+func (e *StateEnvelope) VerifyPinned(pinned ed25519.PublicKey) (*RackState, error) {
 	// 1. Unmarshal Payload to get Public Key
 	var state RackState
 	if err := cbor.Unmarshal(e.Payload, &state); err != nil {
@@ -135,12 +168,48 @@ func (e *StateEnvelope) Verify() (*RackState, error) {
 		return nil, fmt.Errorf("invalid mixer public key in state")
 	}
 
-	// 2. Verify Signature
+	// 2. The payload's own claimed key must match the pinned trust anchor,
+	// not just itself.
+	if len(pinned) > 0 && !bytes.Equal(pinned, state.MixerPublic) {
+		return nil, fmt.Errorf("%w: state is untrusted", ErrPinMismatch)
+	}
+
+	// 3. Verify Signature
 	if !ed25519.Verify(state.MixerPublic, e.Payload, e.Signature) {
 		return nil, fmt.Errorf("signature verification failed! state is tampered")
 	}
 
 	return &state, nil
+}
+
+// PinnedKeyPath returns the sidecar path that holds the Mixer public key
+// pinned for the passport at statePath, independent of the passport payload
+// itself so a rewritten passport cannot also supply the key it is checked
+// against.
+func PinnedKeyPath(statePath string) string {
+	return statePath + ".pub"
+}
+
+// LoadPinnedMixerKey reads the Mixer public key previously pinned for
+// statePath. It returns (nil, nil) when nothing has been pinned yet, which
+// is expected before the first passport a Rack ever accepts.
+func LoadPinnedMixerKey(statePath string) (ed25519.PublicKey, error) {
+	data, err := os.ReadFile(filepath.Clean(PinnedKeyPath(statePath)))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if len(data) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("invalid pinned mixer key length: %d", len(data))
+	}
+	return ed25519.PublicKey(data), nil
+}
+
+// PinMixerKey persists pub as the trust anchor for statePath.
+func PinMixerKey(statePath string, pub ed25519.PublicKey) error {
+	return os.WriteFile(PinnedKeyPath(statePath), pub, 0600)
 }
 
 // VerifyMixer checks the envelope's signature using a provided Cluster Public Key.

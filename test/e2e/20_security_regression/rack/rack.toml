@@ -1,0 +1,15 @@
+[logging]
+level = "debug"
+filename = "logs/rack.log"
+
+[store]
+dir = "./data"
+state_file = "state.flux"
+
+[rack]
+name = "rack-secreg-01"
+heartbeat_interval = "1s"
+bootstrap_secret = "regression-bootstrap"
+
+[rack.bus]
+url = "nats://localhost:4299"

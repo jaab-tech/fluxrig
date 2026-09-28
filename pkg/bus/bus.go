@@ -70,9 +70,13 @@ type Bus interface {
 	Close()
 }
 
-// Handler is the function signature for processing incoming messages.
-// The context contains tracing information extracted from the message.
-type Handler func(ctx context.Context, msg *fluxmsg.FluxMsg)
+// Handler is the function signature for processing incoming messages. The
+// context contains tracing information extracted from the message. A guaranteed
+// subscription (Subscribe, SubscribeDurable) acks only once the handler returns
+// nil, and Naks on a non-nil error so JetStream redelivers instead of the
+// message vanishing on a failure that happened after it was already
+// acknowledged.
+type Handler func(ctx context.Context, msg *fluxmsg.FluxMsg) error
 
 // RawHandler is the function signature for processing raw incoming messages.
 type RawHandler func(ctx context.Context, subject string, data []byte)

@@ -132,7 +132,12 @@ var wasmListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List Wasm modules in the Mixer catalog",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		resp, err := http.Get("http://localhost:8090/api/v1/wasm/catalog")
+		apiURL, _ := cmd.Flags().GetString("api-url")
+		req, err := newAPIRequest(cmd, http.MethodGet, apiURL+"/api/v1/wasm/catalog", nil)
+		if err != nil {
+			return err
+		}
+		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			return err
 		}
@@ -161,4 +166,7 @@ func init() {
 	wasmCmd.AddCommand(wasmListCmd)
 
 	wasmImportCmd.Flags().Bool("allow-unsigned", false, "Allow import of Wasm modules without a trusted Vendor signature")
+
+	wasmListCmd.Flags().String("api-url", "http://localhost:8090", "URL of the Mixer API")
+	addAPITokenFlag(wasmListCmd, false)
 }

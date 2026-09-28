@@ -40,6 +40,13 @@ var unsubscribeWait = 5 * time.Second
 // for the whole send timeout: the consumer is not keeping up.
 var ErrLaneFull = errors.New("hot lane queue is full")
 
+// ErrLaneClosed is returned to the emitting gear when the subscription was
+// unsubscribed while a message was still on its way to the queue: it was not
+// delivered, unlike what returning nil here used to claim. publish counts every
+// nil enqueue as delivered, so a bare nil here made an emitter's message count
+// as successfully sent to a wire that was actually torn down mid-send.
+var ErrLaneClosed = errors.New("hot lane subscription closed before delivery")
+
 // localLane is the hot lane: it carries the messages between the gears of one Rack
 // through memory, with no bus, no serialization to a stream and no disk.
 //
@@ -193,7 +200,12 @@ func (s *laneSub) deliver(item laneItem) {
 			s.lane.log().Error("hot lane: handler panic recovered", "subject", s.subject, "panic", r)
 		}
 	}()
-	s.handler(item.ctx, &msg)
+	// The hot lane has no redelivery: a message is handed to the handler at most
+	// once, so unlike the bus's guaranteed lanes there is nothing to Nak here.
+	// Logging is the only way this failure would otherwise be seen.
+	if err := s.handler(item.ctx, &msg); err != nil {
+		s.lane.log().Error("hot lane: handler failed", "subject", s.subject, "error", err)
+	}
 }
 
 // publish delivers msg to every subscriber of subject and reports how many there
@@ -254,7 +266,7 @@ func (s *laneSub) enqueue(ctx context.Context, item laneItem, timeout time.Durat
 		return nil
 	case <-s.done:
 		s.lane.pending.Add(-1)
-		return nil // the wire was taken down while the message was on its way
+		return ErrLaneClosed
 	case <-timer.C:
 		s.lane.pending.Add(-1)
 		return fmt.Errorf("%w: %s, nobody took a message within %s", ErrLaneFull, s.subject, timeout)

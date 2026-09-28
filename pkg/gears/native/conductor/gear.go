@@ -14,7 +14,8 @@
 //	out_response matched, restored responses toward the origin
 //	error        abnormal outcomes: the ORIGINAL message annotated with
 //	             error.reason (no_route | no_destination | no_key | timeout |
-//	             unmatched_reply); a downstream gear authors any decline.
+//	             unmatched_reply | invalid_origin); a downstream gear authors
+//	             any decline.
 //
 // Port names use underscores, never dots: a dot in a wire endpoint separates
 // rack / gear / port levels (ADR 0043), so a port name must not contain one.
@@ -25,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -42,6 +44,7 @@ const (
 	reasonNoKey          = "no_key"
 	reasonTimeout        = "timeout"
 	reasonUnmatchedReply = "unmatched_reply"
+	reasonInvalidOrigin  = "invalid_origin"
 )
 
 const (
@@ -55,10 +58,6 @@ const (
 	metaOrigin = "conductor.origin"
 )
 
-// keySep joins correlation-key parts unambiguously (unit separator, a byte
-// that cannot appear in structured field values of the supported dialects).
-const keySep = "\x1f"
-
 // maxConcurrentExpiryEmits caps how many timed-out tickets may be published on
 // the error port at once. valet fires each expiry on its own timer goroutine,
 // and the emit is a blocking bus publish; a scheme outage can time out every
@@ -66,6 +65,14 @@ const keySep = "\x1f"
 // burst of concurrent blocking publishes. Excess expiry goroutines park on the
 // semaphore (cheap) instead of all hitting the bus together.
 const maxConcurrentExpiryEmits = 32
+
+// originPattern bounds a peer Conductor's origin stamp to characters safe as
+// part of an output port name. out_response_<origin> becomes a literal wire
+// subject segment (flux.msg.<rack>.<gear>.<port>), and a dot there would be
+// read as a rack/gear/port separator instead of part of the port name itself
+// (see the package doc comment: "a port name must not contain one"). Letters,
+// digits, hyphen and underscore only, matched in full.
+var originPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 
 // Gear is the conductor. It implements sdk.PortedGear: requests arrive on
 // "in", replies on "in_reply", and every result leaves through the emitter.
@@ -78,6 +85,13 @@ type Gear struct {
 	parkFields []string
 	routes     []*route
 	engine     *valet.Engine
+
+	// knownOrigins is the configured allowlist of peer Conductor names this
+	// gear will route a reply back to. Empty (unconfigured) keeps the
+	// pre-allowlist behavior of accepting any origin that passes the format
+	// check alone; a scenario opts into the stricter check by naming its
+	// actual peers.
+	knownOrigins map[string]bool
 
 	// availability reports whether an output port may receive traffic.
 	// Ports whose terminus is a local I/O gear follow that gear's link-state
@@ -121,6 +135,18 @@ func (g *Gear) Init(ctx sdk.GearContext) error {
 	// Optional mesh identity: enables peer response routing.
 	if o, ok := cfg["origin"].(string); ok {
 		g.origin = o
+	}
+
+	// Optional allowlist of peer Conductor names this gear will route a
+	// reply back to, by the origin stamp a request arrived with. Left
+	// unconfigured, only the format check in responsePortFor applies.
+	if rawPeers, ok := cfg["known_origins"].([]any); ok {
+		g.knownOrigins = make(map[string]bool, len(rawPeers))
+		for _, p := range rawPeers {
+			if s, ok := p.(string); ok && s != "" {
+				g.knownOrigins[s] = true
+			}
+		}
 	}
 
 	// Correlation key tuple (never a single wrapping counter).
@@ -329,7 +355,19 @@ func (g *Gear) handleRequest(ctx context.Context, msg *fluxmsg.FluxMsg) error {
 			}
 			msg.Metadata[metaOrigin] = g.origin
 		}
-		return g.emitter.Emit(dest, msg)
+		if errEmit := g.emitter.Emit(dest, msg); errEmit != nil {
+			// Park already committed the ticket, but this send never went
+			// out. Release it: left open, a redelivery of this same request
+			// would hit AttachedOpen below and be absorbed as a harmless
+			// duplicate, silently dropping a request nothing ever sent until
+			// its TTL finally expires it.
+			if errRelease := g.engine.Release(ctx, key); errRelease != nil {
+				g.logger.Error("failed to release ticket after a failed emit",
+					"key", key, "error", errRelease)
+			}
+			return fmt.Errorf("conductor: emit: %w", errEmit)
+		}
+		return nil
 	case valet.AttachedOpen:
 		// Retransmission of an in-flight request: absorb it, the one reply
 		// answers both attempts.
@@ -341,7 +379,13 @@ func (g *Gear) handleRequest(ctx context.Context, msg *fluxmsg.FluxMsg) error {
 		// same return path. Cloning keeps concurrent replays from sharing one
 		// message and never mutates the retained outcome.
 		g.logger.Debug("retained outcome replayed", "key", key, "route", rt.name)
-		return g.emitter.Emit(g.responsePortFor(ticket), g.finishResponse(ticket, ticket.Outcome))
+		port, errPort := g.responsePortFor(ticket)
+		if errPort != nil {
+			g.logger.Warn("rejecting reply on replay: invalid origin", "key", key, "error", errPort)
+			g.emitError(msg, reasonInvalidOrigin)
+			return nil
+		}
+		return g.emitter.Emit(port, g.finishResponse(ticket, ticket.Outcome))
 	default:
 		return fmt.Errorf("conductor: unexpected park result %v", res)
 	}
@@ -364,12 +408,25 @@ func (g *Gear) handleReply(ctx context.Context, msg *fluxmsg.FluxMsg) error {
 		return fmt.Errorf("conductor: redeem: %w", err)
 	}
 
+	// Check the origin before building anything from the ticket's return
+	// context. That context carries the peer-supplied origin stamp,
+	// unvalidated (see responsePortFor). finishResponse copies the whole
+	// context into the outbound message. The replay branch below already
+	// validates first. This function now matches it, so a rejected reply
+	// never gets a response built from data that failed validation.
+	port, errPort := g.responsePortFor(ticket)
+	if errPort != nil {
+		g.logger.Warn("rejecting reply: invalid origin", "key", key, "error", errPort)
+		g.emitError(msg, reasonInvalidOrigin)
+		return nil
+	}
+
 	// Build the response on an independent clone: the engine retained `msg`
 	// as the ticket outcome, so mutating it here would race a concurrent
 	// replay reading that outcome. The clone is what leaves on the wire; the
 	// retained outcome stays immutable after Redeem.
 	resp := g.finishResponse(ticket, msg)
-	return g.emitter.Emit(g.responsePortFor(ticket), resp)
+	return g.emitter.Emit(port, resp)
 }
 
 // finishResponse produces the response to return home for a redeemed ticket:
@@ -394,11 +451,28 @@ func (g *Gear) finishResponse(t *valet.Ticket, base *fluxmsg.FluxMsg) *fluxmsg.F
 // off by another conductor (their origin stamp arrived in-band and was parked
 // in the return context) go home on out_response_<origin>; everything else on
 // the plain response port.
-func (g *Gear) responsePortFor(t *valet.Ticket) string {
-	if origin := t.ReturnCtx[metaOrigin]; origin != "" && origin != g.origin {
-		return portResponse + "_" + origin
+//
+// The origin stamp is caller-controlled: it arrives in the request's own
+// metadata, set by whoever sent it, never authenticated. Building a port name
+// from it unfiltered let a malicious or misconfigured peer choose any string
+// it liked as a literal wire subject segment (flux.msg.<rack>.<gear>.<port>) --
+// a routing decision the sender should never get to make -- and, since ports
+// are lazily created for any name seen, an unbounded source of new ones. An
+// origin must now match a safe identifier format, and, when known_origins is
+// configured, name an actual expected peer; anything else is an error, not a
+// routing decision.
+func (g *Gear) responsePortFor(t *valet.Ticket) (string, error) {
+	origin := t.ReturnCtx[metaOrigin]
+	if origin == "" || origin == g.origin {
+		return portResponse, nil
 	}
-	return portResponse
+	if !originPattern.MatchString(origin) {
+		return "", fmt.Errorf("origin %q is not a valid peer identifier", origin)
+	}
+	if len(g.knownOrigins) > 0 && !g.knownOrigins[origin] {
+		return "", fmt.Errorf("origin %q is not a known peer", origin)
+	}
+	return portResponse + "_" + origin, nil
 }
 
 // onExpire surfaces a timed-out ticket on the error port: the original
@@ -442,9 +516,9 @@ func (g *Gear) buildKey(msg *fluxmsg.FluxMsg) (string, error) {
 		if !ok {
 			return "", fmt.Errorf("conductor: correlation field %q missing", f)
 		}
-		parts = append(parts, fieldString(v))
+		parts = append(parts, sdk.FieldToKeyPart(v))
 	}
-	return strings.Join(parts, keySep), nil
+	return sdk.JoinKeys(parts...), nil
 }
 
 func (g *Gear) matchRoute(msg *fluxmsg.FluxMsg) *route {

@@ -143,22 +143,22 @@ install: build ## Install binaries to $GOPATH/bin
 verify: build ## Run quick E2E verification script
 	@./test/debug_e2e.sh
 
-regression: build ## Run full E2E regression suite (Unified Runner)
+regression: build ## Run full E2E regression suite (Consolidated Runner)
 	@echo "--------------------------------------------------"
 # The suites shell out to three tools. Without them they fail on their own terms:
 # a missing duckdb reports "Rack not found in DB snapshot", which reads as a Rack
 # that never registered rather than as a missing tool. Say what is absent first.
 	@missing=""; \
-	command -v duckdb  >/dev/null || missing="$$missing\n  duckdb   reads the Mixer store        (01_simple, 02_telemetry, 03_registry, 10_iso8583)  https://duckdb.org/docs/installation/"; \
+	command -v duckdb  >/dev/null || missing="$$missing\n  duckdb   reads the Mixer store        (group_a, group_b, segments)                       https://duckdb.org/docs/installation/"; \
 	command -v zig     >/dev/null || missing="$$missing\n  zig      builds the Wasm payload      (12_wasm_polyglot)                                https://ziglang.org/download/"; \
-	command -v tshark  >/dev/null || missing="$$missing\n  tshark   replays the PCAP samples     (10_iso8583)                                      apt install tshark"; \
+	command -v tshark  >/dev/null || missing="$$missing\n  tshark   replays the PCAP samples     (group_a's ISO 8583 phases)                        apt install tshark"; \
 	if [ -n "$$missing" ]; then \
 		echo "Missing prerequisites for the regression suite:"; \
 		printf "$$missing\n"; \
 		exit 1; \
 	fi
-	@echo "Running Regression Suite (Unified)..."
-	@test/e2e/run_all.sh
+	@echo "Running Regression Suite (Consolidated)..."
+	@test/e2e/run_consolidated.sh
 
 clean: ## Remove local build artifacts (Fast)
 	@echo "Cleaning local artifacts..."

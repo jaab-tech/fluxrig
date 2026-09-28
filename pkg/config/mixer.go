@@ -4,8 +4,6 @@
 package config
 
 import (
-	"strings"
-
 	"github.com/knadh/koanf/parsers/toml"
 	"github.com/knadh/koanf/providers/env"
 	"github.com/knadh/koanf/providers/file"
@@ -49,8 +47,11 @@ type EnrollmentConfig struct {
 	// If false (default), new Racks start as 'pending'.
 	AutoAdopt bool `koanf:"auto_adopt" example:"false"`
 	// BootstrapSecret is the shared secret used for zero-config enrollment and identity adoption.
-	// Defaults to 'fluxrig' if not specified.
-	BootstrapSecret string `koanf:"bootstrap_secret" example:"fluxrig"`
+	// Defaults to 'fluxrig' if not specified. Never serialized: handleConfig
+	// encodes this struct with no json tags elsewhere in it, which means the
+	// default (no-tag) behavior would otherwise print it under its Go field
+	// name in the API response.
+	BootstrapSecret string `koanf:"bootstrap_secret" json:"-" cbor:"-" example:"fluxrig"`
 }
 
 // ObservabilityConfig controls the global observability tier.
@@ -98,6 +99,14 @@ type ApiConfig struct {
 	// listening, rather than the success a bare, unconfirmed publish would
 	// have reported.
 	ControlConfirmTimeout string `koanf:"control_confirm_timeout" example:"2s"`
+	// AuthToken gates every management-API route except health. A request
+	// must send it as "Authorization: Bearer <token>". Never serialized.
+	AuthToken string `koanf:"auth_token" json:"-" cbor:"-" example:""`
+	// AuthDisabledDangerously must be set explicitly to start the Mixer with
+	// no AuthToken configured. Without either, Start refuses to run: silently
+	// serving the management API unauthenticated is the exact failure mode
+	// this field exists to require an explicit, named opt-out from.
+	AuthDisabledDangerously bool `koanf:"auth_disabled_dangerously" example:"false"`
 }
 
 // LoadMixer reads configuration from a TOML file and Environment Variables.
@@ -127,6 +136,8 @@ func LoadMixer(path string) (*MixerConfig, error) {
 	_ = k.Set("api.port", 8090)
 	_ = k.Set("api.read_header_timeout", "3s")
 	_ = k.Set("api.control_confirm_timeout", "2s")
+	_ = k.Set("api.auth_token", "")
+	_ = k.Set("api.auth_disabled_dangerously", false)
 
 	// Defaults: Snake
 	_ = k.Set("snake.url", "nats://localhost:4222")
@@ -139,6 +150,14 @@ func LoadMixer(path string) (*MixerConfig, error) {
 	_ = k.Set("snake.store_cipher", "chacha")
 	_ = k.Set("snake.stream_max_age", "24h")
 	_ = k.Set("snake.stream_max_bytes", 1073741824)
+	_ = k.Set("snake.allow_non_tls", false)
+	_ = k.Set("snake.tls_verify", false)
+	// kv_max_bytes matches stream_max_bytes; kv_max_value_size matches the
+	// embedded NATS server's own default max payload (it does not raise it),
+	// so the value is a real ceiling rather than an unenforceable number.
+	_ = k.Set("snake.kv_max_bytes", 1073741824)
+	_ = k.Set("snake.kv_max_value_size", 1048576)
+	_ = k.Set("snake.kv_ttl", "0s")
 
 	// Defaults: Telemetry (Self-Monitoring)
 	_ = k.Set("telemetry.service_name", "flux.mixer")
@@ -168,31 +187,14 @@ func LoadMixer(path string) (*MixerConfig, error) {
 	}
 
 	// 3. Environment Variables
-	err := k.Load(env.Provider("FLUXRIG_", ".", func(s string) string {
-		s = strings.TrimPrefix(s, "FLUXRIG_")
-		s = strings.ToLower(s)
-
-		if s == "trace" {
-			return "logging.trace"
-		}
-		if s == "debug" {
-			return "logging.debug"
-		}
-		if s == "disable_telemetry" {
-			return "telemetry.disabled"
-		}
-
-		// Map BUS to SNAKE for consistency if needed, but here we just use snake.
-		s = strings.ReplaceAll(s, "_", ".")
-		return s
-	}), nil)
+	err := k.Load(env.Provider("FLUXRIG_", ".", newEnvKeyMapper(MixerConfig{}, nil)), nil)
 
 	if err != nil {
 		return nil, err
 	}
 
 	var cfg MixerConfig
-	if err := k.Unmarshal("", &cfg); err != nil {
+	if err := cfg.Unmarshal(k); err != nil {
 		return nil, err
 	}
 

@@ -245,3 +245,57 @@ func TestClusterKey_MixerState(t *testing.T) {
 		t.Errorf("LoadMixerState ID mismatch")
 	}
 }
+
+// VerifyPinned must reject an envelope whose embedded key does not match the
+// pinned trust anchor, even when the envelope is internally self-consistent
+// (its own embedded key matches its own signature). Verify (no pin) accepts
+// that same envelope, which is exactly why trust-critical callers must not
+// use it once a trust anchor exists.
+func TestStateEnvelope_VerifyPinned_RejectsAKeyThePayloadSuppliesItself(t *testing.T) {
+	realMixer, _ := GenerateClusterKey()
+	realState := &RackState{Name: "rack-a", MixerPublic: realMixer.Public}
+	realEnv, err := realMixer.Sign(realState)
+	if err != nil {
+		t.Fatalf("Sign failed: %v", err)
+	}
+
+	if _, errPinned := realEnv.VerifyPinned(realMixer.Public); errPinned != nil {
+		t.Errorf("VerifyPinned should accept an envelope matching the pinned key: %v", errPinned)
+	}
+
+	forger, _ := GenerateClusterKey()
+	forgedState := &RackState{Name: "rack-a", MixerPublic: forger.Public}
+	forgedEnv, errForgedSign := forger.Sign(forgedState)
+	if errForgedSign != nil {
+		t.Fatalf("Sign failed: %v", errForgedSign)
+	}
+
+	if _, errUnpinned := forgedEnv.Verify(); errUnpinned != nil {
+		t.Errorf("an unpinned Verify should accept a self-consistent envelope regardless of who signed it: %v", errUnpinned)
+	}
+
+	if _, errRejected := forgedEnv.VerifyPinned(realMixer.Public); errRejected == nil {
+		t.Error("VerifyPinned must reject an envelope signed by a key other than the pinned one")
+	}
+}
+
+func TestPinMixerKey_RoundTrips(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.flux")
+
+	if got, err := LoadPinnedMixerKey(path); err != nil || got != nil {
+		t.Fatalf("expected no pin yet, got key=%v err=%v", got, err)
+	}
+
+	ck, _ := GenerateClusterKey()
+	if err := PinMixerKey(path, ck.Public); err != nil {
+		t.Fatalf("PinMixerKey failed: %v", err)
+	}
+
+	got, err := LoadPinnedMixerKey(path)
+	if err != nil {
+		t.Fatalf("LoadPinnedMixerKey failed: %v", err)
+	}
+	if !ed25519.Verify(got, []byte("probe"), ed25519.Sign(ck.Private, []byte("probe"))) {
+		t.Error("the loaded pin does not correspond to the pinned key")
+	}
+}

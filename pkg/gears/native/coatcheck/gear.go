@@ -102,7 +102,7 @@ func (g *CoatCheckGear) extractKey(msg *fluxmsg.FluxMsg) (string, error) {
 			return "", fmt.Errorf("missing key field: %s (message carries data keys %v)",
 				field, dataKeys(msg))
 		}
-		keyParts = append(keyParts, g.normalizeKeyPart(fmt.Sprint(val)))
+		keyParts = append(keyParts, g.normalizeKeyPart(sdk.FieldToKeyPart(val)))
 	}
 	// Sanitize Key for NATS KV (RawURLEncoding avoids padding =)
 	rawKey := sdk.JoinKeys(keyParts...)

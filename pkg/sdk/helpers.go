@@ -5,7 +5,9 @@ package sdk
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
@@ -17,7 +19,8 @@ import (
 )
 
 // GetValue extracts a value from FluxMsg using a dot-notation path.
-// Supports: "data.field", "meta.header", "flux_id", "trace_id", "src_id".
+// Supports: "data.field", "meta.header", "flux_id", "trace_id", "src_id", and
+// (see the fallback below) a bare path with neither prefix.
 func GetValue(msg *fluxmsg.FluxMsg, path string) (any, bool) {
 	if path == "payload" {
 		return string(msg.RawPayload), true
@@ -32,49 +35,63 @@ func GetValue(msg *fluxmsg.FluxMsg, path string) (any, bool) {
 		return msg.SrcGearID, true
 	}
 
-	parts := strings.Split(path, ".")
-	if len(parts) < 2 {
-		return nil, false
-	}
-
-	root := parts[0]
-	rest := parts[1:]
-
-	if root == "meta" {
+	if rest, ok := strings.CutPrefix(path, "meta."); ok {
 		// Meta is flat string map, but keys might contain dots (namespaced)
 		// e.g. "meta.iso8583.raw_header" -> "iso8583.raw_header"
-		key := strings.Join(rest, ".")
-		val, ok := msg.Metadata[key]
+		val, ok := msg.Metadata[rest]
 		return val, ok
 	}
 
-	if root == "data" {
-		// Data is map[string]any
-		current := msg.Data
-		for i, part := range rest {
-			val, ok := current[part]
-			if !ok {
-				return nil, false
-			}
-			if i == len(rest)-1 {
-				return val, true
-			}
-			// Descent
-			next, ok := fluxmsg.AsDataMap(val)
-			if !ok {
-				// Path mismatch (not a map)
-				return nil, false
-			}
-			current = next
-		}
+	if rest, ok := strings.CutPrefix(path, "data."); ok {
+		return msg.Get(rest)
 	}
 
-	return nil, false
+	// A path with neither prefix used to return (nil, false) unconditionally,
+	// a second, stricter key-resolution dialect living alongside FluxMsg.Get's
+	// own permissive one (no prefix required at all), which the rest of the
+	// codebase already uses for a path like "iso8583.field.2" (the conductor,
+	// the iso8583 codec, and elsewhere). A caller — coatcheck's key_fields and
+	// value_fields, configured the way every other gear's field paths are —
+	// found nothing here even though the identical string already resolved
+	// through msg.Get. Falling back to it accepts both dialects instead of
+	// silently failing the second one.
+	return msg.Get(path)
 }
 
-// JoinKeys Helper to create composite keys (concat with underscores).
+// FieldToKeyPart renders a structured field value into a string for a
+// correlation or routing key, canonically: coatcheck's extractKey and the
+// conductor's route matching and correlation-key building all derive keys
+// from field values that can be []byte (a PAN, a Track2 blob, PIN/MAC/EMV
+// binary), and each picking its own rendering silently derived a different
+// key from the identical underlying value on each side.
+func FieldToKeyPart(v any) string {
+	switch val := v.(type) {
+	case string:
+		return val
+	case []byte:
+		return string(val)
+	default:
+		return fmt.Sprint(val)
+	}
+}
+
+// JoinKeys joins key parts unambiguously via netstring-style length
+// prefixing: len(part), ":", part, with no separator of its own, repeated for
+// each part. No two distinct sequences of parts can ever produce the same
+// joined string this way, unlike the fixed separator this replaced ("_", or
+// the conductor's own "\x1f" unit separator): a structured field can be
+// arbitrary binary (a PIN block, a MAC, an EMV tag) with no byte excluded, so
+// "a_b"+"c" and "a"+"b_c" (or the \x1f equivalent) joined the same way were
+// indistinguishable whenever a part's own bytes happened to contain the
+// separator.
 func JoinKeys(parts ...string) string {
-	return strings.Join(parts, "_")
+	var b strings.Builder
+	for _, p := range parts {
+		b.WriteString(strconv.Itoa(len(p)))
+		b.WriteByte(':')
+		b.WriteString(p)
+	}
+	return b.String()
 }
 
 func NewMockGearContext(config map[string]any) GearContext {

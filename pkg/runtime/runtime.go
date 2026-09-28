@@ -31,6 +31,15 @@ import (
 	"github.com/jaab-tech/fluxrig/pkg/telemetry"
 )
 
+// stopAllQuiesceTimeout bounds how long stopAll waits for the hot lane to drain
+// before it unsubscribes and stops every gear, the same trade-off Drain's own
+// quiesce already makes against its caller-supplied deadline; past this,
+// stopAll proceeds anyway rather than wedging ApplyScenario or Shutdown over
+// gears that never stop producing. A var, not a rack.* config field yet, the
+// same treatment lane.go's unsubscribeWait already gets for the same reason:
+// making it operator-configurable is a reasonable follow-up, not done here.
+var stopAllQuiesceTimeout = 5 * time.Second
+
 // Manager orchestrates the lifecycle of Gears on a Rack.
 type Manager struct {
 	bus                bus.Bus // always a *busRef, so the bus can be replaced under the gears
@@ -214,6 +223,18 @@ func (m *Manager) publishPort(ctx context.Context, gearName, port string, msg *f
 		m.logger().Error("gear emitted a nil message; dropping", "gear", gearName, "port", port)
 		return fmt.Errorf("emit: nil message on %s.%s", gearName, port)
 	}
+
+	// Clone before mutating: msg is the caller's object, and this function used
+	// to set FluxID and append a hop on it directly. A gear that emits the same
+	// message to more than one port, or retries an emission with the message it
+	// still holds, raced (or at best cross-contaminated the audit trail of) every
+	// concurrent or later call sharing that pointer. The clone is shallow except
+	// for Path: Metadata and Data are not mutated here, but Path's backing array
+	// would otherwise still be shared with the original via append's aliasing.
+	clone := *msg
+	clone.Path = append([]*fluxmsg.Hop(nil), msg.Path...)
+	msg = &clone
+
 	if msg.FluxID == uuid.Nil {
 		if id, e := m.idGen.NextFluxID(); e == nil {
 			msg.FluxID = id
@@ -357,10 +378,15 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err
 	m.busSubjects = busEmitSubjects(sc, m.rackName, gearDeploy)
 	m.portsMu.Unlock()
 
-	// Purge NATS stream to ensure no stale messages interfere with the new scenario
+	// Purge this Rack's own stale messages so they cannot interfere with the new
+	// scenario. Scoped to flux.msg.<rack>.> : the stream is shared by every Rack
+	// connected to this Mixer, and purging without a filter wiped every other
+	// Rack's guaranteed-lane traffic along with this one's own.
 	if b := m.bus; b != nil && needsBus {
-		if n, ok := b.(interface{ Purge(context.Context) error }); ok {
-			_ = n.Purge(ctx)
+		if n, ok := b.(interface {
+			Purge(context.Context, string) error
+		}); ok {
+			_ = n.Purge(ctx, fmt.Sprintf("flux.msg.%s.>", m.rackName))
 		}
 	}
 
@@ -510,10 +536,10 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err
 			wireLabel = fmt.Sprintf("%x", wire.ID)
 		}
 
-		handler := func(ctx context.Context, msg *fluxmsg.FluxMsg) {
+		handler := func(ctx context.Context, msg *fluxmsg.FluxMsg) error {
 			if msg == nil {
 				m.logger().Error("Subscribe Handler Triggered with nil msg", "subject", subject)
-				return
+				return nil
 			}
 			// PROBE HANDLING
 			if msg.Flags&fluxmsg.FlagSyncProbe != 0 {
@@ -524,7 +550,7 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err
 					m.logger().Debug("subject converged (path is hot)", "subject", subject)
 				}
 				m.mu.Unlock()
-				return
+				return nil
 			}
 
 			// Append Hop (Arrival at Target Port)
@@ -613,7 +639,7 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err
 
 			if pErr != nil {
 				m.logger().Error("processing failed", "gear", toGear, "error", pErr)
-				return
+				return pErr
 			}
 
 			// A plain gear's Process return goes out the default "out" port.
@@ -625,6 +651,7 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err
 				}
 				_ = m.publishPort(processCtx, toGear, "out", resp)
 			}
+			return nil
 		}
 
 		// A wire inside this Rack goes through memory; one that comes from another
@@ -746,6 +773,18 @@ func (m *Manager) Drain(ctx context.Context) error {
 }
 
 func (m *Manager) stopAll() {
+	// What is still queued between gears on the hot lane is otherwise silently
+	// dropped by Unsubscribe below (laneSub.Unsubscribe: "Whatever was queued
+	// and never handled is no longer pending") — the same loss Drain's own
+	// quiesce step exists to avoid. stopAll is Drain's sibling teardown path,
+	// used by ApplyScenario (between scenarios) and Shutdown, neither of which
+	// goes through Drain, so neither got this protection until now.
+	quiesceCtx, cancel := context.WithTimeout(context.Background(), stopAllQuiesceTimeout)
+	defer cancel()
+	if err := m.lane.quiesce(quiesceCtx); err != nil {
+		m.logger().Warn("stopAll: hot lane not empty", "error", err)
+	}
+
 	for _, sub := range m.activeSubs {
 		_ = sub.Unsubscribe()
 	}
@@ -790,17 +829,24 @@ func parsePortRef(ref string) (rack, gear, port string) {
 }
 
 func (m *Manager) waitForConvergence(ctx context.Context) error {
-	if len(m.hotSubjects) == 0 {
-		return nil
-	}
-
-	m.logger().Info("waiting for data-plane convergence", "subjects", len(m.hotSubjects))
-
-	// 1. Setup Status Tracking
-	pending := make(map[string]chan struct{})
+	// ApplyScenario calls this with m.mu released (see its own comment on why:
+	// handlers need to update state while this waits), and the probe handler
+	// mutates m.hotSubjects under m.mu from another goroutine as subjects
+	// converge. Snapshotting it into pending here, under the lock, is the only
+	// read of the field itself; everything after this reads pending, a local
+	// copy nothing else touches.
+	m.mu.Lock()
+	pending := make(map[string]chan struct{}, len(m.hotSubjects))
 	for s, ch := range m.hotSubjects {
 		pending[s] = ch
 	}
+	m.mu.Unlock()
+
+	if len(pending) == 0 {
+		return nil
+	}
+
+	m.logger().Info("waiting for data-plane convergence", "subjects", len(pending))
 
 	// 2. Relentless Probe Loop
 	// We re-emit probes every 500ms to handle NATS JetStream propagation lag.

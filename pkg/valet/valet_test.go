@@ -5,6 +5,7 @@ package valet
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -174,6 +175,53 @@ func TestRetransmissionAttaches(t *testing.T) {
 	}
 	if e.InFlight() != 1 {
 		t.Fatalf("InFlight = %d, want 1 (no duplicate)", e.InFlight())
+	}
+}
+
+// TestReleaseAllowsFreshParkAfterFailedSend is a regression test for the
+// gap Release exists to close: a Park succeeds, but the caller's own
+// follow-up (routing the request onward) fails. Without Release, the ticket
+// stays open and a retry of the same key hits AttachedOpen, silently
+// absorbed as a duplicate even though nothing was ever sent.
+func TestReleaseAllowsFreshParkAfterFailedSend(t *testing.T) {
+	clk := newFakeClock()
+	e := newTestEngine(t, clk, nil)
+	ctx := context.Background()
+
+	_, _, err := e.Park(ctx, ParkRequest{Key: "k1", Destination: "d"})
+	if err != nil {
+		t.Fatalf("park: %v", err)
+	}
+	if e.InFlight() != 1 {
+		t.Fatalf("InFlight = %d, want 1", e.InFlight())
+	}
+
+	if errRelease := e.Release(ctx, "k1"); errRelease != nil {
+		t.Fatalf("release: %v", errRelease)
+	}
+	if e.InFlight() != 0 {
+		t.Fatalf("InFlight = %d after release, want 0", e.InFlight())
+	}
+
+	res, tk, err := e.Park(ctx, ParkRequest{Key: "k1", Destination: "d"})
+	if err != nil || res != Parked {
+		t.Fatalf("retry park = %v, %v; want a fresh Parked, not AttachedOpen", res, err)
+	}
+	if tk.State() != TicketOpen {
+		t.Fatalf("retry ticket state = %v, want open", tk.State())
+	}
+	if e.InFlight() != 1 {
+		t.Fatalf("InFlight = %d after retry, want 1", e.InFlight())
+	}
+}
+
+// TestReleaseOnUnknownKeyIsUnmatched confirms Release reports nothing to
+// undo, rather than a hard failure, for a key that was never parked or
+// already resolved: the caller's own follow-up action never assumes success.
+func TestReleaseOnUnknownKeyIsUnmatched(t *testing.T) {
+	e := newTestEngine(t, newFakeClock(), nil)
+	if err := e.Release(context.Background(), "never-parked"); !errors.Is(err, ErrUnmatched) {
+		t.Fatalf("release = %v, want ErrUnmatched", err)
 	}
 }
 

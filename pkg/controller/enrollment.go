@@ -19,6 +19,7 @@ import (
 	"github.com/jaab-tech/fluxrig/pkg/pki"
 	"github.com/jaab-tech/fluxrig/pkg/registry"
 	"github.com/jaab-tech/fluxrig/pkg/router"
+	"github.com/jaab-tech/fluxrig/pkg/security"
 	"github.com/jaab-tech/fluxrig/pkg/version"
 )
 
@@ -95,17 +96,27 @@ func (c *EnrollmentController) HandleHello(msg *message.Message) ([]*message.Mes
 
 	c.logger.Info("Received Hello", "name", hello.Name, "id", hello.MachineID, "ip", hello.IP, "port", hello.Port)
 
-	// Deduplication Check with TTL (Bypassed if secret provided for recovery)
-	if hello.Secret == "" {
-		if val, loaded := c.processedHellos.Load(hello.Name); loaded {
-			lastSeen := val.(time.Time)
-			if time.Since(lastSeen) < 1*time.Second {
-				c.logger.Warn("Duplicate Hello ignored (throttled)", "name", hello.Name)
-				return nil, nil
-			}
+	// Deduplication Check with TTL. This used to skip entirely whenever a
+	// secret was present ("bypassed for recovery"), but hello.Secret is
+	// caller-supplied and unverified at this point: any Hello carrying any
+	// non-empty string, valid or not, skipped the throttle, which is a flood
+	// vector, not a recovery path. The throttle applies to every Hello now.
+	//
+	// Keyed by name AND MachineID, not name alone: a Rack whose Hello was
+	// just denied drops its cached MachineID and immediately retries as a
+	// fresh identity (MachineID uuid.Nil) to re-provision. That retry must
+	// not be silently swallowed as a "duplicate" of the denied one just
+	// because it shares a name; it is a different identity attempting a
+	// different (fresh-registration) code path.
+	dedupKey := hello.Name + "|" + hello.MachineID.String()
+	if val, loaded := c.processedHellos.Load(dedupKey); loaded {
+		lastSeen := val.(time.Time)
+		if time.Since(lastSeen) < 1*time.Second {
+			c.logger.Warn("Duplicate Hello ignored (throttled)", "name", hello.Name, "id", hello.MachineID)
+			return nil, nil
 		}
-		c.processedHellos.Store(hello.Name, time.Now())
 	}
+	c.processedHellos.Store(dedupKey, time.Now())
 
 	// 3. Register
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -116,6 +127,17 @@ func (c *EnrollmentController) HandleHello(msg *message.Message) ([]*message.Mes
 		c.logger.Error("failed to register rack", "error", err)
 		if err == registry.ErrNameConflict {
 			// Do not retry on name conflict, it requires manual intervention
+			return nil, nil
+		}
+		if err == registry.ErrBootstrapSecretMismatch {
+			// The caller's MachineID is unknown to us (fresh, or its prior
+			// registration was removed by an admin) and it did not present
+			// the current bootstrap secret: most often this is a Rack that
+			// still holds a passport for an identity we no longer recognize.
+			// Tell it explicitly, rather than staying silent, so it drops
+			// that stale identity and re-provisions instead of concluding
+			// the Mixer is merely unreachable and resuming offline forever.
+			c.publishDenied(hello.Name, hello.Nonce)
 			return nil, nil
 		}
 		// For other errors (DB down), we might want Watermill to retry
@@ -154,8 +176,10 @@ func (c *EnrollmentController) HandleHello(msg *message.Message) ([]*message.Mes
 	}
 
 	// Publish Response
-	// Topic: fluxrig.agent.enrollment.<Name>.<Nonce>
-	topic := fmt.Sprintf("flux.agent.enrollment.%s.%s", hello.Name, hello.Nonce)
+	// Topic: fluxrig.agent.enrollment.<Name>.<Nonce>. Both are caller-supplied;
+	// sanitized so a name or nonce containing "." (a subject separator) or a
+	// wildcard cannot reroute this reply onto, or across, another subject.
+	topic := fmt.Sprintf("flux.agent.enrollment.%s.%s", sanitizeName(hello.Name), sanitizeName(hello.Nonce))
 
 	// Prepare HelloResponse
 	resp := fluxmsg.HelloResponse{
@@ -198,6 +222,42 @@ func (c *EnrollmentController) HandleHello(msg *message.Message) ([]*message.Mes
 	return nil, nil
 }
 
+// publishDenied tells a Rack its Hello was rejected, on the same reply topic
+// a successful Hello would have used, with an empty Passport and a "denied"
+// status. Without this, a Rack whose MachineID we don't recognize (a fresh
+// one with the wrong secret, or one whose registration was removed) gets no
+// reply at all, which is indistinguishable on its side from the Mixer being
+// unreachable, so it eventually resumes offline with its stale identity
+// forever, instead of dropping it and re-provisioning as a new Zero-Config
+// identity. A publish failure here is logged, not returned: the caller
+// already decided not to have Watermill retry this Hello.
+func (c *EnrollmentController) publishDenied(name, nonce string) {
+	topic := fmt.Sprintf("flux.agent.enrollment.%s.%s", sanitizeName(name), sanitizeName(nonce))
+
+	resp := fluxmsg.HelloResponse{
+		Status:  "denied",
+		Message: "registration denied: unrecognized identity or invalid bootstrap secret",
+	}
+	respData, err := resp.ToData()
+	if err != nil {
+		c.logger.Error("failed to build denial response", "error", err)
+		return
+	}
+
+	respMsg := fluxmsg.New()
+	respMsg.Data = respData
+
+	respBytes, err := cbor.Marshal(respMsg)
+	if err != nil {
+		c.logger.Error("failed to marshal denial response", "error", err)
+		return
+	}
+
+	if err := c.publisher.Publish(topic, message.NewMessage(watermill.NewUUID(), respBytes)); err != nil {
+		c.logger.Error("failed to publish denial response", "topic", topic, "error", err)
+	}
+}
+
 func (c *EnrollmentController) HandleHeartbeat(msg *message.Message) ([]*message.Message, error) {
 	var fm fluxmsg.FluxMsg
 	if err := cbor.Unmarshal(msg.Payload, &fm); err != nil {
@@ -210,14 +270,22 @@ func (c *EnrollmentController) HandleHeartbeat(msg *message.Message) ([]*message
 		return nil, nil
 	}
 
-	// Update LastSeen
-	c.logger.Debug("Heartbeat", "id", hb.MachineID)
-	if errHB := c.reg.Heartbeat(context.Background(), hb.MachineID, hb.Stats, hb.Config); errHB != nil {
+	// Authenticate before touching any state: without this, any caller who
+	// learned a MachineID (formerly disclosed by the unauthenticated /racks
+	// endpoint) could forge liveness and overwrite that Rack's stats and
+	// config with none of its own.
+	rack, err := c.reg.Get(context.Background(), hb.MachineID)
+	if err != nil {
+		return nil, nil
+	}
+	if !security.SecretsEqual(rack.Secret, hb.Secret) {
+		c.logger.Warn("Heartbeat rejected: secret mismatch", "id", hb.MachineID)
 		return nil, nil
 	}
 
-	rack, err := c.reg.Get(context.Background(), hb.MachineID)
-	if err != nil {
+	// Update LastSeen
+	c.logger.Debug("Heartbeat", "id", hb.MachineID)
+	if errHB := c.reg.Heartbeat(context.Background(), hb.MachineID, hb.Stats, hb.Config); errHB != nil {
 		return nil, nil
 	}
 

@@ -111,10 +111,13 @@ func (r *busRef) Close() {
 	}
 }
 
-// Purge empties the stream of a bus that can, and does nothing for one that cannot.
-func (r *busRef) Purge(ctx context.Context) error {
-	if p, ok := r.current().(interface{ Purge(context.Context) error }); ok {
-		return p.Purge(ctx)
+// Purge empties the stream, or just subject within it, of a bus that can, and
+// does nothing for one that cannot.
+func (r *busRef) Purge(ctx context.Context, subject string) error {
+	if p, ok := r.current().(interface {
+		Purge(context.Context, string) error
+	}); ok {
+		return p.Purge(ctx, subject)
 	}
 	return nil
 }

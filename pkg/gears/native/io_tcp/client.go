@@ -137,8 +137,19 @@ func (c *Client) handleConn(conn net.Conn) {
 	}
 
 	scanner := bufio.NewScanner(conn)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxScanTokenSize)
 	scanner.Split(MakeSplitter(c.config))
-	for scanner.Scan() {
+	idleTimeout := time.Duration(c.config.IdleTimeout)
+	for {
+		// Refreshed before every message, not just once: idle_timeout bounds
+		// the gap between messages, not the life of the connection. It was
+		// parsed and defaulted (60s) but never enforced anywhere before this.
+		if idleTimeout > 0 {
+			_ = conn.SetReadDeadline(time.Now().Add(idleTimeout))
+		}
+		if !scanner.Scan() {
+			break
+		}
 		data := scanner.Bytes()
 		payload := make([]byte, len(data))
 		copy(payload, data)
@@ -183,7 +194,11 @@ func (c *Client) handleConn(conn net.Conn) {
 	}
 
 	if err := scanner.Err(); err != nil {
-		c.log.Warn("connection lost", "error", err)
+		if ne, ok := err.(net.Error); ok && ne.Timeout() {
+			c.log.Warn("connection idle past idle_timeout, closing", "timeout", idleTimeout, "target", c.config.Connect)
+		} else {
+			c.log.Warn("connection lost", "error", err)
+		}
 	} else {
 		c.log.Info("connection closed by peer")
 	}
@@ -250,8 +265,12 @@ func (c *Client) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.Fl
 			)
 		}
 
-		_, err := conn.conn.Write(msg.RawPayload)
+		outbound, err := frameOutbound(c.config.Framing, msg.RawPayload)
 		if err != nil {
+			return nil, err
+		}
+
+		if _, err := conn.conn.Write(outbound); err != nil {
 			return nil, fmt.Errorf("write error: %w", err)
 		}
 
@@ -259,12 +278,12 @@ func (c *Client) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.Fl
 			attribute.String("gear_type", "io_tcp"),
 			attribute.String("mode", "client"),
 		))
-		c.bytesOut.Add(ctx, int64(len(msg.RawPayload)), metric.WithAttributes(
+		c.bytesOut.Add(ctx, int64(len(outbound)), metric.WithAttributes(
 			attribute.String("gear_type", "io_tcp"),
 			attribute.String("mode", "client"),
 		))
 
-		if c.config.DelimiterAppend {
+		if c.config.DelimiterAppend && c.config.Framing == FramingDelimiter {
 			_, _ = conn.conn.Write([]byte(c.config.Delimiter))
 		}
 	}

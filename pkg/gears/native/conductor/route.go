@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
+	"github.com/jaab-tech/fluxrig/pkg/sdk"
 )
 
 // route is one entry of the routing table: a predicate over structured fields
@@ -40,19 +41,7 @@ func (r *route) matches(msg *fluxmsg.FluxMsg) bool {
 	if !ok {
 		return false
 	}
-	return strings.HasPrefix(fieldString(v), r.matchPrefix)
-}
-
-// fieldString renders a structured field value for matching and key building.
-func fieldString(v any) string {
-	switch val := v.(type) {
-	case string:
-		return val
-	case []byte:
-		return string(val)
-	default:
-		return fmt.Sprint(val)
-	}
+	return strings.HasPrefix(sdk.FieldToKeyPart(v), r.matchPrefix)
 }
 
 // parseRoutes builds the routing table from the scenario config.

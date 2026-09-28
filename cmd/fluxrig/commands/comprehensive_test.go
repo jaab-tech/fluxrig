@@ -146,16 +146,19 @@ func TestAdminRacksCommands(t *testing.T) {
 	}
 
 	_ = racksSuspendCmd.Flags().Set("api-url", ts.URL)
+	_ = racksSuspendCmd.Flags().Set("force", "true")
 	if err := racksSuspendCmd.RunE(racksSuspendCmd, []string{idStr}); err != nil {
 		t.Errorf("Suspend failed: %v", err)
 	}
 
 	_ = racksActivateCmd.Flags().Set("api-url", ts.URL)
+	_ = racksActivateCmd.Flags().Set("force", "true")
 	if err := racksActivateCmd.RunE(racksActivateCmd, []string{idStr}); err != nil {
 		t.Errorf("Activate failed: %v", err)
 	}
 
 	_ = racksRemoveCmd.Flags().Set("api-url", ts.URL)
+	_ = racksRemoveCmd.Flags().Set("force", "true")
 	if err := racksRemoveCmd.RunE(racksRemoveCmd, []string{idStr}); err != nil {
 		t.Errorf("Remove failed: %v", err)
 	}

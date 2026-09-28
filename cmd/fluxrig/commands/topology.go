@@ -27,7 +27,11 @@ var topologyStatusCmd = &cobra.Command{
 		}
 		mixerURL := fmt.Sprintf("%s/api/v1/topology/status", baseURL)
 
-		resp, err := http.Get(mixerURL) // #nosec G107 -- URL is from trusted env var
+		req, err := newAPIRequest(cmd, http.MethodGet, mixerURL, nil)
+		if err != nil {
+			return err
+		}
+		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			return fmt.Errorf("failed to contact mixer: %w", err)
 		}
@@ -52,7 +56,11 @@ var topologyListCmd = &cobra.Command{
 			baseURL = "http://localhost:8090"
 		}
 		mixerURL := fmt.Sprintf("%s/api/v1/topology/list", baseURL)
-		resp, err := http.Get(mixerURL) // #nosec G107 -- URL is from trusted env var
+		req, err := newAPIRequest(cmd, http.MethodGet, mixerURL, nil)
+		if err != nil {
+			return err
+		}
+		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			return fmt.Errorf("failed to contact mixer: %w", err)
 		}
@@ -67,4 +75,5 @@ func init() {
 	topologyCmd.AddCommand(topologyStatusCmd)
 	topologyCmd.AddCommand(topologyListCmd)
 	rootCmd.AddCommand(topologyCmd)
+	addAPITokenFlag(topologyCmd, true)
 }

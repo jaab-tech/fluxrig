@@ -30,7 +30,7 @@ func TestTelemetrySink_Comprehensive(t *testing.T) {
 		t.Fatalf("Failed to init schema: %v", err)
 	}
 
-	sink := ingest.NewTelemetrySink(mockBus, store, "flux.telemetry.>", "comprehensive-mixer", 1*time.Minute, nil)
+	sink := ingest.NewTelemetrySink(mockBus, store, "flux.telemetry.>", t.TempDir(), 1*time.Minute, nil)
 	if err := sink.Start(context.Background()); err != nil {
 		t.Fatalf("Failed to start sink: %v", err)
 	}

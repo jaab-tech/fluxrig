@@ -43,6 +43,31 @@ import (
 // ErrReconnect indicates the agent needs to restart its session (e.g. identity change)
 var ErrReconnect = fmt.Errorf("reconnect needed")
 
+// sanitizeSubjectToken restricts a token used to build a NATS subject to
+// alphanumeric, hyphen and underscore, matching pkg/controller's own
+// sanitizeName exactly (character-for-character, including the empty-name
+// fallback). The Mixer applies that same function to the name and nonce it
+// echoes back in the enrollment reply topic; this Rack must compute the
+// identical string to ever subscribe to the right one.
+func sanitizeSubjectToken(s string) string {
+	safeName := strings.ReplaceAll(s, "..", "")
+	safeName = strings.ReplaceAll(safeName, "/", "_")
+	safeName = strings.ReplaceAll(safeName, "\\", "_")
+	safeName = strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			return r
+		default:
+			return '_'
+		}
+	}, safeName)
+	safeName = strings.Trim(safeName, "_-")
+	if safeName == "" {
+		safeName = "unnamed"
+	}
+	return safeName
+}
+
 // gracefulDrain drains all gears within a bounded deadline before the deferred
 // Shutdown() closes them. Both the shutdown-command path and the SIGTERM/SIGINT
 // path use it, so an ordinary stop never drops in-flight work silently. The
@@ -113,6 +138,29 @@ func RunAgent(cfg *config.RackConfig, logger *slog.Logger, logBuffer *telemetry.
 	}
 }
 
+// telemetryConnectOptions builds the ConnectOptions for a telemetry bus
+// dial from the same TLS-relevant config fields as the main bus dial. Both
+// telemetry dial sites in runSession call this instead of building their
+// own literal, so the two cannot drift from the main dial's TLS posture the
+// way they once did: RootCA was threaded through but InsecureSkipVerify was
+// not, so an operator relying on insecure_skip_verify (self-signed certs,
+// no distributed CA file) got a Rack that connected fine but had telemetry
+// silently fail its TLS handshake.
+func telemetryConnectOptions(cfg *config.RackConfig, clientName string, connectTimeout, reconnectWait, inactiveThreshold, initialRetryWait time.Duration, initialRetryAttempts int) bus.ConnectOptions {
+	return bus.ConnectOptions{
+		Name:                 clientName + "-telemetry",
+		ConnectTimeout:       connectTimeout,
+		ReconnectWait:        reconnectWait,
+		Domain:               cfg.Snake.Domain,
+		InactiveThreshold:    inactiveThreshold,
+		InitialRetryWait:     initialRetryWait,
+		InitialRetryAttempts: initialRetryAttempts,
+		RootCA:               cfg.Snake.RootCAFile,
+		InsecureSkipVerify:   cfg.Snake.InsecureSkipVerify,
+	}
+}
+
+//nolint:gocyclo // already at the threshold before the enrollment-denial branch; splitting the passport/telemetry init block risks breaking its defer-timed bus cleanup for a 1-point reduction
 func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger, logBuffer *telemetry.BufferHandler, carry *sessionCarry) error {
 	// 0. Set Message Limits (Priority 1 Hardening)
 	fluxmsg.SetLimits(cfg.Rack.MaxHops, cfg.Rack.MaxPayloadSize)
@@ -120,10 +168,15 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 	// 0. Try Load Passport (Offline Capability)
 	statePath := filepath.Join(cfg.Base.StateDir, cfg.Base.StateFile)
 	logger.Debug("Attempting to load Passport", "path", statePath)
-	var secret string
+	// Before any Passport exists, this Rack has no secret of its own to
+	// present. rack.bootstrap_secret is what a first-ever Hello sends
+	// instead, and it must match the Mixer's enrollment.bootstrap_secret
+	// (both default to "fluxrig") for Zero-Config enrollment to work at all:
+	// nothing compared this before RegisterEntity started requiring it.
+	secret := cfg.Rack.BootstrapSecret
 	var currentStatus string
 	if env, err := pki.LoadStateEnvelope(statePath); err == nil {
-		if s, errVer := env.Verify(); errVer == nil {
+		if s, errVer := verifyPassport(statePath, env); errVer == nil {
 			logger.Debug("Loaded Cached Passport", "id", s.MachineID, "name", s.Name)
 			cfg.Rack.MachineID = s.MachineID
 			cfg.Base.Name = s.Name // Ensure name is loaded for telemetry init
@@ -137,16 +190,6 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 	}
 
 	// 1. Parse Timeouts
-	connectTimeout, _ := time.ParseDuration(cfg.Snake.ConnectTimeout)
-	reconnectWait, _ := time.ParseDuration(cfg.Snake.ReconnectWait)
-	enrollTimeout, _ := time.ParseDuration(cfg.Rack.EnrollmentTimeout)
-	enrollInterval, _ := time.ParseDuration(cfg.Rack.EnrollmentInterval)
-	hbInterval, _ := time.ParseDuration(cfg.Rack.HeartbeatInterval)
-	inactiveThreshold, _ := time.ParseDuration(cfg.Snake.InactiveThreshold)
-	if inactiveThreshold == 0 {
-		inactiveThreshold = 30 * time.Second
-	}
-
 	initialRetryAttempts := cfg.Snake.InitialRetryAttempts
 
 	// Synchronization Contexts
@@ -159,6 +202,9 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 	handshakeInterval, subRetryWait, opTimeout := limits.handshake, limits.subscriptionRetry, limits.operation
 	initialRetryWait, offlineStartTimeout := limits.initialRetryWait, limits.offlineStart
 	offlineRetryInterval, laneSendTimeout := limits.offlineRetry, limits.laneSend
+	connectTimeout, reconnectWait := limits.connect, limits.reconnectWait
+	enrollTimeout, enrollInterval := limits.enrollTimeout, limits.enrollInterval
+	hbInterval, inactiveThreshold := limits.heartbeat, limits.inactiveThreshold
 
 	// 2. Identify effective name for Enrollment and Bus
 	helloName := cfg.Base.Name
@@ -322,7 +368,7 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 
 	// 3.5 Wait for Passport (State Issuance)
 	// We listen for [fluxrig.agent.enrollment.<name>.<nonce>]
-	enrollTopic := fmt.Sprintf("flux.agent.enrollment.%s.%s", helloName, sessionNonce)
+	enrollTopic := fmt.Sprintf("flux.agent.enrollment.%s.%s", sanitizeSubjectToken(helloName), sanitizeSubjectToken(sessionNonce))
 	logger.Info("Waiting for Passport...", "topic", enrollTopic)
 
 	// Channel to signal graceful shutdown from callbacks
@@ -331,12 +377,12 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 	if busConnected {
 		passportCh := make(chan *fluxmsg.HelloResponse, 1)
 
-		sub, errSub := managedBus.Subscribe(enrollTopic, func(ctx context.Context, msg *fluxmsg.FluxMsg) {
+		sub, errSub := managedBus.Subscribe(enrollTopic, func(ctx context.Context, msg *fluxmsg.FluxMsg) error {
 			// Parse HelloResponse
 			resp, errParse := fluxmsg.ParseHelloResponse(msg.Data)
 			if errParse != nil {
 				logger.Error("Failed to parse enrollment response", "error", errParse)
-				return
+				return errParse
 			}
 			logger.Info("Received Enrollment Response", "message", resp.Message, "status", resp.Status)
 
@@ -344,6 +390,7 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 			case passportCh <- resp:
 			default:
 			}
+			return nil
 		})
 		if errSub != nil {
 			logger.Error("Failed to subscribe to enrollment", "error", errSub)
@@ -362,6 +409,7 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 		// Enrollment Loop with Retries
 		enrollTicker := time.NewTicker(enrollInterval)
 		defer enrollTicker.Stop()
+		reprovisioned := false
 
 		enrollDeadline := time.After(enrollTimeout)
 
@@ -445,7 +493,7 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 					}
 
 					// Re-verify
-					state, errVerify := env.Verify()
+					state, errVerify := verifyPassport(statePath, &env)
 					if errVerify != nil {
 						logger.Error("Passport invalid", "error", errVerify)
 						return errVerify
@@ -463,6 +511,7 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 					}
 					logger.Info("Passport Saved", "path", statePath)
 					mID = state.MachineID
+					secret = state.Secret
 
 					if resp.Status == "active" {
 						// INITIALIZE TELEMETRY WITH CONFIRMED IDENTITY
@@ -495,16 +544,7 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 						}
 
 						telBus := bus.NewNatsBus("flux-telemetry")
-						if errBus := telBus.Connect(cfg.Snake.URL, bus.ConnectOptions{
-							Name:                 clientName + "-telemetry",
-							ConnectTimeout:       connectTimeout,
-							ReconnectWait:        reconnectWait,
-							Domain:               cfg.Snake.Domain,
-							InactiveThreshold:    inactiveThreshold,
-							InitialRetryWait:     initialRetryWait,
-							InitialRetryAttempts: initialRetryAttempts,
-							RootCA:               cfg.Snake.RootCAFile,
-						}); errBus != nil {
+						if errBus := telBus.Connect(cfg.Snake.URL, telemetryConnectOptions(cfg, clientName, connectTimeout, reconnectWait, inactiveThreshold, initialRetryWait, initialRetryAttempts)); errBus != nil {
 							logger.Warn("Failed to connect telemetry bus", "error", errBus)
 						} else {
 							defer telBus.Close()
@@ -531,6 +571,14 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 						logger.Info("Rack is PENDING adoption. Run 'fluxrig admin racks approve <ID>' to activate.", "id", mID)
 						isSessionActive = false
 					}
+				} else if resp.Status == "denied" {
+					mID, secret = handleEnrollmentDenial(logger, statePath, cfg, hello, managedBus, gen, resp.Message, &reprovisioned)
+					// Keep waiting: a denial is not a terminal outcome when
+					// it triggered a re-provisioning retry above (or when
+					// the ticker's next retry might still succeed) — only a
+					// real Passport, or the unreachable fallback below,
+					// concludes enrollment.
+					continue enrollLoop
 				} else {
 					logger.Warn("No passport received in HelloResponse?")
 				}
@@ -549,10 +597,10 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 		// 1. Notifications (Status/Commands)
 		if mID != uuid.Nil {
 			notifyTopic := fmt.Sprintf("flux.agent.notify.%s", mID.String())
-			_, err = managedBus.Subscribe(notifyTopic, func(ctx context.Context, msg *fluxmsg.FluxMsg) {
+			_, err = managedBus.Subscribe(notifyTopic, func(ctx context.Context, msg *fluxmsg.FluxMsg) error {
 				hbResp, errParse := fluxmsg.ParseHeartbeatResponse(msg.Data)
 				if errParse != nil {
-					return
+					return errParse
 				}
 				// Handle Status/Command (Logic shared with enrollment response path?)
 				// Simplified: Just log for now, full status sync is complex.
@@ -572,7 +620,7 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 						case shutdownCh <- struct{}{}:
 						default:
 						}
-						return
+						return nil
 					}
 				}
 				// Handle Passport Update (Adoption)
@@ -582,17 +630,26 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 						logger.Error("Adoption: Failed to unmarshal passport envelope", "error", errAdopt)
 					} else {
 						// Verify
-						state, errVerify := env.Verify()
+						state, errVerify := verifyPassport(statePath, &env)
 						if errVerify != nil {
-							logger.Error("Adoption: Passport invalid", "error", errVerify)
+							if errors.Is(errVerify, pki.ErrPinMismatch) {
+								logger.Error("Adoption: a different Mixer key signed this passport, not the pinned one. "+
+									"If the Mixer rotated its key on purpose, delete the pinned key file to accept it. "+
+									"If not, this Mixer is not the one this Rack trusts. Every future passport update "+
+									"fails the same way until an operator deletes the file.",
+									"pinned_key_file", pki.PinnedKeyPath(statePath), "error", errVerify)
+							} else {
+								logger.Error("Adoption: Passport invalid", "error", errVerify)
+							}
 						} else {
 							// Save
 							// The name is base.state_file, the same field the boot
 							// path reads. Hardcoding it here wrote the passport
 							// somewhere the next boot does not look, so a Rack
 							// configured with any other name re-enrolled forever
-							// and never came up offline.
-							statePath := filepath.Join(cfg.Base.StateDir, cfg.Base.StateFile)
+							// and never came up offline. Reuses the outer statePath
+							// (same expression) rather than recomputing it, which is
+							// also what verifyPassport was just called with above.
 							if errSave := env.Save(statePath); errSave != nil {
 								logger.Error("Adoption: Failed to save passport", "path", statePath, "error", errSave)
 							} else {
@@ -638,6 +695,7 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 						}
 					}
 				}
+				return nil
 			})
 			if err != nil {
 				logger.Error("Failed to subscribe to notify", "error", err)
@@ -650,11 +708,11 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 		// 2. Scenario Updates
 		// Topic: fluxrig.rack.{name}.scenario
 		scenarioTopic := fluxmsg.SubjectScenarioPrefix + helloName + fluxmsg.SubjectScenarioSuffix
-		_, err = managedBus.Subscribe(scenarioTopic, func(ctx context.Context, msg *fluxmsg.FluxMsg) {
+		_, err = managedBus.Subscribe(scenarioTopic, func(ctx context.Context, msg *fluxmsg.FluxMsg) error {
 			payload, errParse := fluxmsg.ParseScenarioPayload(msg.Data)
 			if errParse != nil {
 				logger.Error("Failed to parse scenario payload", "error", errParse)
-				return
+				return errParse
 			}
 
 			logger.Info("Received Scenario from Mixer",
@@ -671,7 +729,7 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 				if _, _, _, errSpec := specMgr.ImportContent(ctx, artifact.Content, artifact.Name, artifact.Tag); errSpec != nil {
 					logger.Error("Failed to store spec sent with the scenario",
 						"spec", artifact.URN(), "error", errSpec)
-					return
+					return errSpec
 				}
 				logger.Info("Stored spec sent with the scenario", "spec", artifact.URN())
 			}
@@ -680,7 +738,7 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 			var sc registry.Scenario
 			if errParseSc := yaml.Unmarshal(payload.Scenario, &sc); errParseSc != nil {
 				logger.Error("Failed to unmarshal scenario from payload", "error", errParseSc)
-				return
+				return errParseSc
 			}
 
 			scenarios.mu.Lock()
@@ -691,11 +749,11 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 				if scenarios.consumeResumed(payload.Scenario) {
 					runtimeStarted = true
 					logger.Info("Scenario from the Mixer matches the one resumed from local state; gears keep running", "version", payload.Version)
-					return
+					return nil
 				}
 				if errApply := rtManager.ApplyScenario(ctx, &sc); errApply != nil {
 					logger.Error("Failed to apply scenario", "error", errApply)
-					return
+					return errApply
 				}
 				logger.Info("Scenario Applied Successfully", "version", payload.Version)
 				runtimeStarted = true
@@ -705,6 +763,7 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 				lastScenario = &sc
 				pendingPayload = payload
 			}
+			return nil
 		})
 		if err != nil {
 			logger.Error("Failed to subscribe to scenario topic", "error", err)
@@ -741,7 +800,7 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 	// 4. Heartbeat Loop
 	// Initial heartbeat
 	if busConnected {
-		if errHBInit := sendHeartbeat(ctx, managedBus, mID, cfg, gen); errHBInit != nil {
+		if errHBInit := sendHeartbeat(ctx, managedBus, mID, secret, cfg, gen); errHBInit != nil {
 			logger.Warn("Failed to send initial heartbeat", "error", errHBInit)
 		}
 	}
@@ -797,7 +856,7 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 			// Re-marshal passport to env for state extraction
 			env := pki.StateEnvelope{}
 			_ = cbor.Unmarshal(passport, &env)
-			state, _ := env.Verify()
+			state, _ := verifyPassport(statePath, &env)
 
 			// Initialize Telemetry
 			newGen, _ := idgen.New(state.MachineID)
@@ -826,16 +885,7 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 				telCfg.Logging.Level = "trace"
 			}
 			telBus := bus.NewNatsBus("flux-telemetry")
-			_ = telBus.Connect(cfg.Snake.URL, bus.ConnectOptions{
-				Name:                 clientName + "-telemetry",
-				ConnectTimeout:       connectTimeout,
-				ReconnectWait:        reconnectWait,
-				Domain:               cfg.Snake.Domain,
-				InactiveThreshold:    inactiveThreshold,
-				InitialRetryWait:     initialRetryWait,
-				InitialRetryAttempts: initialRetryAttempts,
-				RootCA:               cfg.Snake.RootCAFile,
-			})
+			_ = telBus.Connect(cfg.Snake.URL, telemetryConnectOptions(cfg, clientName, connectTimeout, reconnectWait, inactiveThreshold, initialRetryWait, initialRetryAttempts))
 
 			sDown, _ := telemetry.Init(context.Background(), telCfg, telBus, logBuffer, newGen)
 			telShutdown = sDown
@@ -874,7 +924,7 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 		case <-ticker.C:
 			if busConnected {
 				// We use current mID (might have changed after passport load)
-				if err := sendHeartbeat(ctx, managedBus, mID, cfg, gen); err != nil {
+				if err := sendHeartbeat(ctx, managedBus, mID, secret, cfg, gen); err != nil {
 					logger.Warn("Failed to send heartbeat", "error", err)
 				} else {
 					logger.Debug("Sent Heartbeat", "mid", mID)
@@ -910,13 +960,55 @@ func sendHello(b bus.Bus, p *fluxmsg.HelloPayload, gen *idgen.IDGenerator) error
 	return b.Publish(context.Background(), fluxmsg.SubjectAgentHello, msg)
 }
 
-func sendHeartbeat(ctx context.Context, b bus.Bus, mid uuid.UUID, cfg *config.RackConfig, gen *idgen.IDGenerator) error {
+// handleEnrollmentDenial drops a Rack's cached passport after the Mixer
+// rejects it (its MachineID is unrecognized, e.g. an admin removed its
+// registration) and re-provisions once as a new Zero-Config identity,
+// instead of waiting out enrollTimeout and resuming offline with an
+// identity the Mixer no longer knows. It returns the reset MachineID and
+// secret, and whether a re-provisioning Hello has now been sent at least
+// once (a caller-supplied true short-circuits a second immediate resend, so
+// a genuine, persistent bootstrap-secret mismatch falls back to the normal
+// ticker-paced retries instead of resending on every denial received).
+func handleEnrollmentDenial(logger *slog.Logger, statePath string, cfg *config.RackConfig, hello *fluxmsg.HelloPayload, b bus.Bus, gen *idgen.IDGenerator, message string, reprovisioned *bool) (uuid.UUID, string) {
+	logger.Warn("Registration denied; dropping cached identity", "message", message)
+	if errRemove := os.Remove(statePath); errRemove != nil && !os.IsNotExist(errRemove) {
+		logger.Error("Failed to remove stale passport", "path", statePath, "error", errRemove)
+	}
+	// The pinned Mixer key belongs to the file path, not to the old
+	// identity. If the file stays, the old key still guards the new
+	// identity's first passport. A Mixer key rotation makes this check
+	// fail. From this file alone, a rotation looks the same as an attack.
+	// So the new identity gets a fresh pin instead.
+	pinPath := pki.PinnedKeyPath(statePath)
+	if errRemove := os.Remove(pinPath); errRemove != nil && !os.IsNotExist(errRemove) {
+		logger.Error("Failed to remove stale pinned Mixer key", "path", pinPath, "error", errRemove)
+	}
+
+	mID := uuid.Nil
+	secret := cfg.Rack.BootstrapSecret
+	hello.MachineID = mID
+	hello.Secret = secret
+
+	if !*reprovisioned {
+		*reprovisioned = true
+		if errSend := sendHello(b, hello, gen); errSend != nil {
+			logger.Error("Failed to resend Hello after denial", "error", errSend)
+		} else {
+			logger.Info("Sent Hello (re-provisioning after denial)", "name", hello.Name)
+		}
+	}
+
+	return mID, secret
+}
+
+func sendHeartbeat(ctx context.Context, b bus.Bus, mid uuid.UUID, secret string, cfg *config.RackConfig, gen *idgen.IDGenerator) error {
 	stats := map[string]any{
 		"goroutines": runtime.NumGoroutine(),
 	}
 
 	p := &fluxmsg.HeartbeatPayload{
 		MachineID: mid,
+		Secret:    secret,
 		Stats:     stats,
 		Config:    map[string]any{"rack": cfg.Rack, "logging": cfg.Logging},
 	}

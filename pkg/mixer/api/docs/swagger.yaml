@@ -192,6 +192,14 @@ definitions:
     type: object
   config.ApiConfig:
     properties:
+      authDisabledDangerously:
+        description: |-
+          AuthDisabledDangerously must be set explicitly to start the Mixer with
+          no AuthToken configured. Without either, Start refuses to run: silently
+          serving the management API unauthenticated is the exact failure mode
+          this field exists to require an explicit, named opt-out from.
+        example: false
+        type: boolean
       controlConfirmTimeout:
         description: |-
           ControlConfirmTimeout bounds how long a control-plane command (the
@@ -254,12 +262,6 @@ definitions:
           If false (default), new Racks start as 'pending'.
         example: false
         type: boolean
-      bootstrapSecret:
-        description: |-
-          BootstrapSecret is the shared secret used for zero-config enrollment and identity adoption.
-          Defaults to 'fluxrig' if not specified.
-        example: fluxrig
-        type: string
       pushDelay:
         description: PushDelay is the time to wait before pushing state to a newly
           enrolled Rack.
@@ -428,6 +430,13 @@ definitions:
     type: object
   config.SnakeConfig:
     properties:
+      allowNonTLS:
+        description: |-
+          AllowNonTLS lets a plaintext client connect alongside a TLS one once
+          TLSCertFile/TLSKeyFile are set. Mixer-side only: false by default, so
+          configuring TLS actually requires it instead of just offering it.
+        example: false
+        type: boolean
       connectTimeout:
         example: 10s
         type: string
@@ -448,6 +457,19 @@ definitions:
         type: string
       insecureSkipVerify:
         type: boolean
+      kvmaxBytes:
+        description: |-
+          KVMaxBytes, KVMaxValueSize and KVTTL cap every KV bucket the Mixer
+          provisions, the same way StreamMaxAge/StreamMaxBytes cap every stream.
+          Mixer-side only.
+        example: 1073741824
+        type: integer
+      kvmaxValueSize:
+        example: 1048576
+        type: integer
+      kvttl:
+        example: 0s
+        type: string
       offlineRetryInterval:
         example: 5s
         type: string
@@ -494,10 +516,19 @@ definitions:
       subscriptionRetryWait:
         example: 200ms
         type: string
+      tlscafile:
+        description: |-
+          TLSCAFile and TLSVerify enable mTLS: the CA a Rack's own client
+          certificate is verified against, and whether presenting one is
+          required. Mixer-side only.
+        type: string
       tlscertFile:
         type: string
       tlskeyFile:
         type: string
+      tlsverify:
+        example: false
+        type: boolean
       url:
         example: nats://localhost:4222
         type: string
@@ -1018,6 +1049,11 @@ paths:
           description: OK
           schema:
             $ref: '#/definitions/api.ScenarioImportResponse'
+        "202":
+          description: 'Imported and active, but not yet delivered: no target Rack
+            was reachable'
+          schema:
+            type: string
         "400":
           description: The scenario could not be read or failed validation
           schema:

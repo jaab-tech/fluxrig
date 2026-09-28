@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"log/slog"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,7 +31,7 @@ func TestTelemetrySink_Logs(t *testing.T) {
 		t.Fatalf("Failed to init schema: %v", err)
 	}
 
-	sink := ingest.NewTelemetrySink(mockBus, store, "flux.telemetry.>", "test-mixer", 1*time.Minute, nil)
+	sink := ingest.NewTelemetrySink(mockBus, store, "flux.telemetry.>", t.TempDir(), 1*time.Minute, nil)
 	if err := sink.Start(context.Background()); err != nil {
 		t.Fatalf("Failed to start sink: %v", err)
 	}
@@ -74,21 +76,18 @@ func TestTelemetrySink_Logs(t *testing.T) {
 
 func TestTelemetrySink_Lifecycle(t *testing.T) {
 	mockBus := bus.NewMockBus()
-	tmpFile := "test_sink.db"
+	tmpFile := filepath.Join(t.TempDir(), "test_sink.db")
 	store, err := duckdb.NewStore(slog.Default(), tmpFile)
 	if err != nil {
 		t.Fatalf("Failed to create test store: %v", err)
 	}
-	defer func() {
-		_ = store.Close()
-		_ = os.Remove(tmpFile)
-	}()
+	defer func() { _ = store.Close() }()
 
 	if err := store.Migrate(context.Background()); err != nil {
 		t.Fatalf("Failed to init schema: %v", err)
 	}
 
-	sink := ingest.NewTelemetrySink(mockBus, store, "flux.telemetry.>", "test-mixer", 1*time.Minute, nil)
+	sink := ingest.NewTelemetrySink(mockBus, store, "flux.telemetry.>", t.TempDir(), 1*time.Minute, nil)
 	if err := sink.Start(context.Background()); err != nil {
 		t.Fatalf("Failed to start sink: %v", err)
 	}
@@ -138,6 +137,81 @@ func TestTelemetrySink_Lifecycle(t *testing.T) {
 	}
 }
 
+// Stop must flush whatever telemetry is still sitting in DuckDB rather than
+// leaving it for a periodic tick that a shutdown never lets happen, and a
+// second Stop call (a Rack's shutdown path and a signal handler can both
+// reach for it) must not panic on an already-closed channel.
+func TestTelemetrySink_StopIsIdempotentAndFlushesPendingTelemetry(t *testing.T) {
+	mockBus := bus.NewMockBus()
+	store, err := duckdb.NewStore(slog.Default(), ":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test store: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	if err := store.Migrate(context.Background()); err != nil {
+		t.Fatalf("Failed to init schema: %v", err)
+	}
+
+	dataDir := t.TempDir()
+	// A flush interval of a full minute means only Stop's own final flush
+	// can move this row out of telemetry_logs before the test ends.
+	sink := ingest.NewTelemetrySink(mockBus, store, "flux.telemetry.>", dataDir, time.Minute, nil)
+	if err := sink.Start(context.Background()); err != nil {
+		t.Fatalf("Failed to start sink: %v", err)
+	}
+
+	logMsg := fluxmsg.New()
+	logMsg.Metadata["type"] = "telemetry.batch.logs"
+	logMsg.Data = map[string]interface{}{
+		"batch": []interface{}{map[string]interface{}{
+			"body":     "flush-me",
+			"trace_id": "stop-flush-trace",
+		}},
+	}
+	if err := mockBus.Publish(context.Background(), "flux.telemetry.logs", logMsg); err != nil {
+		t.Fatalf("Failed to publish log: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		var count int
+		row := store.DB().QueryRow("SELECT count(*) FROM telemetry_logs WHERE trace_id = ?", "stop-flush-trace")
+		if err := row.Scan(&count); err == nil && count > 0 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	if err := sink.Stop(); err != nil {
+		t.Fatalf("Stop failed: %v", err)
+	}
+
+	var remaining int
+	row := store.DB().QueryRow("SELECT count(*) FROM telemetry_logs WHERE trace_id = ?", "stop-flush-trace")
+	if err := row.Scan(&remaining); err != nil {
+		t.Fatalf("query failed: %v", err)
+	}
+	if remaining != 0 {
+		t.Errorf("expected Stop to flush the pending log to parquet, %d row(s) remain in DuckDB", remaining)
+	}
+
+	foundParquet := false
+	_ = filepath.Walk(filepath.Join(dataDir, "telemetry", "logs"), func(path string, info os.FileInfo, errWalk error) error {
+		if errWalk == nil && !info.IsDir() && strings.HasSuffix(path, ".parquet") {
+			foundParquet = true
+		}
+		return nil
+	})
+	if !foundParquet {
+		t.Error("expected Stop to write a parquet file for the flushed log")
+	}
+
+	if err := sink.Stop(); err != nil {
+		t.Errorf("a second Stop call must not error or panic, got: %v", err)
+	}
+}
+
 func TestTelemetrySink_SchemaInit(t *testing.T) {
 	store, _ := duckdb.NewStore(slog.Default(), ":memory:")
 	defer func() { _ = store.Close() }()
@@ -160,7 +234,7 @@ func TestTelemetrySink_Metrics(t *testing.T) {
 	ctx := context.Background()
 	_ = store.Migrate(ctx)
 
-	sink := ingest.NewTelemetrySink(mockBus, store, "flux.telemetry.>", "test-mixer", 1*time.Minute, nil)
+	sink := ingest.NewTelemetrySink(mockBus, store, "flux.telemetry.>", t.TempDir(), 1*time.Minute, nil)
 	_ = sink.Start(ctx)
 	defer func() { _ = sink.Stop() }()
 
@@ -232,7 +306,7 @@ func TestTelemetrySink_MiscLogs(t *testing.T) {
 	ctx := context.Background()
 	_ = store.Migrate(ctx)
 
-	sink := ingest.NewTelemetrySink(mockBus, store, "flux.telemetry.>", "test-mixer", 1*time.Minute, nil)
+	sink := ingest.NewTelemetrySink(mockBus, store, "flux.telemetry.>", t.TempDir(), 1*time.Minute, nil)
 	_ = sink.Start(ctx)
 	defer func() { _ = sink.Stop() }()
 
@@ -297,7 +371,7 @@ func TestTelemetrySink_CBORIntCounters(t *testing.T) {
 	ctx := context.Background()
 	_ = store.Migrate(ctx)
 
-	sink := ingest.NewTelemetrySink(mockBus, store, "flux.telemetry.>", "test-cbor", 1*time.Minute, nil)
+	sink := ingest.NewTelemetrySink(mockBus, store, "flux.telemetry.>", t.TempDir(), 1*time.Minute, nil)
 	_ = sink.Start(ctx)
 	defer func() { _ = sink.Stop() }()
 

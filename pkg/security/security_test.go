@@ -118,3 +118,24 @@ func TestMaskCVV(t *testing.T) {
 		t.Errorf("Expected ***, got %s", masked)
 	}
 }
+
+func TestSecretsEqual(t *testing.T) {
+	cases := []struct {
+		name string
+		a, b string
+		want bool
+	}{
+		{"equal non-empty", "same-secret", "same-secret", true},
+		{"different", "secret-a", "secret-b", false},
+		{"different lengths", "short", "much-longer-secret", false},
+		{"both empty", "", "", false},
+		{"one empty", "a-real-secret", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := SecretsEqual(tc.a, tc.b); got != tc.want {
+				t.Errorf("SecretsEqual(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+			}
+		})
+	}
+}

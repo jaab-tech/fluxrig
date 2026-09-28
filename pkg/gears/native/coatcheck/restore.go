@@ -105,19 +105,25 @@ func (r *RestoreLogic) handleMissing(ctx context.Context, msg *fluxmsg.FluxMsg, 
 	log := r.gear.ctx.Logger()
 	log.Debug("coat missing", "key", key, "reason", reason)
 
+	// "" (unset) fails closed as "error", not "forward": coatcheck restore exists
+	// to reattach fields another gear stripped (a PAN, typically), and an unset
+	// policy used to fall through to the same case as an explicit "forward",
+	// silently sending the stripped reply on as if it were complete. Forwarding
+	// without the restored context is now something a scenario must ask for by
+	// name, and an unrecognized value fails the same way a typo deserves to,
+	// rather than silently behaving like "forward" too.
 	switch r.gear.config.OnMissing {
-	case "error":
+	case "error", "":
 		return nil, fmt.Errorf("coatcheck restore: missing context for key %s", key)
 	case "drop":
 		return nil, nil // Silently drop
 	case "forward":
-		fallthrough
-	default:
-		// Pass through without context
 		if r.gear.emit != nil {
 			r.gear.emit(msg)
 		}
 		return nil, nil
+	default:
+		return nil, fmt.Errorf("coatcheck restore: unknown on_missing policy %q", r.gear.config.OnMissing)
 	}
 }
 

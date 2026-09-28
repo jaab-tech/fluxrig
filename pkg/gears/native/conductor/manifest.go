@@ -40,6 +40,11 @@ const configSchemaJSON = `{
       "type": "string",
       "description": "This Conductor's name in the mesh; required only when it hands requests to, or serves requests from, other Conductors."
     },
+    "known_origins": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Optional allowlist of peer Conductor names this gear will route a reply back to, by the origin stamp a request arrived with. Every origin is always checked against a safe identifier format regardless; naming peers here additionally rejects one that is not an expected peer, rather than routing to whatever string arrived."
+    },
     "correlation_key": {
       "type": "array",
       "items": { "type": "string" },

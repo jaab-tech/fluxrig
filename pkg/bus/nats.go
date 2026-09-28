@@ -119,6 +119,15 @@ const (
 	initialRetryBackoff         = 1.5
 )
 
+// maxGuaranteedRedeliveries bounds how many times JetStream redelivers a
+// message on either guaranteed-lane consumer (Subscribe and SubscribeDurable)
+// after a Nak, so a handler that fails deterministically on one message does
+// not retry it forever. Past this the server simply stops redelivering it; a
+// var, not a config field yet, the same trade-off lane.go's unsubscribeWait
+// already documents for the same reason: making it operator-configurable is a
+// reasonable follow-up, not done here.
+var maxGuaranteedRedeliveries = 5
+
 // dialWithRetry connects to url and retries a failed first connection with
 // exponential backoff. It gives up after InitialRetryAttempts tries or, when
 // InitialRetryTimeout is set, as soon as the next wait would carry it past that
@@ -203,13 +212,27 @@ func (n *NatsBus) Publish(ctx context.Context, subject string, msg *fluxmsg.Flux
 		return fmt.Errorf("fluxmsg validation failed: %w", err)
 	}
 
-	// 2. Serialize to Binary (CBOR)
+	// 2. Inject Traces (OTel). Must happen before CBOR marshaling below: the
+	// injected context lands in msg.Metadata, and a marshal taken before this
+	// serializes the message without it, so the trace never reaches the wire.
+	// Metadata is initialized defensively here too: every production
+	// construction goes through fluxmsg.New(), which never leaves it nil, but
+	// propagation.MapCarrier.Set panics on a nil map, and this is the one place
+	// that would ever call it on a hand-built FluxMsg that skipped New().
+	if ctx != nil {
+		if msg.Metadata == nil {
+			msg.Metadata = make(map[string]string)
+		}
+		otel.GetTextMapPropagator().Inject(ctx, propagation.MapCarrier(msg.Metadata))
+	}
+
+	// 3. Serialize to Binary (CBOR)
 	data, err := cbor.Marshal(msg)
 	if err != nil {
 		return err
 	}
 
-	// 3. Technical Logging (Avoid recursion for telemetry)
+	// 4. Technical Logging (Avoid recursion for telemetry)
 	if !strings.Contains(subject, "telemetry") && !strings.Contains(subject, "logs") && !strings.Contains(subject, "metrics") {
 		slog.Debug("NATS Bus: Publish",
 			"subject", subject,
@@ -217,7 +240,7 @@ func (n *NatsBus) Publish(ctx context.Context, subject string, msg *fluxmsg.Flux
 		)
 	}
 
-	// 2. Send Bytes (Persistent) with Deduplication ID.
+	// 5. Send Bytes (Persistent) with Deduplication ID.
 	// The dedup key must be unique per logical emission, not just per message:
 	// a fan-out gear (e.g. the Conductor) emits the SAME FluxID at the SAME hop
 	// count to more than one destination, and a parked-then-replayed request
@@ -229,11 +252,6 @@ func (n *NatsBus) Publish(ctx context.Context, subject string, msg *fluxmsg.Flux
 	// same message reach distinct ports.
 	msgID := fmt.Sprintf("%s-%d-%s", msg.FluxID.String(), len(msg.Path), subject)
 
-	// 3. Inject Traces (OTel)
-	if ctx != nil {
-		otel.GetTextMapPropagator().Inject(ctx, propagation.MapCarrier(msg.Metadata))
-	}
-
 	_, err = n.js.Publish(ctx, subject, data, jetstream.WithMsgID(msgID))
 	if err != nil {
 		slog.Error("NATS Bus Publish Failed", "subject", subject, "error", err)
@@ -241,8 +259,13 @@ func (n *NatsBus) Publish(ctx context.Context, subject string, msg *fluxmsg.Flux
 	return err
 }
 
-// Purge removes all messages from the stream (Best Effort)
-func (n *NatsBus) Purge(ctx context.Context) error {
+// Purge removes messages from the stream (Best Effort). subject, when non-empty,
+// scopes the purge to messages whose subject matches it (a wildcard such as
+// "flux.msg.rack1.>" is valid): the stream is shared by every Rack, and a blanket
+// purge with no filter wipes every other Rack's guaranteed-lane traffic along
+// with the caller's own. An empty subject purges the whole stream, unchanged from
+// before this scoping existed, for a caller that genuinely means to do that.
+func (n *NatsBus) Purge(ctx context.Context, subject string) error {
 	if n.js == nil || n.streamName == "" {
 		return nil
 	}
@@ -250,7 +273,10 @@ func (n *NatsBus) Purge(ctx context.Context) error {
 	if err != nil {
 		return nil // Stream might not exist yet
 	}
-	return s.Purge(ctx)
+	if subject == "" {
+		return s.Purge(ctx)
+	}
+	return s.Purge(ctx, jetstream.WithPurgeSubject(subject))
 }
 
 // PublishRaw sends pre-serialized data (CBOR) with a specific deduplication ID.
@@ -292,6 +318,7 @@ func (n *NatsBus) Subscribe(subject string, handler Handler) (Subscription, erro
 			DeliverPolicy:     jetstream.DeliverNewPolicy,
 			AckPolicy:         jetstream.AckExplicitPolicy, // Reliable baseline
 			MaxAckPending:     10000,                       // Prevent stalls during high-TPS
+			MaxDeliver:        maxGuaranteedRedeliveries,   // Bound retries on a handler that fails every time
 			InactiveThreshold: n.inactiveThreshold,         // Autonomous server-side cleanup if client crashes
 		})
 		if err == nil {
@@ -308,26 +335,54 @@ func (n *NatsBus) Subscribe(subject string, handler Handler) (Subscription, erro
 	_, cancel := context.WithCancel(ctx)
 
 	cc, err := cons.Consume(func(msg jetstream.Msg) {
-		_ = msg.Ack()
 		var fluxMsg fluxmsg.FluxMsg
 
 		if errUnmarshal := cbor.Unmarshal(msg.Data(), &fluxMsg); errUnmarshal != nil {
 			// A message that cannot be decoded used to vanish here without a
 			// trace, which reads downstream as a gear that never received
-			// anything rather than as a message that was thrown away.
+			// anything rather than as a message that was thrown away. Term, not
+			// Ack: it will not decode on redelivery either, and Ack would look
+			// identical to a message the handler actually processed.
 			slog.Error("NATS Bus: Discarding undecodable message",
 				"subject", subject,
 				"bytes", len(msg.Data()),
 				"error", errUnmarshal,
 			)
+			_ = msg.Term()
 			return
 		}
 
-		// 2. Extract Traces (OTel)
+		// Ingress validation: a message from another Rack has never been through
+		// this process's own Publish, so its hop count and shape are only
+		// checked here, not assumed from having passed Validate once already.
+		if errValidate := fluxMsg.Validate(); errValidate != nil {
+			slog.Error("NATS Bus: Discarding invalid message",
+				"subject", subject,
+				"flux_id", fluxMsg.FluxID.String(),
+				"error", errValidate,
+			)
+			_ = msg.Term()
+			return
+		}
+
+		// Extract Traces (OTel)
 		ctx := context.Background()
 		ctx = otel.GetTextMapPropagator().Extract(ctx, propagation.MapCarrier(fluxMsg.Metadata))
 
-		handler(ctx, &fluxMsg)
+		// Acked only once the handler actually succeeds. Acking up front, as this
+		// used to, meant any failure afterward (a panic recovered further down
+		// the call chain, a downstream publish error) was unrecoverable: at-most-
+		// once delivery disguised as the guaranteed lane it was supposed to be.
+		if errHandle := handler(ctx, &fluxMsg); errHandle != nil {
+			slog.Error("NATS Bus: Handler failed, message will be redelivered",
+				"subject", subject,
+				"flux_id", fluxMsg.FluxID.String(),
+				"error", errHandle,
+			)
+			_ = msg.Nak()
+			return
+		}
+		_ = msg.Ack()
 	})
 
 	if err != nil {
@@ -405,6 +460,7 @@ func (n *NatsBus) SubscribeDurable(subject, durableName string, handler Handler)
 		FilterSubject: subject,
 		DeliverPolicy: jetstream.DeliverAllPolicy,
 		AckPolicy:     jetstream.AckExplicitPolicy,
+		MaxDeliver:    maxGuaranteedRedeliveries, // Same bound as Subscribe: a handler that fails every time must not retry forever
 	})
 	if err != nil {
 		return nil, err
@@ -417,15 +473,27 @@ func (n *NatsBus) SubscribeDurable(subject, durableName string, handler Handler)
 		// Deserialize
 		var fluxMsg fluxmsg.FluxMsg
 		if errUnmarshal := cbor.Unmarshal(msg.Data(), &fluxMsg); errUnmarshal != nil {
-			// Acked rather than left to redeliver: a message that cannot be
+			// Term rather than left to redeliver: a message that cannot be
 			// decoded will not decode on the next attempt either, and holding
-			// it stalls the consumer. A dead letter queue is the real answer.
+			// it stalls the consumer. Term, not Ack: it makes that explicit
+			// instead of looking identical to a message the handler processed.
+			// A dead letter queue is the real answer.
 			slog.Error("NATS Bus: Discarding undecodable message",
 				"subject", subject,
 				"bytes", len(msg.Data()),
 				"error", errUnmarshal,
 			)
-			_ = msg.Ack()
+			_ = msg.Term()
+			return
+		}
+
+		if errValidate := fluxMsg.Validate(); errValidate != nil {
+			slog.Error("NATS Bus: Discarding invalid message",
+				"subject", subject,
+				"flux_id", fluxMsg.FluxID.String(),
+				"error", errValidate,
+			)
+			_ = msg.Term()
 			return
 		}
 
@@ -433,7 +501,15 @@ func (n *NatsBus) SubscribeDurable(subject, durableName string, handler Handler)
 		ctx := context.Background()
 		ctx = otel.GetTextMapPropagator().Extract(ctx, propagation.MapCarrier(fluxMsg.Metadata))
 
-		handler(ctx, &fluxMsg)
+		if errHandle := handler(ctx, &fluxMsg); errHandle != nil {
+			slog.Error("NATS Bus: Handler failed, message will be redelivered",
+				"subject", subject,
+				"flux_id", fluxMsg.FluxID.String(),
+				"error", errHandle,
+			)
+			_ = msg.Nak()
+			return
+		}
 		_ = msg.Ack()
 	})
 

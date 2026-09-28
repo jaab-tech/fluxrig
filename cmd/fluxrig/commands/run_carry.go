@@ -5,6 +5,7 @@ package commands
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 
 	"github.com/google/uuid"
@@ -54,9 +55,35 @@ func mixerPublicKey(statePath string) []byte {
 	if err != nil {
 		return nil
 	}
-	state, err := env.Verify()
+	state, err := verifyPassport(statePath, env)
 	if err != nil {
 		return nil
 	}
 	return state.MixerPublic
+}
+
+// verifyPassport checks env against the Mixer key pinned for statePath,
+// establishing that pin the first time a passport is ever accepted for this
+// path. Every passport after that must carry a signature valid under the
+// pinned key: the envelope's own claimed key is never trusted on its own,
+// or anyone who can write an envelope could also supply the key it verifies
+// against.
+func verifyPassport(statePath string, env *pki.StateEnvelope) (*pki.RackState, error) {
+	pinned, err := pki.LoadPinnedMixerKey(statePath)
+	if err != nil {
+		return nil, fmt.Errorf("load pinned mixer key: %w", err)
+	}
+
+	state, err := env.VerifyPinned(pinned)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(pinned) == 0 {
+		if errPin := pki.PinMixerKey(statePath, state.MixerPublic); errPin != nil {
+			return nil, fmt.Errorf("pin mixer key: %w", errPin)
+		}
+	}
+
+	return state, nil
 }

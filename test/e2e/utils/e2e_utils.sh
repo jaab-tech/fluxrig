@@ -16,6 +16,15 @@ log_info() {
 # Ensure ROOT_DIR is available early
 ROOT_DIR="${ROOT_DIR:-.}"
 
+# Every e2e test runs its Mixer on 127.0.0.1 in an ephemeral, fully local,
+# trusted process tree: exactly the deliberate opt-out
+# api.auth_disabled_dangerously exists for. Exported here, once, rather than
+# on each script's own inline mixer-launch line, since most of them start the
+# binary directly instead of through this file's start_mixer. Real
+# deployments set a real api.auth_token instead; Start() refuses to run
+# without one of the two.
+export FLUXRIG_API_AUTH_DISABLED_DANGEROUSLY=true
+
 log_success() {
     echo -e "${GREEN}[PASS] ✅${NC} $1"
 }

@@ -7,6 +7,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -110,6 +112,7 @@ wires:
 
 	// Pre-register rack-1 (Simulate enrollment)
 	store.SetAutoAdopt(true)
+	store.SetBootstrapSecret("sec")
 	if _, err := store.Register(ctx, uuid.New(), "rack-1", "sec", "ip", 80, "v1", nil, mixerID); err != nil {
 		t.Fatalf("Failed to pre-register rack: %v", err)
 	}
@@ -127,6 +130,47 @@ wires:
 	if _, err := store.GetEntityIDByName(ctx, "gear-1"); err != nil {
 		t.Errorf("Gear not registered: %v", err)
 	}
+}
+
+// Before this fix, a failure registering scenario entities in DuckDB was
+// only logged: Activate still wrote the active pointer to disk and set the
+// in-memory scenario, so the Mixer believed a scenario was active while its
+// registry -- the source of truth for what is actually deployed -- never
+// reflected it. A Rack declared under racks: that never enrolled makes
+// registerScenarioEntities fail deterministically (waitForRack times out),
+// while validateDeployTargets stays happy because no gear deploys to it.
+func TestScenarioController_ActivateDoesNotCommitWhenRegistrationFails(t *testing.T) {
+	store, err := duckdb.NewStore(slog.Default(), ":memory:")
+	require.NoError(t, err)
+	require.NoError(t, store.Migrate(context.Background()))
+	tmpDir := t.TempDir()
+
+	mixerID := uuid.New()
+	gen, _ := idgen.New(mixerID)
+	// A short wait so the never-enrolling rack below times out quickly.
+	sc := NewScenarioController(slog.Default(), tmpDir, store, gen, mixerID, time.Millisecond)
+
+	ctx := context.Background()
+	yamlData := []byte(`
+meta:
+  version: "1.0.0"
+racks:
+  - name: "ghost-rack"
+gears: []
+wires: []
+`)
+	name, err := sc.Import(ctx, yamlData, false)
+	require.NoError(t, err)
+
+	err = sc.Activate(ctx, name)
+	require.Error(t, err, "activation must fail when the rack it declares never registered")
+
+	assert.Empty(t, sc.GetActiveName(), "the active pointer must not be committed when registration fails")
+	assert.Nil(t, sc.GetActiveScenario())
+
+	activeFile := filepath.Join(tmpDir, "active")
+	_, statErr := os.Stat(activeFile)
+	assert.True(t, os.IsNotExist(statErr), "the on-disk active pointer must not be written when registration fails")
 }
 
 // Import files a scenario whose Racks have not enrolled; Activate refuses it with
@@ -162,6 +206,7 @@ gears:
 	assert.NotEqual(t, "needs-rack", sc.CurrentName(), "a refused activation must not make the scenario active")
 
 	store.SetAutoAdopt(true)
+	store.SetBootstrapSecret("sec")
 	_, err = store.Register(ctx, uuid.New(), "rack-1", "sec", "ip", 80, "v1", nil, mixerID)
 	require.NoError(t, err)
 
@@ -259,6 +304,7 @@ racks:
 	}
 
 	store.SetAutoAdopt(true)
+	store.SetBootstrapSecret("sec")
 	if _, err := store.Register(ctx, uuid.New(), "test-rack", "sec", "ip", 80, "v1", nil, mixerID); err != nil {
 		t.Fatalf("Failed to pre-register rack: %v", err)
 	}
@@ -302,6 +348,7 @@ func TestScenarioController_ActivatePushesToADeployPinNotListedInRacks(t *testin
 	require.NoError(t, err)
 	require.NoError(t, store.Migrate(context.Background()))
 	store.SetAutoAdopt(true)
+	store.SetBootstrapSecret("sec")
 
 	mixerID := uuid.New()
 	gen, _ := idgen.New(mixerID)
@@ -337,6 +384,7 @@ func TestScenarioController_ActivateFailsOnZeroDelivery(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, store.Migrate(context.Background()))
 	store.SetAutoAdopt(true)
+	store.SetBootstrapSecret("sec")
 
 	mixerID := uuid.New()
 	gen, _ := idgen.New(mixerID)
@@ -396,4 +444,50 @@ gears:
 	require.NoError(t, err)
 
 	require.NoError(t, sc.Activate(ctx, name), "a global gear needs no rack target")
+}
+
+// A scenario's own racks: list used to get every named Rack promoted from
+// pending to active as a side effect of registerScenarioEntities, entirely
+// outside the approval flow (fluxrig-explained/docs/17-deep-review.md,
+// "Mixer, store and enrollment": scenario import auto-activates pending
+// racks). The gear here has no deploy: pin naming the rack, so
+// validateDeployTargets never touches it either: this exercises the
+// registerScenarioEntities path specifically, not gear deploy validation.
+func TestScenarioController_ActivateNeverPromotesAPendingRackNamedInRacks(t *testing.T) {
+	store, err := duckdb.NewStore(slog.Default(), ":memory:")
+	require.NoError(t, err)
+	require.NoError(t, store.Migrate(context.Background()))
+
+	mixerID := uuid.New()
+	store.SetBootstrapSecret("sec")
+	_, err = store.Register(context.Background(), uuid.New(), "rack-1", "sec", "ip", 80, "v1", nil, mixerID)
+	require.NoError(t, err, "SetAutoAdopt defaults false, so this Rack starts pending")
+
+	gen, _ := idgen.New(mixerID)
+	sc := NewScenarioController(slog.Default(), t.TempDir(), store, gen, mixerID, 200*time.Millisecond)
+	sc.SetBus(failingScenarioBus{}) // must never be called: nothing active to push to
+	ctx := context.Background()
+
+	name, err := sc.Import(ctx, []byte(`
+meta:
+  name: names-a-pending-rack
+  version: "1.0.0"
+racks:
+  - name: "rack-1"
+gears:
+  - name: "gear-1"
+    type: "io_tcp"
+`), false)
+	require.NoError(t, err)
+
+	// Activate still reports the zero-delivery push (rack-1 is not an active
+	// target), a pre-existing, separate behavior. What this test cares about
+	// is the side effect on the registry, which the commit-then-report
+	// design here applies regardless of that reported error.
+	_ = sc.Activate(ctx, name)
+
+	list, err := store.List(ctx, "")
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+	assert.Equal(t, "pending", list[0].Status, "importing a scenario must never promote a Rack it merely names")
 }

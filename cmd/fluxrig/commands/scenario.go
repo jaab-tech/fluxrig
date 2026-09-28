@@ -66,12 +66,7 @@ var scenarioImportCmd = &cobra.Command{
 				mixerURL += "?dry_run=true"
 			}
 
-			req, errReq := http.NewRequestWithContext(
-				context.Background(),
-				http.MethodPost,
-				mixerURL,
-				bytes.NewReader(content),
-			)
+			req, errReq := newAPIRequest(cmd, http.MethodPost, mixerURL, bytes.NewReader(content))
 			if errReq != nil {
 				return fmt.Errorf("failed to create request: %w", errReq)
 			}
@@ -194,8 +189,12 @@ var scenarioDiffCmd = &cobra.Command{
 		}
 		activeURL := fmt.Sprintf("%s/api/v1/scenario/active", baseURL)
 
+		req, err := newAPIRequest(cmd, http.MethodGet, activeURL, nil)
+		if err != nil {
+			return err
+		}
 		client := &http.Client{Timeout: 10 * time.Second}
-		resp, err := client.Get(activeURL)
+		resp, err := client.Do(req)
 		if err != nil {
 			return fmt.Errorf("failed to fetch active scenario from mixer: %w", err)
 		}
@@ -247,6 +246,7 @@ var scenarioDiffCmd = &cobra.Command{
 func init() {
 	// Persistent flag inherited by all subcommands
 	scenarioCmd.PersistentFlags().String("store-dir", "", "CAS store directory (default: ~/.fluxrig/store)")
+	addAPITokenFlag(scenarioCmd, true)
 
 	scenarioImportCmd.Flags().BoolVarP(&dryRun, "dry-run", "d", false, "Validate without applying")
 	scenarioImportCmd.Flags().Bool("api", false, "Send to running Mixer API instead of CAS store")

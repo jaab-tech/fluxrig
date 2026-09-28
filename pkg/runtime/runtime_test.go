@@ -6,12 +6,15 @@ package runtime
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/jaab-tech/fluxrig/pkg/bus"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
@@ -63,7 +66,7 @@ func (m *MockBus) Publish(ctx context.Context, subject string, msg *fluxmsg.Flux
 	if msg.Flags&fluxmsg.FlagSyncProbe != 0 && !m.DisableReflect {
 		if h, ok := m.handlers[subject]; ok {
 			// Deliver in goroutine to simulate real bus behavior and prevent deadlocks (m.mu)
-			go h(ctx, msg)
+			go func() { _ = h(ctx, msg) }()
 		}
 	}
 	return nil
@@ -475,6 +478,132 @@ func TestManager_ConvergenceTimeout(t *testing.T) {
 		// Accept both for now as MockBus behavior may vary across environments
 		t.Errorf("Wrong error: %v", err)
 	}
+}
+
+// TestManager_WaitForConvergenceDoesNotRaceTheProbeHandler is a regression test
+// for a real race: waitForConvergence read m.hotSubjects directly, unlocked, to
+// build its initial snapshot, while the wire handler's probe branch mutates the
+// same map under m.mu on another goroutine as subjects converge (a real
+// Subscribe callback fires from the bus client's own consumer goroutine, exactly
+// like the one this test drives by hand). A goroutine that keeps mutating
+// hotSubjects under lock for the whole time waitForConvergence runs makes the
+// overlap with its snapshot loop near-certain, rather than leaving it to
+// scheduler luck on a single pass.
+func TestManager_WaitForConvergenceDoesNotRaceTheProbeHandler(t *testing.T) {
+	mockBus := &MockBus{}
+	mid := uuid.New()
+	gen, _ := idgen.New(mid)
+	// Short convergenceTimeout: nothing in this test ever closes a channel, so
+	// waitForConvergence always ends in a timeout error, which is fine. Only the
+	// race matters here, not the outcome.
+	mgr := NewManager(mid, "test-rack", mockBus, gen, &MockManager{}, time.Second, 50*time.Millisecond, 10*time.Millisecond, false, false, nil)
+
+	mgr.hotSubjects = make(map[string]chan struct{}, 200)
+	for i := 0; i < 200; i++ {
+		mgr.hotSubjects[fmt.Sprintf("s%d", i)] = make(chan struct{})
+	}
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		next := 200
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			mgr.mu.Lock()
+			for k := range mgr.hotSubjects {
+				delete(mgr.hotSubjects, k)
+				break
+			}
+			mgr.hotSubjects[fmt.Sprintf("s%d", next)] = make(chan struct{})
+			next++
+			mgr.mu.Unlock()
+		}
+	}()
+
+	_ = mgr.waitForConvergence(context.Background())
+	close(stop)
+	wg.Wait()
+}
+
+// TestManager_PublishPortDoesNotMutateTheCallersMessage is a regression test for
+// a real bug: publishPort set FluxID and appended a hop directly onto the
+// *fluxmsg.FluxMsg the caller passed in, rather than on a copy. A gear that
+// keeps its own reference to a message after emitting it (or that emits the
+// same one to more than one port) saw it come back changed underneath it.
+func TestManager_PublishPortDoesNotMutateTheCallersMessage(t *testing.T) {
+	mockBus := &MockBus{}
+	mid := uuid.New()
+	gen, _ := idgen.New(mid)
+	mgr := NewManager(mid, "test-rack", mockBus, gen, &MockManager{}, time.Second, time.Second, 100*time.Millisecond, false, false, nil)
+
+	original := fluxmsg.New()
+	require.NoError(t, mgr.publishPort(context.Background(), "g1", "out", original))
+
+	assert.Empty(t, original.Path, "publishPort appended a hop onto the caller's own message")
+	assert.Equal(t, uuid.Nil, original.FluxID, "publishPort set FluxID on the caller's own message")
+}
+
+// TestManager_PublishPortConcurrentEmitsOfTheSameMessageDoNotRace is a regression
+// test for the same finding's concurrency angle: a fan-out gear emitting one
+// message object to several ports (or from several goroutines) appended to the
+// same underlying msg.Path slice from each call, an unsynchronized concurrent
+// mutation of shared state, not just a logical corruption.
+func TestManager_PublishPortConcurrentEmitsOfTheSameMessageDoNotRace(t *testing.T) {
+	mockBus := &MockBus{}
+	mid := uuid.New()
+	gen, _ := idgen.New(mid)
+	mgr := NewManager(mid, "test-rack", mockBus, gen, &MockManager{}, time.Second, time.Second, 100*time.Millisecond, false, false, nil)
+
+	shared := fluxmsg.New()
+	shared.Path = append(shared.Path, &fluxmsg.Hop{})
+
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		port := fmt.Sprintf("out%d", i)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = mgr.publishPort(context.Background(), "fanout-gear", port, shared)
+		}()
+	}
+	wg.Wait()
+
+	assert.Len(t, shared.Path, 1, "concurrent emits of the same message must not append to its shared Path")
+}
+
+// TestManager_StopAllQuiescesTheHotLaneBeforeTearingDown is a regression test
+// for a real bug: stopAll (used by both ApplyScenario, between scenarios, and
+// Shutdown) unsubscribed every wire immediately, and laneSub.Unsubscribe drops
+// whatever is still queued for it. Drain already quiesces first for exactly
+// this reason; stopAll did not, so replacing a scenario or shutting down could
+// silently drop messages Drain would have delivered.
+func TestManager_StopAllQuiescesTheHotLaneBeforeTearingDown(t *testing.T) {
+	original := stopAllQuiesceTimeout
+	stopAllQuiesceTimeout = 50 * time.Millisecond
+	defer func() { stopAllQuiesceTimeout = original }()
+
+	mockBus := &MockBus{}
+	mid := uuid.New()
+	gen, _ := idgen.New(mid)
+	mgr := NewManager(mid, "test-rack", mockBus, gen, &MockManager{}, time.Second, time.Second, 100*time.Millisecond, false, false, nil)
+
+	// Simulates a message still queued or being handled on the hot lane: nothing
+	// in this test ever brings it back to zero, so a stopAll that actually
+	// quiesces must wait out the whole bounded timeout, not return immediately.
+	mgr.lane.pending.Add(1)
+
+	start := time.Now()
+	mgr.Shutdown()
+	elapsed := time.Since(start)
+
+	assert.GreaterOrEqual(t, elapsed, 50*time.Millisecond,
+		"stopAll must wait for the hot lane to quiesce before unsubscribing, not tear down immediately")
 }
 
 // testTerminus is the manifest-terminus lookup used by binding tests, backed

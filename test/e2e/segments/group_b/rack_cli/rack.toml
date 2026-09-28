@@ -1,0 +1,14 @@
+[logging]
+level = "debug"
+filename = "logs/rack.log"
+
+[store]
+dir = "./data"
+state_file = "state.flux"
+
+[rack]
+name_prefix = "cli-test-"
+heartbeat_interval = "2s"
+
+[rack.bus]
+url = "nats://localhost:4224"

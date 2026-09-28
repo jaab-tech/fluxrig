@@ -38,6 +38,7 @@ func TestStore_Comprehensive(t *testing.T) {
 	if errMig := s.Migrate(ctx); errMig != nil {
 		t.Fatalf("Migrate failed: %v", errMig)
 	}
+	s.SetBootstrapSecret("secret")
 
 	// 3. Registry Operations (Mixer)
 	mixerMachineID := uuid.New()

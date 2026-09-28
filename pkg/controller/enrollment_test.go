@@ -72,7 +72,8 @@ func (m *MockRegistry) UpdateStatus(ctx context.Context, machineID uuid.UUID, st
 func (m *MockRegistry) UpdateStatusEntity(ctx context.Context, typeID uint8, id uuid.UUID, status string) error {
 	return nil
 }
-func (m *MockRegistry) SetAutoAdopt(enabled bool) {}
+func (m *MockRegistry) SetAutoAdopt(enabled bool)        {}
+func (m *MockRegistry) SetBootstrapSecret(secret string) {}
 func (m *MockRegistry) QueryLogs(ctx context.Context, query registry.LogQuery) ([]registry.LogEntry, error) {
 	return nil, nil
 }
@@ -136,15 +137,20 @@ func TestEnrollmentController_HandleHello(t *testing.T) {
 func TestEnrollmentController_HandleHeartbeat(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	signer := &pki.ClusterKey{Private: priv, Public: pub}
-	mockReg := &MockRegistry{}
+	machineID := uuid.New()
+	mockReg := &MockRegistry{
+		GetFunc: func(ctx context.Context, id uuid.UUID) (*registry.Rack, error) {
+			return &registry.Rack{MachineID: id, Name: "test-rack", Status: "active", Secret: "shared-secret"}, nil
+		},
+	}
 	mockPub := &MockPublisher{}
 
 	mixerID := uuid.New()
 	ctrl := NewEnrollmentController(slog.Default(), mockReg, mockPub, signer, mixerID, time.Second)
 
-	machineID := uuid.New()
 	hb := &fluxmsg.HeartbeatPayload{
 		MachineID: machineID,
+		Secret:    "shared-secret",
 		Stats:     map[string]any{"cpu": 50},
 	}
 	hbData, _ := hb.ToData()
@@ -188,5 +194,74 @@ func TestEnrollmentController_Garbage(t *testing.T) {
 	resp, err = ctrl.HandleHello(msg2)
 	if resp != nil || err != nil {
 		t.Error("Expected nil/nil for invalid hello payload")
+	}
+}
+
+// fluxrig-explained/docs/17-deep-review.md, "Mixer, store and enrollment":
+// HandleHeartbeat accepted any heartbeat naming a known MachineID, with
+// nothing to verify the caller actually was that Rack.
+func TestEnrollmentController_HandleHeartbeat_WrongSecretRejected(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	signer := &pki.ClusterKey{Private: priv, Public: pub}
+	machineID := uuid.New()
+	heartbeatCalled := false
+	mockReg := &MockRegistry{
+		GetFunc: func(ctx context.Context, id uuid.UUID) (*registry.Rack, error) {
+			return &registry.Rack{MachineID: id, Name: "test-rack", Status: "active", Secret: "real-secret"}, nil
+		},
+		HeartbeatFunc: func(ctx context.Context, id uuid.UUID, stats map[string]any) error {
+			heartbeatCalled = true
+			return nil
+		},
+	}
+	mockPub := &MockPublisher{}
+	ctrl := NewEnrollmentController(slog.Default(), mockReg, mockPub, signer, uuid.New(), time.Second)
+
+	hb := &fluxmsg.HeartbeatPayload{MachineID: machineID, Secret: "wrong-secret", Stats: map[string]any{"cpu": 50}}
+	hbData, _ := hb.ToData()
+	fm := fluxmsg.New()
+	fm.Data = hbData
+	payload, _ := cbor.Marshal(fm)
+
+	if _, err := ctrl.HandleHeartbeat(message.NewMessage("test-uuid", payload)); err != nil {
+		t.Fatalf("HandleHeartbeat returned an error instead of quietly rejecting: %v", err)
+	}
+	if heartbeatCalled {
+		t.Error("a heartbeat with the wrong secret must never reach the registry update")
+	}
+	if mockPub.PublishedTopic != "" {
+		t.Errorf("a rejected heartbeat must not get a status reply, got topic %s", mockPub.PublishedTopic)
+	}
+}
+
+// fluxrig-explained/docs/17-deep-review.md, same finding: the enrollment
+// reply topic was built from the caller-supplied name and nonce raw, so a
+// value containing "." (a NATS subject separator) could reroute delivery.
+func TestEnrollmentController_HandleHello_SanitizesTopicFromName(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	signer := &pki.ClusterKey{Private: priv, Public: pub}
+	mockReg := &MockRegistry{}
+	mockPub := &MockPublisher{}
+	ctrl := NewEnrollmentController(slog.Default(), mockReg, mockPub, signer, uuid.New(), time.Second)
+
+	hello := &fluxmsg.HelloPayload{
+		Name:      "rack-1.evil.>",
+		MachineID: uuid.Nil,
+		IP:        "10.0.0.1",
+		Port:      8080,
+		Nonce:     "nonce.with.dots",
+	}
+	helloData, _ := hello.ToData()
+	fm := fluxmsg.New()
+	fm.Data = helloData
+	payload, _ := cbor.Marshal(fm)
+
+	if _, err := ctrl.HandleHello(message.NewMessage("test-uuid", payload)); err != nil {
+		t.Fatalf("HandleHello failed: %v", err)
+	}
+
+	want := "flux.agent.enrollment.rack-1_evil.nonce_with_dots"
+	if mockPub.PublishedTopic != want {
+		t.Errorf("got topic %q, want %q (name/nonce must not inject subject tokens)", mockPub.PublishedTopic, want)
 	}
 }

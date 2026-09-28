@@ -19,4 +19,5 @@ var adminCmd = &cobra.Command{
 func init() {
 	rootCmd.AddCommand(adminCmd)
 	adminCmd.PersistentFlags().StringVar(&apiURL, "api-url", "http://localhost:8090", "URL of the Mixer API")
+	addAPITokenFlag(adminCmd, true)
 }

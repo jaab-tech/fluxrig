@@ -42,7 +42,11 @@ var logsCmd = &cobra.Command{
 			params.Set("until", until)
 		}
 
-		resp, err := http.Get(fmt.Sprintf("%s/api/v1/telemetry/logs?%s", apiURL, params.Encode()))
+		req, err := newAPIRequest(cmd, http.MethodGet, fmt.Sprintf("%s/api/v1/telemetry/logs?%s", apiURL, params.Encode()), nil)
+		if err != nil {
+			return err
+		}
+		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			return fmt.Errorf("failed to connect to mixer: %w", err)
 		}
@@ -102,7 +106,11 @@ var metricsCmd = &cobra.Command{
 			params.Set("until", until)
 		}
 
-		resp, err := http.Get(fmt.Sprintf("%s/api/v1/telemetry/metrics?%s", apiURL, params.Encode()))
+		req, err := newAPIRequest(cmd, http.MethodGet, fmt.Sprintf("%s/api/v1/telemetry/metrics?%s", apiURL, params.Encode()), nil)
+		if err != nil {
+			return err
+		}
+		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			return fmt.Errorf("failed to connect to mixer: %w", err)
 		}
@@ -147,6 +155,7 @@ func init() {
 	logsCmd.Flags().String("entity", "", "Filter by entity name")
 	logsCmd.Flags().String("since", "", "Start time (duration like 1h or ISO timestamp)")
 	logsCmd.Flags().String("until", "", "End time (ISO timestamp)")
+	addAPITokenFlag(logsCmd, false)
 
 	// Metrics flags
 	metricsCmd.Flags().Int("limit", 50, "Number of metrics to retrieve")
@@ -155,4 +164,5 @@ func init() {
 	metricsCmd.Flags().String("entity", "", "Filter by entity name")
 	metricsCmd.Flags().String("since", "", "Start time (duration like 1h or ISO timestamp)")
 	metricsCmd.Flags().String("until", "", "End time (ISO timestamp)")
+	addAPITokenFlag(metricsCmd, false)
 }

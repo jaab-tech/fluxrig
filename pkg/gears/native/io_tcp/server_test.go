@@ -214,3 +214,35 @@ func TestFlushBuffer_RequeuesWhatWasNotSentOnWriteFailure(t *testing.T) {
 	assert.Equal(t, "one", string(s.msgBuffer[0]))
 	assert.Equal(t, "two", string(s.msgBuffer[1]))
 }
+
+// TestServer_IdleTimeoutClosesAConnectionThatNeverSendsAnything is a
+// regression test for a real bug: idle_timeout was parsed and defaulted
+// (60s), but nothing ever called SetReadDeadline (or any deadline at all) on
+// a server connection, so a client that connected and then sent nothing held
+// the connection, and the server's resources for it, forever.
+func TestServer_IdleTimeoutClosesAConnectionThatNeverSendsAnything(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := l.Addr().String()
+	_ = l.Close()
+
+	cfg := DefaultConfig()
+	cfg.Bind = addr
+	cfg.IdleTimeout = Duration(50 * time.Millisecond)
+
+	s := NewServer(&cfg, slog.Default(), func(*fluxmsg.FluxMsg) {}, &MockIDGen{})
+	require.NoError(t, s.Start(context.Background()))
+	defer func() { _ = s.Stop() }()
+
+	conn, err := net.Dial("tcp", addr)
+	require.NoError(t, err)
+	defer func() { _ = conn.Close() }()
+
+	require.Eventually(t, func() bool { return s.activeConns.Load() == 1 }, time.Second, 10*time.Millisecond,
+		"the server never registered the connection")
+
+	// The client sends nothing at all. Without the fix, activeConns stays 1
+	// forever; with it, idle_timeout closes the connection server-side.
+	require.Eventually(t, func() bool { return s.activeConns.Load() == 0 }, 2*time.Second, 10*time.Millisecond,
+		"idle_timeout must close a connection that never sends anything")
+}

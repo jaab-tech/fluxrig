@@ -20,7 +20,11 @@ var racksCmd = &cobra.Command{
 	Short: "List all registered racks",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		apiURL, _ := cmd.Flags().GetString("api-url")
-		resp, err := http.Get(apiURL + "/api/v1/racks")
+		req, err := newAPIRequest(cmd, http.MethodGet, apiURL+"/api/v1/racks", nil)
+		if err != nil {
+			return err
+		}
+		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			return fmt.Errorf("failed to connect to mixer: %w", err)
 		}
@@ -57,4 +61,5 @@ var racksCmd = &cobra.Command{
 func init() {
 	rootCmd.AddCommand(racksCmd)
 	racksCmd.Flags().String("api-url", "http://localhost:8090", "URL of the Mixer API")
+	addAPITokenFlag(racksCmd, false)
 }

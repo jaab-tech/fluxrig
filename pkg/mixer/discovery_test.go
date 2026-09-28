@@ -19,13 +19,14 @@ func TestApp_DiscoveryResumption(t *testing.T) {
 	store, _ := duckdb.NewStore(logger, ":memory:")
 	_ = store.Migrate(context.Background())
 	store.SetAutoAdopt(true)
+	store.SetBootstrapSecret("test-bootstrap")
 
 	machineID := uuid.New()
 	idGen, _ := idgen.New(machineID)
 
 	// Seed a Rack
 	mixerID := uuid.New()
-	rack, err := store.Register(context.Background(), uuid.New(), "rack-1", "", "1.1.1.1", 1234, "v1", nil, mixerID)
+	rack, err := store.Register(context.Background(), uuid.New(), "rack-1", "test-bootstrap", "1.1.1.1", 1234, "v1", nil, mixerID)
 	if err != nil {
 		t.Fatalf("Failed to register rack: %v", err)
 	}
