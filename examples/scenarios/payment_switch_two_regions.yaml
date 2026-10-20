@@ -161,16 +161,16 @@ gears:
   # Exception path: the Conductor emits the ORIGINAL structured message on its
   # `error` port (never an authored message), with the reason in metadata
   # (error.reason). This bento gear is where the decline is authored: an inline
-  # Bloblang mapping echoes the request, flips the MTI to its response value,
-  # and sets DE39, then hands the result to the same reply encoder as the happy
-  # path. (Bento mappings are inline; there is no external mapping file.)
+  # Bloblang mapping echoes the request, flips the MTI (metadata iso8583.mti) to
+  # its response value, and sets DE39 (iso8583.field.39), then hands the result
+  # to the same reply encoder as the happy path. (Bento mappings are inline; there is no external mapping file.)
   - name: "decline-builder-east"
     type: "bento"
     deploy: "rack-east"
-    ports:
-      inputs: ["in"]
-      outputs: ["out"]
     config:
+      ports:
+        inputs: ["in"]
+        outputs: ["out"]
       bento:
         pipeline:
           processors:
@@ -178,16 +178,18 @@ gears:
                 # `this` is the original structured request the Conductor parked;
                 # meta("error.reason") is timeout|no_destination|no_route|no_key|
                 # unmatched_reply; unlisted reasons fall to the default branch below.
+                # codec_iso8583 encode reads the MTI from metadata `iso8583.mti`
+                # and the fields from `iso8583.field.N`, so the mapping writes there.
                 root = this
                 # Response MTI = request MTI with the message-class bit set.
-                root.mti = match this.mti {
+                meta "iso8583.mti" = match meta("iso8583.mti") {
                   "0100" => "0110"    # authorization
                   "0200" => "0210"    # financial
                   "0800" => "0810"    # network management
-                  _      => this.mti
+                  _      => meta("iso8583.mti")
                 }
                 # DE39 (response code) chosen from why the switch could not complete.
-                root."39" = match meta("error.reason") {
+                root.iso8583.field."39" = match meta("error.reason") {
                   "timeout"        => "68"   # response received too late
                   "no_destination" => "91"   # issuer / switch inoperative
                   "no_route"       => "30"   # format error (no route)
@@ -299,23 +301,23 @@ gears:
   - name: "decline-builder-west"
     type: "bento"
     deploy: "rack-west"
-    ports:
-      inputs: ["in"]
-      outputs: ["out"]
     config:
+      ports:
+        inputs: ["in"]
+        outputs: ["out"]
       bento:
         pipeline:
           processors:
             - mapping: |
                 # Identical decline mapping to decline-builder-east.
                 root = this
-                root.mti = match this.mti {
+                meta "iso8583.mti" = match meta("iso8583.mti") {
                   "0100" => "0110"
                   "0200" => "0210"
                   "0800" => "0810"
-                  _      => this.mti
+                  _      => meta("iso8583.mti")
                 }
-                root."39" = match meta("error.reason") {
+                root.iso8583.field."39" = match meta("error.reason") {
                   "timeout"        => "68"
                   "no_destination" => "91"
                   "no_route"       => "30"
