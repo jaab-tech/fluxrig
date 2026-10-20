@@ -104,10 +104,10 @@ func init() {
 	keysCmd.AddCommand(keysInspectCmd)
 }
 
-// keysInspectCmd inspects a state.flux file
+// keysInspectCmd inspects a State Envelope file (the Rack passport, rack.flux by default)
 var keysInspectCmd = &cobra.Command{
 	Use:   "inspect [path]",
-	Short: "Inspect a State Envelope (state.flux)",
+	Short: "Inspect a State Envelope (rack.flux by default)",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		p := args[0]

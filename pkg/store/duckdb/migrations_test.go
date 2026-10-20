@@ -5,10 +5,15 @@ package duckdb
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"path/filepath"
 	"sync"
 	"testing"
+
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/jaab-tech/fluxrig/pkg/lockfile"
 )
@@ -98,4 +103,31 @@ func TestStore_MigrateSkipsTheFileLockForAnInMemoryStore(t *testing.T) {
 	if errMigrate := s.Migrate(context.Background()); errMigrate != nil {
 		t.Errorf("Migrate failed for an in-memory store: %v", errMigrate)
 	}
+}
+
+// Version 2 deletes the Mixer, Rack and Snake rows, secrets included, now
+// that the key-value registry holds them, and keeps the topology rows.
+func TestStore_MigrateV2DropsIdentityRowsKeepsTopology(t *testing.T) {
+	s, err := NewStore(slog.Default(), "")
+	require.NoError(t, err)
+	defer func() { _ = s.Close() }()
+	ctx := context.Background()
+	require.NoError(t, s.Migrate(ctx))
+
+	for i, typeID := range []int{2, 4, 9, 5} {
+		_, errIns := s.DB().ExecContext(ctx,
+			"INSERT INTO registry (entity_id, type_id, machine_id, name, secret) VALUES (?, ?, ?, ?, 'plaintext')",
+			uuid.New(), typeID, uuid.New(), fmt.Sprintf("entity-%d", i))
+		require.NoError(t, errIns)
+	}
+	tx, err := s.DB().BeginTx(ctx, nil)
+	require.NoError(t, err)
+	require.NoError(t, migrateV2(ctx, tx))
+	require.NoError(t, tx.Commit())
+
+	var identity, topology int
+	require.NoError(t, s.DB().QueryRowContext(ctx, "SELECT count(*) FROM registry WHERE type_id IN (2, 4, 9)").Scan(&identity))
+	require.NoError(t, s.DB().QueryRowContext(ctx, "SELECT count(*) FROM registry WHERE type_id = 5").Scan(&topology))
+	assert.Equal(t, 0, identity)
+	assert.Equal(t, 1, topology)
 }

@@ -1,0 +1,8 @@
+"BILLER000000001":
+  name: "Example Water Utility"
+  routing: "990000002"
+  account: "7700123456"
+"BILLER000000002":
+  name: "Example Power Company"
+  routing: "990000003"
+  account: "7700987654"

@@ -30,6 +30,8 @@ func Run(args []string) int {
 
 	var explicitConfig bool
 	var autoAdopt bool
+	var repair bool
+	var repairForce bool
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "-h", "--help":
@@ -37,6 +39,11 @@ func Run(args []string) int {
 			fmt.Printf("  -c, --config string    Path to fluxrig-mixer.toml\n")
 			fmt.Printf("  -s, --scenario string  Path to a scenario file to load on startup\n")
 			fmt.Printf("      --auto-adopt       Automatically adopt connecting Racks (Dev only)\n")
+			fmt.Printf("      --repair           Diagnose the JetStream streams and repair what is safe;\n")
+			fmt.Printf("                         exit 0 when healthy or repaired, 1 when a stream\n")
+			fmt.Printf("                         needs --force, 2 when the repair itself failed\n")
+			fmt.Printf("      --force            With --repair: recreate an unreadable stream, discarding\n")
+			fmt.Printf("                         its messages. Nothing is changed without it.\n")
 			fmt.Printf("  -h, --help             Show this help message\n")
 			return 0
 		case "-c", "--config":
@@ -52,6 +59,10 @@ func Run(args []string) int {
 			}
 		case "--auto-adopt":
 			autoAdopt = true
+		case "--repair":
+			repair = true
+		case "--force":
+			repairForce = true
 		default:
 			// Capture first positional argument as scenario reference
 			if scenarioRef == "" && args[i] != "" && args[i][0] != '-' {
@@ -110,6 +121,13 @@ func Run(args []string) int {
 	// Fallback to Config
 	if scenarioRef == "" && cfg.Mixer.StartupScenario != "" {
 		scenarioRef = cfg.Mixer.StartupScenario
+	}
+
+	// Offline repair mode: diagnose the JetStream streams and fix what is
+	// safe, instead of booting the Mixer. The Mixer must be stopped: this
+	// opens the same store directory a running Mixer would hold.
+	if repair {
+		return mixer.Repair(context.Background(), cfg, logger, repairForce)
 	}
 
 	// 4. Run Application

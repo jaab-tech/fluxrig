@@ -39,16 +39,4 @@ func TestStore_Lifecycle(t *testing.T) {
 		t.Errorf("Expected table 'registry', got '%s'", tableName)
 	}
 
-	// 3. Wipe
-	if errWipe := s.Wipe(ctx); errWipe != nil {
-		t.Errorf("Wipe failed: %v", errWipe)
-	}
-
-	// Verify table gone
-	err = s.DB().QueryRowContext(ctx, "SELECT table_name FROM information_schema.tables WHERE table_name = 'registry'").Scan(&tableName)
-	if err == nil {
-		t.Error("Table 'registry' should not exist after wipe, but query succeeded")
-	}
-	// Note: sql.ErrNoRows might handle this, or it returns empty result set depending on driver.
-	// Actually queryRow returns error if no rows.
 }

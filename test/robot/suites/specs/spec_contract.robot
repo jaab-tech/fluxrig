@@ -49,7 +49,7 @@ The Reference Spec Satisfies The Rules It Documents
     [Tags]    contract
     ${spec}=    Repository Path    examples    specs    iso8583-v87-ascii.yaml
     ${res}=     Run Fluxrig    spec    import    ${spec}    --store-dir    ${STORE}
-    Should Contain    ${res}[output]    iso8583-v87-ascii:v2.2.0
+    Should Contain    ${res}[output]    iso8583-v87-ascii:v3.0.0
 
 A Spec Without A Version Is Refused
     [Documentation]    The gap this suite exists for. A version states which

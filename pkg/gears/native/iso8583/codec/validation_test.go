@@ -82,7 +82,7 @@ func TestWarningRecordsAndLetsThrough(t *testing.T) {
 func TestEnforcingRejectsAMessageThatBreaksARule(t *testing.T) {
 	g := initGear(t, "validating.yaml", map[string]any{
 		"validation": ValidationEnforce,
-		"on_error":   "reject",
+		"on_error":   "kill", // the error comes back, so its text can be read
 	})
 
 	good, bad := requests(t, g)
@@ -102,6 +102,23 @@ func TestEnforcingRejectsAMessageThatBreaksARule(t *testing.T) {
 
 // A `warn` check does not reject even while enforcing. That is the whole point
 // of severity living on the rule rather than on the deployment.
+// With on_error: reject, a message that a rule rejects leaves on the error
+// port with error.reason violation, so the scenario can answer it.
+func TestRejectEmitsARuleRejectionOnTheErrorPort(t *testing.T) {
+	g := initGear(t, "validating.yaml", map[string]any{
+		"validation": ValidationEnforce,
+		"on_error":   "reject",
+	})
+	_, bad := requests(t, g)
+	res, err := processed(t, g, bad)
+	require.NoError(t, err)
+	require.Nil(t, res, "a rejected message left on out")
+	rejected := g.emitter.(*mockGearContext).emitted["error"]
+	require.Len(t, rejected, 1)
+	require.Equal(t, ReasonViolation, rejected[0].Metadata["error.reason"])
+	require.Contains(t, rejected[0].Metadata["error.message"], "DE 2")
+}
+
 func TestAWarningCheckDoesNotRejectWhileEnforcing(t *testing.T) {
 	g := initGear(t, "validating.yaml", map[string]any{
 		"validation": ValidationEnforce,
@@ -121,7 +138,7 @@ func TestAWarningCheckDoesNotRejectWhileEnforcing(t *testing.T) {
 func TestAValueOutsideAClosedSetIsRejectedOnTheWire(t *testing.T) {
 	g := initGear(t, "validating.yaml", map[string]any{
 		"validation": ValidationEnforce,
-		"on_error":   "reject",
+		"on_error":   "kill", // the error comes back, so its text can be read
 	})
 
 	ok := packed(t, g, "0210", map[int]string{4: "000000010000", 11: "000001", 39: "00"})

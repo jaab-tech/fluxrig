@@ -214,7 +214,7 @@ func Build(spec *sdl.Spec, opts Options) *Document {
 
 	// Counted from the same set the reference documents, or the heading and the
 	// body disagree about how many elements the protocol has.
-	counted := make(map[int]bool, len(spec.Fields)+len(b.labels))
+	counted := make(map[int]bool)
 	count := func(de int) {
 		if counted[de] {
 			return
@@ -453,8 +453,8 @@ func (b *builder) fields() []FieldView {
 	// a reference that showed only the annotated ones would be a reference with
 	// holes in it -- which is what a spec used to avoid by carrying an entry
 	// whose sole content was a label the wire layer already had.
-	seen := make(map[int]bool, len(b.spec.Fields)+len(b.labels))
-	ids := make([]int, 0, len(b.spec.Fields)+len(b.labels))
+	seen := make(map[int]bool)
+	var ids []int
 	add := func(de int) {
 		if seen[de] || !b.visible(de) {
 			return

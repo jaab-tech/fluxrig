@@ -60,9 +60,9 @@ The Reference Names The Contract It Was Rendered From
     ...                paper carries no URL: without the version on the page a
     ...                reader cannot tell which protocol they are holding.
     [Tags]    doc    versioning
-    Should Contain    ${PUBLIC_HTML}      Version 2.2.0
-    Should Contain    ${COMPLETE_HTML}    Version 2.2.0
-    Should Contain    ${PUBLIC_MD}        2.2.0
+    Should Contain    ${PUBLIC_HTML}      Version 3.0.0
+    Should Contain    ${COMPLETE_HTML}    Version 3.0.0
+    Should Contain    ${PUBLIC_MD}        3.0.0
 
 Every Link In The Page Leads Somewhere
     [Documentation]    A reference is navigated. A link into a section that does

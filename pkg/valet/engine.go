@@ -30,6 +30,13 @@ type Config struct {
 	// no cap. When set, it must not be smaller than the effective DefaultTTL.
 	MaxTTL time.Duration
 
+	// MaxInFlight bounds open tickets. Zero means unbounded. When the bound is
+	// reached a new Park is refused with ErrOverloaded; a retransmission of an
+	// already-open key and a replay of a retained outcome still succeed, so
+	// the bound stops new work without rejecting duplicates of work already
+	// accepted.
+	MaxInFlight int
+
 	// RetainAfterClose is the window during which a redeemed ticket's outcome
 	// is kept for idempotent replay. Zero means DefaultRetainAfterClose (5s);
 	// a negative value disables retention entirely.
@@ -83,13 +90,14 @@ const (
 // Engine is the correlation engine. See the package documentation for the
 // guarantees it provides. All methods are safe for concurrent use.
 type Engine struct {
-	defaultTTL time.Duration
-	maxTTL     time.Duration
-	retain     time.Duration
-	onExpire   func(*Ticket)
-	store      Store
-	clock      Clock
-	log        *slog.Logger
+	defaultTTL  time.Duration
+	maxTTL      time.Duration
+	maxInFlight int
+	retain      time.Duration
+	onExpire    func(*Ticket)
+	store       Store
+	clock       Clock
+	log         *slog.Logger
 
 	mu         sync.Mutex
 	cond       *sync.Cond
@@ -109,6 +117,9 @@ func New(cfg Config) (*Engine, error) {
 	}
 	if cfg.MaxTTL < 0 {
 		return nil, fmt.Errorf("valet: config: MaxTTL must not be negative")
+	}
+	if cfg.MaxInFlight < 0 {
+		return nil, fmt.Errorf("valet: config: MaxInFlight must not be negative")
 	}
 	if cfg.MaxTTL > 0 && cfg.MaxTTL < cfg.DefaultTTL {
 		return nil, fmt.Errorf("valet: config: MaxTTL (%s) is smaller than DefaultTTL (%s)", cfg.MaxTTL, cfg.DefaultTTL)
@@ -130,15 +141,16 @@ func New(cfg Config) (*Engine, error) {
 	}
 
 	e := &Engine{
-		defaultTTL: cfg.DefaultTTL,
-		maxTTL:     cfg.MaxTTL,
-		retain:     cfg.RetainAfterClose,
-		onExpire:   cfg.OnExpire,
-		store:      cfg.Store,
-		clock:      cfg.Clock,
-		log:        cfg.Logger,
-		destCounts: make(map[string]int),
-		retained:   make(map[string]*Ticket),
+		defaultTTL:  cfg.DefaultTTL,
+		maxTTL:      cfg.MaxTTL,
+		maxInFlight: cfg.MaxInFlight,
+		retain:      cfg.RetainAfterClose,
+		onExpire:    cfg.OnExpire,
+		store:       cfg.Store,
+		clock:       cfg.Clock,
+		log:         cfg.Logger,
+		destCounts:  make(map[string]int),
+		retained:    make(map[string]*Ticket),
 	}
 	e.cond = sync.NewCond(&e.mu)
 	return e, nil
@@ -185,6 +197,15 @@ func (e *Engine) Park(ctx context.Context, pr ParkRequest) (ParkResult, *Ticket,
 
 	if e.state == engineDraining {
 		return Parked, nil, ErrDraining
+	}
+
+	// Overload shedding: refuse new work at the bound. This is after the
+	// attach and replay returns above on purpose -- a retransmission of an
+	// already-open key and a replay of a retained outcome are duplicates of
+	// work already accepted, and shedding them would turn a harmless duplicate
+	// into a decline. Only a new ticket is refused.
+	if e.maxInFlight > 0 && e.openCount >= e.maxInFlight {
+		return Parked, nil, ErrOverloaded
 	}
 
 	now := e.clock.Now()

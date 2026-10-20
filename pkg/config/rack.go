@@ -37,12 +37,31 @@ type RackSettings struct {
 	// LaneQueueSize is how many messages each wire inside the Rack can hold in memory
 	// between the gear that emits and the gear that consumes. LaneSendTimeout is how
 	// long an emitting gear waits for room in a full queue before it gets an error.
-	LaneQueueSize      int    `koanf:"lane_queue_size" example:"1024"`
-	LaneSendTimeout    string `koanf:"lane_send_timeout" example:"5s"`
-	EnrollmentTimeout  string `koanf:"enrollment_timeout"`
-	EnrollmentInterval string `koanf:"enrollment_interval"`
-	MaxHops            int    `koanf:"max_hops"`
-	MaxPayloadSize     int    `koanf:"max_payload_size"`
+	LaneQueueSize   int    `koanf:"lane_queue_size" example:"1024"`
+	LaneSendTimeout string `koanf:"lane_send_timeout" example:"5s"`
+	// OutboxMaxMessages caps how many bus-bound emissions wait in memory
+	// while the bus is down. When full the oldest entry is dropped and
+	// counted; the emitting gear is never blocked.
+	OutboxMaxMessages int `koanf:"outbox_max_messages" example:"10000"`
+	// OutboxDrainRetries is how many more times the drain tries a parked
+	// emission the bus refuses before it moves on and leaves it parked for
+	// the next drain. A refused emission is never dropped: only one the bus
+	// marks as invalid is.
+	OutboxDrainRetries int `koanf:"outbox_drain_retries" example:"3"`
+	// OutboxOrder is the drain order: "subject" (default) never forwards an
+	// emission ahead of an older one on the same subject, and "none" forwards
+	// whatever the bus takes as it takes it.
+	OutboxOrder string `koanf:"outbox_order" example:"subject"`
+	// OutboxBackpressureTimeout is how long a live emission waits for older
+	// parked messages on its subject to drain while the bus is up, before it
+	// parks behind them. With "subject" order it cannot go first, and parking
+	// it under load fills the outbox until the cap drops messages. "0s" parks
+	// at once. With the bus down nothing waits.
+	OutboxBackpressureTimeout string `koanf:"outbox_backpressure_timeout" example:"1s"`
+	EnrollmentTimeout         string `koanf:"enrollment_timeout"`
+	EnrollmentInterval        string `koanf:"enrollment_interval"`
+	MaxHops                   int    `koanf:"max_hops"`
+	MaxPayloadSize            int    `koanf:"max_payload_size"`
 	// BootstrapSecret is the shared secret this Rack presents on its very
 	// first Hello, before it has a Passport of its own. It must match the
 	// Mixer's enrollment.bootstrap_secret, which defaults to the same
@@ -88,6 +107,10 @@ func LoadRack(path string) (*RackConfig, error) {
 	_ = k.Set("rack.handshake_interval", "500ms")
 	_ = k.Set("rack.lane_queue_size", 1024)
 	_ = k.Set("rack.lane_send_timeout", "5s")
+	_ = k.Set("rack.outbox_max_messages", 10000)
+	_ = k.Set("rack.outbox_drain_retries", 3)
+	_ = k.Set("rack.outbox_order", "subject")
+	_ = k.Set("rack.outbox_backpressure_timeout", "1s")
 	_ = k.Set("rack.heartbeat_interval", "30s")
 	_ = k.Set("rack.enrollment_timeout", "15s")
 	_ = k.Set("rack.enrollment_interval", "2s")
@@ -97,6 +120,7 @@ func LoadRack(path string) (*RackConfig, error) {
 
 	_ = k.Set("snake.url", "nats://localhost:4222")
 	_ = k.Set("snake.domain", "flux")
+	_ = k.Set("snake.cluster_name", "flux")
 	_ = k.Set("snake.stream_name", "flux-msg")
 	_ = k.Set("snake.connect_timeout", "10s")
 	_ = k.Set("snake.reconnect_wait", "1s")
@@ -109,10 +133,20 @@ func LoadRack(path string) (*RackConfig, error) {
 	_ = k.Set("snake.initial_retry_attempts", 10)
 	_ = k.Set("snake.offline_start_timeout", "3s")
 	_ = k.Set("snake.offline_retry_interval", "5s")
+	_ = k.Set("snake.dlq_enabled", true)
+	_ = k.Set("snake.dlq_subject", "flux.dlq")
 
 	// 2. Load from File
 	if path != "" {
 		if err := k.Load(file.Provider(path), toml.Parser()); err != nil {
+			return nil, err
+		}
+		// The file's own keys are validated separately from the merged set,
+		// because the FLUXRIG_ environment namespace also carries process
+		// control variables that are not configuration (FLUXRIG_BIN_DIR and
+		// the test harness's own switches). Only a key the operator wrote in
+		// the file is a candidate for a typo.
+		if err := validateKnownKeys(k, RackConfig{}); err != nil {
 			return nil, err
 		}
 	}
@@ -157,6 +191,12 @@ func LoadRack(path string) (*RackConfig, error) {
 
 	var cfg RackConfig
 	if err := cfg.Unmarshal(k); err != nil {
+		return nil, err
+	}
+
+	// Fail fast on a duration that does not parse: it would otherwise reach a
+	// consumer that discards the parse error and treats zero as real.
+	if err := validateDurations(&cfg); err != nil {
 		return nil, err
 	}
 

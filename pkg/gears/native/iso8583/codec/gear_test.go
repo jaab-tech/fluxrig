@@ -23,8 +23,20 @@ import (
 
 type mockGearContext struct {
 	sdk.GearContext
-	config map[string]any
-	logger *slog.Logger
+	config  map[string]any
+	logger  *slog.Logger
+	emitted map[string][]*fluxmsg.FluxMsg
+}
+
+func (m *mockGearContext) Emitter() sdk.PortEmitter { return m }
+
+// Emit records what the gear sends on a named port.
+func (m *mockGearContext) Emit(port string, msg *fluxmsg.FluxMsg) error {
+	if m.emitted == nil {
+		m.emitted = map[string][]*fluxmsg.FluxMsg{}
+	}
+	m.emitted[port] = append(m.emitted[port], msg)
+	return nil
 }
 
 func (m *mockGearContext) Config() map[string]any { return m.config }
@@ -115,8 +127,10 @@ func TestASCII_RoundTrip(t *testing.T) {
 	processed, err := g.Process(context.Background(), decMsg)
 	require.NoError(t, err)
 
+	// This spec declares DE 2 fixed at 19 with zero padding, so the wire
+	// carries the padded value and the decode reports it at that width.
 	val, _ := processed.Get("card.pan")
-	assert.Equal(t, "4111111111111111", val)
+	assert.Equal(t, "0004111111111111111", val)
 	val, _ = processed.Get("stan")
 	assert.Equal(t, "111222", val)
 }
@@ -144,7 +158,7 @@ func TestASCII_AllFields(t *testing.T) {
 	require.NoError(t, err)
 
 	v, _ := res.Get("card.pan")
-	assert.Equal(t, "5500000000000004", v)
+	assert.Equal(t, "0005500000000000004", v, "DE 2 is fixed at 19 in this spec")
 	v, _ = res.Get("amount")
 	// moov-io Numeric may strip leading zeros; verify semantic value
 	assert.Contains(t, v, "1500")
@@ -280,10 +294,15 @@ func TestError_GarbageBytes_Reject(t *testing.T) {
 	msg := fluxmsg.New()
 	msg.RawPayload = []byte{0xFF, 0xFE, 0x01, 0x02, 0x03}
 
-	// on_error=reject → return msg with error
+	// on_error=reject → nothing on out; the message leaves on error.
 	res, err := g.Process(context.Background(), msg)
-	assert.NotNil(t, res)
-	assert.Error(t, err)
+	assert.Nil(t, res)
+	assert.NoError(t, err)
+	rejected := g.emitter.(*mockGearContext).emitted["error"]
+	require.Len(t, rejected, 1)
+	assert.Equal(t, ReasonFailed, rejected[0].Metadata["error.reason"])
+	assert.Equal(t, "test-codec", rejected[0].Metadata["error.gear"])
+	assert.NotEmpty(t, rejected[0].Metadata["error.message"])
 }
 
 func TestError_TruncatedMessage(t *testing.T) {

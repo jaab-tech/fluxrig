@@ -41,10 +41,16 @@ type StoreConfig struct {
 
 // SnakeConfig configures the NATS/JetStream connection (The Snake).
 type SnakeConfig struct {
-	URL                       string   `koanf:"url" example:"nats://localhost:4222"`
-	Port                      int      `koanf:"port" example:"4222"`
-	Domain                    string   `koanf:"domain" example:"flux"`
-	StreamName                string   `koanf:"stream_name" example:"flux-msg"`
+	URL    string `koanf:"url" example:"nats://localhost:4222"`
+	Port   int    `koanf:"port" example:"4222"`
+	Domain string `koanf:"domain" example:"flux"`
+	// ClusterName is the JetStream domain the embedded server reports. It is
+	// also what a client uses to reach a domain-scoped server.
+	ClusterName string `koanf:"cluster_name" example:"flux"`
+	StreamName  string `koanf:"stream_name" example:"flux-msg"`
+	// StoreDir overrides where the embedded Snake keeps its JetStream store.
+	// Empty keeps the default: a "snake" directory under store.dir.
+	StoreDir                  string   `koanf:"store_dir" example:"./data/snake"`
 	ConnectTimeout            string   `koanf:"connect_timeout" example:"10s"`
 	ReconnectWait             string   `koanf:"reconnect_wait" example:"1s"`
 	OperationTimeout          string   `koanf:"operation_timeout" example:"5s"`
@@ -82,6 +88,16 @@ type SnakeConfig struct {
 	KVMaxBytes     int64  `koanf:"kv_max_bytes" example:"1073741824"`
 	KVMaxValueSize int32  `koanf:"kv_max_value_size" example:"1048576"`
 	KVTTL          string `koanf:"kv_ttl" example:"0s"`
+	// DLQEnabled routes unprocessable messages (decode failure, validation
+	// failure, or a handler that failed on every redelivery) to the dead
+	// letter stream instead of dropping them with only a log line. Off keeps
+	// the previous behavior: log and discard.
+	DLQEnabled bool `koanf:"dlq_enabled" example:"true"`
+	// DLQSubject is the subject prefix the dead letter stream captures.
+	DLQSubject string `koanf:"dlq_subject" example:"flux.dlq"`
+	// DLQMaxAge bounds how long a dead letter is kept. Empty keeps the
+	// stream default (24h).
+	DLQMaxAge string `koanf:"dlq_max_age" example:"720h"`
 }
 
 // TelemetryConfig configures self-reporting metrics and logs.

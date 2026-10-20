@@ -4,10 +4,16 @@
 package commands
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -28,6 +34,10 @@ var specImportCmd = &cobra.Command{
 		file := args[0]
 		name, _ := cmd.Flags().GetString("name")
 		tag, _ := cmd.Flags().GetString("tag")
+
+		if apiMode, _ := cmd.Flags().GetBool("api"); apiMode {
+			return uploadSpec(cmd, file, name, tag)
+		}
 
 		storePath, _ := cmd.Flags().GetString("store-dir")
 		if storePath == "" {
@@ -139,6 +149,10 @@ func init() {
 
 	specImportCmd.Flags().String("name", "", "Logical name of the spec")
 	specImportCmd.Flags().String("tag", "", "Version tag (e.g. v1.0.0)")
+	specImportCmd.Flags().Bool("api", false, "Upload to the running Mixer's spec store instead of a local store")
+	specImportCmd.Flags().String("api-url", "", "Mixer API URL (overrides FLUXRIG_API_URL; default http://localhost:8090)")
+	specImportCmd.Flags().Duration("api-timeout", 30*time.Second, "How long to wait for the Mixer to answer the upload")
+	addAPITokenFlag(specImportCmd, false)
 
 	specListCmd.Flags().Bool("json", false, "Machine-readable output")
 	specHistoryCmd.Flags().Bool("json", false, "Machine-readable output")
@@ -153,4 +167,56 @@ func init() {
 
 func GetSpecCmd() *cobra.Command {
 	return specCmd
+}
+
+// uploadSpec sends a spec or lookup data to the Mixer, which validates it and
+// files it in the store it sends to the Racks.
+func uploadSpec(cmd *cobra.Command, file, name, tag string) error {
+	content, err := os.ReadFile(filepath.Clean(file))
+	if err != nil {
+		return fmt.Errorf("failed to read file: %w", err)
+	}
+	base, _ := cmd.Flags().GetString("api-url")
+	if base == "" {
+		base = os.Getenv("FLUXRIG_API_URL")
+	}
+	if base == "" {
+		base = "http://localhost:8090"
+	}
+	q := url.Values{}
+	if name != "" {
+		q.Set("name", name)
+	}
+	if tag != "" {
+		q.Set("tag", tag)
+	}
+	target := base + "/api/v1/specs"
+	if len(q) > 0 {
+		target += "?" + q.Encode()
+	}
+	req, err := newAPIRequest(cmd, http.MethodPost, target, bytes.NewReader(content))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/yaml")
+	timeout, _ := cmd.Flags().GetDuration("api-timeout")
+	resp, err := (&http.Client{Timeout: timeout}).Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to contact the Mixer: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusCreated {
+		return fmt.Errorf("upload refused (%d): %s", resp.StatusCode, bytes.TrimSpace(body))
+	}
+	var got struct {
+		URN  string `json:"urn"`
+		Hash string `json:"hash"`
+		Kind string `json:"kind"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		return fmt.Errorf("unreadable answer from the Mixer: %w", err)
+	}
+	fmt.Printf("Uploaded %s (%s) -> %s\n", got.URN, got.Kind, got.Hash)
+	return nil
 }

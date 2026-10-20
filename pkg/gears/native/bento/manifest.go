@@ -7,8 +7,8 @@ import "github.com/jaab-tech/fluxrig/pkg/sdk"
 
 // Manifest describes the Bento gear: a wrapper around the Bento/Benthos stream
 // processor exposing its inputs/outputs and Bloblang mapping as a gear. The
-// embedded Bento config is opaque to this schema (ADR 0045 polymorphic-config
-// open question); named outputs are declared under config.ports.
+// embedded Bento config is opaque to this schema (an open question for
+// polymorphic configs). Named outputs are declared under config.ports.
 func (g *Gear) Manifest() sdk.Manifest {
 	return sdk.Manifest{
 		Type:     "bento",

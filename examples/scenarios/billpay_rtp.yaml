@@ -1,0 +1,202 @@
+# The scenario of the tutorial "Bridge ISO 8583 and ISO 20022".
+meta:
+  name: "billpay_rtp"
+  version: "1.0.0"
+
+racks:
+  - name: "rack-switch"
+    labels:
+      role: "the bridge"
+  - name: "rack-rail"
+    labels:
+      role: "a simulated RTP rail; in production, the network of the rail operator"
+
+gears:
+  # ─────────────── rack-switch: the bridge ───────────────
+  - name: "terminals"
+    type: "io_iso8583"
+    deploy: "rack-switch"
+    labels:
+      peer: "Payment terminals"
+      peer_played_by: "iso8583-tool"
+    config:
+      mode: "server"
+      bind: ":8583"
+      frame_length_size: 2
+      frame_length_endian: "big"
+      encoding: "ascii"
+
+  - name: "decode-8583"
+    type: "codec_iso8583"
+    deploy: "rack-switch"
+    config:
+      spec_path: "iso8583-v87-ascii:v3.0.0"
+      direction: "decode"
+      on_error: "reject"
+
+  - name: "to-rail"
+    type: "translate"
+    deploy: "rack-switch"
+    config:
+      spec_path: "billpay-rtp:v1.0.0"
+      translation: "payment_request"
+      validation: "enforce"
+      on_error: "reject"
+
+  - name: "conductor"
+    type: "conductor"
+    deploy: "rack-switch"
+    config:
+      correlation_key: ["instr_id"]
+      park_fields: ["proc_code", "txn_amount", "txn_currency", "txn_datetime",
+                    "stan", "rrn", "terminal_id", "merchant_id"]
+      routes:
+        - name: "rail"
+          destination:
+            failover: ["out_rail"]
+      valet:
+        store: "memory"
+        default_ttl: "15s"
+
+  - name: "encode-pacs008"
+    type: "codec_iso20022"
+    deploy: "rack-switch"
+    config:
+      spec_path: "iso20022-rtp:v1.0.0"
+      direction: "encode"
+      validation: "enforce"
+      on_error: "reject"
+
+  - name: "rail"
+    type: "io_tcp"
+    deploy: "rack-switch"
+    config:
+      mode: "client"
+      connect: "127.0.0.1:7020"
+      framing: "length_prefix4"
+      read_responses: true
+
+  - name: "decode-pacs002"
+    type: "codec_iso20022"
+    deploy: "rack-switch"
+    config:
+      spec_path: "iso20022-rtp:v1.0.0"
+      direction: "decode"
+      validation: "enforce"
+      on_error: "reject"
+
+  - name: "to-card"
+    type: "translate"
+    deploy: "rack-switch"
+    config:
+      spec_path: "billpay-rtp:v1.0.0"
+      translation: "payment_status"
+      validation: "enforce"
+      on_error: "reject"
+
+  - name: "decline"
+    type: "bento"
+    deploy: "rack-switch"
+    config:
+      ports:
+        inputs: ["in"]
+        outputs: ["out"]
+      bento:
+        pipeline:
+          processors:
+            - mapping: |
+                # The conductor emits the original request on `error`, and
+                # to-rail emits on `error` a request that it refuses.
+                root = this
+                root.mti = "0210"
+                # codec_iso8583 takes the MTI from this metadata key.
+                meta "iso8583.mti" = "0210"
+                root.resp_code = match meta("error.reason") {
+                  "timeout"            => "68"   # the rail did not answer in time
+                  "violation"          => "03"   # invalid merchant: the biller is not in the directory
+                  "translation_failed" => "96"   # the bridge could not process the payment
+                  _                    => "91"   # the rail is not available
+                }
+
+  - name: "encode-8583"
+    type: "codec_iso8583"
+    deploy: "rack-switch"
+    config:
+      spec_path: "iso8583-v87-ascii:v3.0.0"
+      direction: "encode"
+      on_error: "reject"
+
+  # ─────────────── rack-rail: the simulated rail ───────────────
+  - name: "rail-in"
+    type: "io_tcp"
+    deploy: "rack-rail"
+    config:
+      mode: "server"
+      bind: ":7020"
+      framing: "length_prefix4"
+
+  - name: "decode-pacs008"
+    type: "codec_iso20022"
+    deploy: "rack-rail"
+    config:
+      spec_path: "iso20022-rtp:v1.0.0"
+      direction: "decode"
+      validation: "enforce"
+      on_error: "reject"
+
+  - name: "ack"
+    type: "translate"
+    deploy: "rack-rail"
+    config:
+      spec_path: "rail-sim:v1.0.0"
+      translation: "acknowledge"
+      on_error: "reject"
+
+  - name: "bank"
+    type: "bento"
+    deploy: "rack-rail"
+    config:
+      ports:
+        inputs: ["in"]
+        outputs: ["out"]
+      bento:
+        pipeline:
+          processors:
+            - mapping: |
+                # The bank of the biller accepts a payment up to 1000.00.
+                root = this
+                let over = this.settlement_amount.number() > 1000
+                root.tx_status = if $over { "RJCT" } else { this.tx_status }
+                root.status_reason = if $over { "AM02" } else { deleted() }
+
+  - name: "encode-pacs002"
+    type: "codec_iso20022"
+    deploy: "rack-rail"
+    config:
+      spec_path: "iso20022-rtp:v1.0.0"
+      direction: "encode"
+      validation: "enforce"
+      on_error: "reject"
+
+wires:
+  # Request path
+  - { from: "terminals.out",      to: "decode-8583.in" }
+  - { from: "decode-8583.out",    to: "to-rail.in" }
+  - { from: "to-rail.out",        to: "conductor.in" }
+  - { from: "conductor.out_rail", to: "encode-pacs008.in" }
+  - { from: "encode-pacs008.out", to: "rail.in" }
+  # Simulated rail
+  - { from: "rail-in.out",        to: "decode-pacs008.in" }
+  - { from: "decode-pacs008.out", to: "ack.in" }
+  - { from: "ack.out",            to: "bank.in" }
+  - { from: "bank.out",           to: "encode-pacs002.in" }
+  - { from: "encode-pacs002.out", to: "rail-in.in" }
+  # Answer path
+  - { from: "rail.out",               to: "decode-pacs002.in" }
+  - { from: "decode-pacs002.out",     to: "conductor.in_reply" }
+  - { from: "conductor.out_response", to: "to-card.in" }
+  - { from: "to-card.out",            to: "encode-8583.in" }
+  - { from: "to-rail.error",          to: "decline.in" }
+  - { from: "conductor.error",        to: "decline.in" }
+  - { from: "decline.out",            to: "encode-8583.in" }
+  - { from: "encode-8583.out",        to: "terminals.in" }

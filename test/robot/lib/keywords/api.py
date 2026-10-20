@@ -5,6 +5,7 @@ import subprocess
 import time
 import json
 import os
+import urllib.parse
 from robot.api import logger
 from robot.api.deco import keyword
 
@@ -114,6 +115,29 @@ class ApiKeywords:
             logger.info("Scenario imported successfully.")
         except subprocess.CalledProcessError as e:
             raise RuntimeError(f"Failed to import scenario: {e}")
+
+    @keyword
+    def upload_spec(self, mixer_port: int, file_path: str, name: str = None, tag: str = None):
+        """Uploads a spec or lookup data to the Mixer's spec store.
+
+        The Mixer checks the artefact for its kind and sends it to the Racks
+        with every scenario that names it. Lookup data has no spec header, so
+        it needs name and tag. Returns the parsed answer (urn, hash, kind).
+        """
+        query = urllib.parse.urlencode({k: v for k, v in (("name", name), ("tag", tag)) if v})
+        url = f"http://127.0.0.1:{mixer_port}/api/v1/specs" + (f"?{query}" if query else "")
+        file_path = os.path.abspath(file_path)
+        if not os.path.exists(file_path):
+            raise RuntimeError(f"Spec file not found: {file_path}")
+        proc = subprocess.run(
+            ["curl", "-s", "-w", "\n%{http_code}", "-X", "POST", url,
+             "-H", "Content-Type: application/yaml", "--data-binary", f"@{file_path}"],
+            capture_output=True, text=True)
+        body, _, code = proc.stdout.rpartition("\n")
+        if proc.returncode != 0 or code != "201":
+            raise RuntimeError(f"Upload of {file_path} refused ({code or proc.returncode}): {body.strip()}")
+        logger.info(f"Uploaded {file_path}: {body.strip()}")
+        return json.loads(body)
 
     @keyword
     def wait_for_pending_rack(self, mixer_port: int, timeout: int = 30):

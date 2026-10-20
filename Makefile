@@ -11,8 +11,10 @@ MODULE_NAME := github.com/jaab-tech/fluxrig
 
 # Go settings
 GO_FLAGS ?= -v
-# Use local GOPATH/GOMODCACHE if system is locked
-GOMODCACHE ?= $(shell pwd)/.gomod_cache
+# Honour an explicit GOMODCACHE; otherwise use Go's shared module cache. A
+# cache inside the checkout made every fresh worktree download its own copy
+# (about 750 MB), read-only, which then blocked removing the worktree.
+GOMODCACHE ?= $(shell go env GOMODCACHE)
 export GOMODCACHE
 
 LDFLAGS := -w -s \
@@ -94,12 +96,14 @@ OPENAPI_DEST  ?=
 STATIC_SYNC_DIR ?=
 GEAR_DOCS_DIR ?=
 
+# sim_source and sim_responder are enterprise gears: this binary does not contain
+# them, and fluxrig-ent refreshes their pages with its own `make gear-docs`.
 gear-docs: build-bin ## Refresh AUTOGEN manifest sections in the gear reference docs
 	@if [ -z "$(GEAR_DOCS_DIR)" ]; then \
 		echo "Skipping gear docs (GEAR_DOCS_DIR not set — configure .env.local)"; \
 	else \
 		echo "Refreshing gear manifest docs in $(GEAR_DOCS_DIR)..."; \
-		./bin/fluxrig gears doc --write "$(GEAR_DOCS_DIR)"; \
+		./bin/fluxrig gears doc --write "$(GEAR_DOCS_DIR)" --skip-types sim_source,sim_responder; \
 	fi
 
 catalog: ## Generate log message catalog
@@ -192,7 +196,10 @@ clean: ## Remove local build artifacts (Fast)
 
 distclean: clean ## Full cleanup including caches (Slow)
 	@echo "Cleaning caches..."
-	@if [ -d .gomod_cache ]; then go clean -modcache; fi
+	@# An older checkout may still hold an in-tree module cache. Clean that
+	@# one by path: a bare `go clean -modcache` now empties the shared cache
+	@# every checkout and agent on this machine uses.
+	@if [ -d .gomod_cache ]; then GOMODCACHE=$(CURDIR)/.gomod_cache go clean -modcache; fi
 	rm -rf .gomod_cache
 	go clean -cache
 
@@ -269,7 +276,9 @@ openapi: pkg/mixer/api/docs/.generated ## Generate the OpenAPI specification
 # releases, and the release refuses to run against a dirty tree. The served
 # spec reports the real version instead: pkg/mixer/api/server.go assigns it to
 # docs.SwaggerInfo.Version from the same ldflag the rest of the binary uses.
-pkg/mixer/api/docs/.generated: cmd/fluxrig-mixer/main.go pkg/mixer/api/server.go pkg/mixer/api/types.go
+# Every API source file carries swag annotations, not only these three, so the
+# spec depends on all of them; a missing one leaves the spec stale without a word.
+pkg/mixer/api/docs/.generated: cmd/fluxrig-mixer/main.go $(filter-out %_test.go,$(wildcard pkg/mixer/api/*.go))
 	@echo "Generating OpenAPI spec..."
 	@mkdir -p pkg/mixer/api/docs
 	@if command -v swag >/dev/null; then \
@@ -336,6 +345,10 @@ test-robot-telemetry: robot-prep build-bin ## Run Robot Telemetry Suite
 	@echo "Running Telemetry Coverage Test..."
 	@cd test/robot && ./run.sh suites/telemetry/force_log_coverage.robot
 
+test-robot-billpay: robot-prep build-bin iso8583-tool ## Run Robot ISO 8583 to ISO 20022 bridge suite (the tutorial, run as written)
+	@echo "Running the ISO 8583 to ISO 20022 bridge suite..."
+	@cd test/robot && ./run.sh suites/billpay_rtp
+
 test-robot-conductor: robot-prep build-bin iso8583-tool ## Run Robot Conductor Suite (payment switch: stress + chaos)
 	@echo "Running Conductor Stress + Chaos Suite (chaos needs toxiproxy-server on PATH)..."
 	@cd test/robot && ./run.sh suites/conductor
@@ -371,7 +384,13 @@ test-robot-roaming-stress: robot-prep build-bin ## Run Robot Roaming Stress Suit
 	@echo "Running Roaming Stress Suite..."
 	@cd test/robot && ./run.sh suites/roaming/stress_load.robot
 
-test-robot: test-robot-iso test-robot-tlv test-robot-coatcheck test-robot-topology test-robot-telemetry test-robot-roaming test-robot-specs test-robot-validation-rules ## Run the functional Robot suites (the performance and chaos suites run on their own)
+test-robot: test-robot-iso test-robot-tlv test-robot-coatcheck test-robot-topology test-robot-telemetry test-robot-roaming test-robot-specs test-robot-validation-rules test-robot-billpay ## Run the functional Robot suites (the performance and chaos suites run on their own)
+
+# The hermetic subset: fast suites with hermetic dependencies only (pip
+# packages, no zig, no toxiproxy, no duckdb CLI, no external simulator).
+# The nightly workflow runs it next to the full shell regression; the full
+# set above runs locally and gates a release. It does not gate a merge.
+test-robot-ci: robot-prep build-bin test-robot-iso test-robot-telemetry test-robot-specs ## Run the CI-gated Robot subset (fast, hermetic)
 
 test-robot-staged: robot-prep build-bin ## Run Robot Staged Load Suite (QoS Validation)
 	@echo "Running Staged Load Test..."

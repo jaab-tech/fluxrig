@@ -34,6 +34,8 @@ type NatsBus struct {
 	retryWait         time.Duration
 	retryAttempts     int
 	inactiveThreshold time.Duration
+	dlqEnabled        bool
+	dlqSubject        string
 }
 
 // NewNatsBus creates a new instance.
@@ -190,6 +192,11 @@ func (n *NatsBus) finalizeConnect(opts ConnectOptions) error {
 		n.retryAttempts = 1 // At least one attempt
 	}
 	n.inactiveThreshold = opts.InactiveThreshold
+	n.dlqEnabled = opts.DLQEnabled
+	n.dlqSubject = opts.DLQSubject
+	if n.dlqSubject == "" {
+		n.dlqSubject = dlqDefaultSubject
+	}
 
 	// 3. Initialize JetStream
 	js, err := jetstream.New(n.conn)
@@ -201,6 +208,25 @@ func (n *NatsBus) finalizeConnect(opts ConnectOptions) error {
 	return nil
 }
 
+// deadLetter routes data to the DLQ when enabled and returns true if the
+// message was handed off. It logs a DLQ failure itself: the caller settles the
+// original message either way, but a dead letter that could not be written
+// must not pass unnoticed.
+func (n *NatsBus) deadLetter(ctx context.Context, originSubject string, data []byte, reason string, deliveries uint64) bool {
+	if !n.dlqEnabled {
+		return false
+	}
+	if err := routeToDLQ(ctx, n.js, n.dlqSubject, originSubject, data, reason, deliveries); err != nil {
+		slog.Error("NATS Bus: failed to route message to the dead letter queue",
+			"origin_subject", originSubject,
+			"reason", reason,
+			"error", err,
+		)
+		return false
+	}
+	return true
+}
+
 // Publish serializes the FluxMsg to CBOR bytes and sends it via JetStream.
 func (n *NatsBus) Publish(ctx context.Context, subject string, msg *fluxmsg.FluxMsg) error {
 	if n.js == nil {
@@ -209,7 +235,7 @@ func (n *NatsBus) Publish(ctx context.Context, subject string, msg *fluxmsg.Flux
 
 	// 1. Technical Enforcement (Transparent UTF-8 Guard)
 	if err := msg.Validate(); err != nil {
-		return fmt.Errorf("fluxmsg validation failed: %w", err)
+		return fmt.Errorf("%w: fluxmsg validation failed: %w", ErrInvalidMessage, err)
 	}
 
 	// 2. Inject Traces (OTel). Must happen before CBOR marshaling below: the
@@ -229,7 +255,7 @@ func (n *NatsBus) Publish(ctx context.Context, subject string, msg *fluxmsg.Flux
 	// 3. Serialize to Binary (CBOR)
 	data, err := cbor.Marshal(msg)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: encode: %w", ErrInvalidMessage, err)
 	}
 
 	// 4. Technical Logging (Avoid recursion for telemetry)
@@ -255,6 +281,9 @@ func (n *NatsBus) Publish(ctx context.Context, subject string, msg *fluxmsg.Flux
 	_, err = n.js.Publish(ctx, subject, data, jetstream.WithMsgID(msgID))
 	if err != nil {
 		slog.Error("NATS Bus Publish Failed", "subject", subject, "error", err)
+		if errors.Is(err, nats.ErrMaxPayload) {
+			return fmt.Errorf("%w: %w", ErrInvalidMessage, err)
+		}
 	}
 	return err
 }
@@ -340,14 +369,16 @@ func (n *NatsBus) Subscribe(subject string, handler Handler) (Subscription, erro
 		if errUnmarshal := cbor.Unmarshal(msg.Data(), &fluxMsg); errUnmarshal != nil {
 			// A message that cannot be decoded used to vanish here without a
 			// trace, which reads downstream as a gear that never received
-			// anything rather than as a message that was thrown away. Term, not
-			// Ack: it will not decode on redelivery either, and Ack would look
-			// identical to a message the handler actually processed.
+			// anything rather than as a message that was thrown away. It goes
+			// to the dead letter stream first when that is enabled, then Term
+			// (not Ack): it will not decode on redelivery either, and Ack would
+			// look identical to a message the handler actually processed.
 			slog.Error("NATS Bus: Discarding undecodable message",
 				"subject", subject,
 				"bytes", len(msg.Data()),
 				"error", errUnmarshal,
 			)
+			n.deadLetter(context.Background(), subject, msg.Data(), DLQReasonDecode, deliveryCount(msg))
 			_ = msg.Term()
 			return
 		}
@@ -361,6 +392,7 @@ func (n *NatsBus) Subscribe(subject string, handler Handler) (Subscription, erro
 				"flux_id", fluxMsg.FluxID.String(),
 				"error", errValidate,
 			)
+			n.deadLetter(context.Background(), subject, msg.Data(), DLQReasonValidate, deliveryCount(msg))
 			_ = msg.Term()
 			return
 		}
@@ -374,6 +406,22 @@ func (n *NatsBus) Subscribe(subject string, handler Handler) (Subscription, erro
 		// the call chain, a downstream publish error) was unrecoverable: at-most-
 		// once delivery disguised as the guaranteed lane it was supposed to be.
 		if errHandle := handler(ctx, &fluxMsg); errHandle != nil {
+			deliveries := deliveryCount(msg)
+			// On the last redelivery the server would stop anyway, leaving the
+			// message to age out unread. Route it to the dead letter stream and
+			// settle it, so the operator can find it, instead of Nak-ing into
+			// silence.
+			if int(deliveries) >= maxGuaranteedRedeliveries {
+				slog.Error("NATS Bus: Handler failed on the last redelivery, routing to dead letter queue",
+					"subject", subject,
+					"flux_id", fluxMsg.FluxID.String(),
+					"deliveries", deliveries,
+					"error", errHandle,
+				)
+				n.deadLetter(context.Background(), subject, msg.Data(), DLQReasonRedeliveryExhausted, deliveries)
+				_ = msg.Term()
+				return
+			}
 			slog.Error("NATS Bus: Handler failed, message will be redelivered",
 				"subject", subject,
 				"flux_id", fluxMsg.FluxID.String(),
@@ -475,14 +523,15 @@ func (n *NatsBus) SubscribeDurable(subject, durableName string, handler Handler)
 		if errUnmarshal := cbor.Unmarshal(msg.Data(), &fluxMsg); errUnmarshal != nil {
 			// Term rather than left to redeliver: a message that cannot be
 			// decoded will not decode on the next attempt either, and holding
-			// it stalls the consumer. Term, not Ack: it makes that explicit
+			// it stalls the consumer. It goes to the dead letter stream first
+			// when that is enabled, then Term (not Ack): Term makes it explicit
 			// instead of looking identical to a message the handler processed.
-			// A dead letter queue is the real answer.
 			slog.Error("NATS Bus: Discarding undecodable message",
 				"subject", subject,
 				"bytes", len(msg.Data()),
 				"error", errUnmarshal,
 			)
+			n.deadLetter(context.Background(), subject, msg.Data(), DLQReasonDecode, deliveryCount(msg))
 			_ = msg.Term()
 			return
 		}
@@ -493,6 +542,7 @@ func (n *NatsBus) SubscribeDurable(subject, durableName string, handler Handler)
 				"flux_id", fluxMsg.FluxID.String(),
 				"error", errValidate,
 			)
+			n.deadLetter(context.Background(), subject, msg.Data(), DLQReasonValidate, deliveryCount(msg))
 			_ = msg.Term()
 			return
 		}
@@ -502,6 +552,21 @@ func (n *NatsBus) SubscribeDurable(subject, durableName string, handler Handler)
 		ctx = otel.GetTextMapPropagator().Extract(ctx, propagation.MapCarrier(fluxMsg.Metadata))
 
 		if errHandle := handler(ctx, &fluxMsg); errHandle != nil {
+			deliveries := deliveryCount(msg)
+			// On the last redelivery the server would stop anyway and the
+			// message would age out unread. Route it to the dead letter stream
+			// and settle it, so it stays findable.
+			if int(deliveries) >= maxGuaranteedRedeliveries {
+				slog.Error("NATS Bus: Handler failed on the last redelivery, routing to dead letter queue",
+					"subject", subject,
+					"flux_id", fluxMsg.FluxID.String(),
+					"deliveries", deliveries,
+					"error", errHandle,
+				)
+				n.deadLetter(context.Background(), subject, msg.Data(), DLQReasonRedeliveryExhausted, deliveries)
+				_ = msg.Term()
+				return
+			}
 			slog.Error("NATS Bus: Handler failed, message will be redelivered",
 				"subject", subject,
 				"flux_id", fluxMsg.FluxID.String(),
@@ -530,6 +595,13 @@ func (n *NatsBus) SubscribeDurable(subject, durableName string, handler Handler)
 
 func (n *NatsBus) Core() any {
 	return n.conn
+}
+
+// JetStream returns the bus's JetStream handle, or nil before Connect. The
+// Mixer uses it to open the registry buckets, which need the typed API that
+// KeyValue does not expose (create-only and revision-checked writes).
+func (n *NatsBus) JetStream() jetstream.JetStream {
+	return n.js
 }
 
 func (n *NatsBus) Close() {

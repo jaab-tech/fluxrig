@@ -1,0 +1,17 @@
+# Copyright (c) 2026 JAAB Tech SAS, Uruguay
+# SPDX-License-Identifier: Apache-2.0
+#
+# The name must equal the deploy target in examples/scenarios/billpay_rtp.yaml.
+# Each Rack runs in its own working directory, so ./data is its own state and
+# store directory.
+[base]
+name = "rack-rail"
+
+[snake]
+url = "nats://localhost:4222"
+domain = "flux"
+stream_name = "flux-msg"
+
+[logging]
+level = "info"
+filename = "logs/fluxrig.log"

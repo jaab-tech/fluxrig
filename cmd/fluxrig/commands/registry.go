@@ -38,6 +38,7 @@ var racksCmd = &cobra.Command{
 			MachineID uuid.UUID `json:"machine_id"`
 			Name      string    `json:"name"`
 			Status    string    `json:"status"`
+			Online    bool      `json:"online"`
 			IP        string    `json:"ip"`
 			Port      int       `json:"port"`
 			LastSeen  string    `json:"last_seen"`
@@ -49,9 +50,9 @@ var racksCmd = &cobra.Command{
 		}
 
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-		_, _ = fmt.Fprintln(w, "ID\tNAME\tSTATUS\tIP\tPORT\tLAST SEEN")
+		_, _ = fmt.Fprintln(w, "ID\tNAME\tSTATUS\tONLINE\tIP\tPORT\tLAST SEEN")
 		for _, r := range racks {
-			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%s\n", r.MachineID, r.Name, r.Status, r.IP, r.Port, r.LastSeen)
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%t\t%s\t%d\t%s\n", r.MachineID, r.Name, r.Status, r.Online, r.IP, r.Port, r.LastSeen)
 		}
 		_ = w.Flush()
 		return nil

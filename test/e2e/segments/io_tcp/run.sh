@@ -170,19 +170,17 @@ fi
 log_info "Waiting for telemetry flush..."
 sleep 10
 
+# The registry lives in the Mixer's key-value bucket: read it while the
+# Mixer is still up.
+log_info "--- Registry: Full Contents ---"
+registry_dump "nats://localhost:${SNAKE_PORT}" || log_warn "registry dump failed"
+
 # Final Cleanup
 kill $AGENT_PID $MIXER_PID 2>/dev/null || true
 for i in {1..5}; do kill -0 $AGENT_PID 2>/dev/null || kill -0 $MIXER_PID 2>/dev/null || break; sleep 1; done
 kill -9 $AGENT_PID $MIXER_PID 2>/dev/null || true
 wait $AGENT_PID $MIXER_PID 2>/dev/null || true
 sleep 1
-
-log_info "--- Registry: Full Contents ---"
-if command -v duckdb >/dev/null 2>&1; then
-  duckdb -c "SELECT entity_id, type_id, machine_id, name, status FROM registry ORDER BY type_id, entity_id" "${WORK_DIR}/mixer/data/flux.duckdb"
-else
-  log_warn "duckdb CLI not found, skipping table dump. Use 'fluxrig configuration' for subset."
-fi
 
 # 7. Telemetry & Parquet Validation
 log_info "--- Telemetry: Parquet Validation ---"

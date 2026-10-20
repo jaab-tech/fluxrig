@@ -117,3 +117,50 @@ func storeWithSpec(t *testing.T) (manager.Manager, string) {
 	}
 	return mgr, "acme-auth:v2.2.0"
 }
+
+// A translation spec names artefacts of its own: the protocol specs it
+// connects and the records of its lookups. The rack resolves those from its
+// store too, so they travel with the scenario, each once.
+func TestTranslationSpecCarriesWhatItNames(t *testing.T) {
+	mgr, urn := storeWithSpec(t)
+	ctx := context.Background()
+	translationBody := `spec:
+  kind: translation
+  id: billpay
+  version: 1.0.0
+  specs:
+    card: "acme-auth:v2.2.0"
+  lookups:
+    billers:
+      key: "card:merchant_id"
+      fields: [name]
+      source: "billers:v1"
+`
+	if _, _, _, err := mgr.ImportContent(ctx, []byte(translationBody), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := mgr.ImportContent(ctx, []byte("\"M1\": {name: \"Water\"}\n"), "billers", "v1"); err != nil {
+		t.Fatal(err)
+	}
+	c := &ScenarioController{log: slog.Default(), specs: mgr}
+	sc := &registry.Scenario{Gears: []registry.GearSpec{
+		{Name: "to-rail", Config: map[string]any{"spec_path": "billpay:v1.0.0"}},
+		{Name: "decode", Config: map[string]any{"spec_path": urn}},
+	}}
+
+	got := map[string]bool{}
+	for _, a := range c.collectSpecs(ctx, sc) {
+		if got[a.URN()] {
+			t.Errorf("%s travelled twice", a.URN())
+		}
+		got[a.URN()] = true
+	}
+	for _, want := range []string{"billpay:v1.0.0", urn, "billers:v1"} {
+		if !got[want] {
+			t.Errorf("%s did not travel; carried %v", want, got)
+		}
+	}
+	if len(got) != 3 {
+		t.Errorf("carried %v, want exactly 3 artefacts", got)
+	}
+}

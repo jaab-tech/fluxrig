@@ -152,7 +152,7 @@ except Exception:
 if [ ! -d "${ISO_FAMILY_DIR}/.venv" ]; then
     log_info "Creating Python virtual environment for the ISO 8583 tooling..."
     python3 -m venv "${ISO_FAMILY_DIR}/.venv"
-    "${ISO_FAMILY_DIR}/.venv/bin/pip" install -q -r "${ISO_FAMILY_DIR}/requirements.txt" || fail "Failed to install requirements"
+    "${ISO_FAMILY_DIR}/.venv/bin/python3" -m pip install -q -r "${ISO_FAMILY_DIR}/requirements.txt" || fail "Failed to install requirements"
 fi
 ISO_VENV_PYTHON="${ISO_FAMILY_DIR}/.venv/bin/python3"
 
@@ -176,8 +176,6 @@ name = "rack-iso-01"
 url = "nats://127.0.0.1:${SNAKE_PORT}"
 stream_name = "flux-msg"
 
-[rack.telemetry]
-enabled = true
 EOF
 
 cd "${WORK_DIR}/rack_iso"
@@ -379,8 +377,6 @@ name = "rack-processor"
 url = "nats://127.0.0.1:${SNAKE_PORT}"
 stream_name = "flux-msg"
 
-[rack.telemetry]
-enabled = true
 EOF
 
 cd "${WORK_DIR}/rack_processor"
@@ -462,8 +458,6 @@ name = "rack-switch"
 url = "nats://127.0.0.1:${SNAKE_PORT}"
 stream_name = "flux-msg"
 
-[rack.telemetry]
-enabled = true
 EOF
 
 section "Starting scheme hosts"

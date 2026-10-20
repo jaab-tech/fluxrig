@@ -39,6 +39,11 @@ FORBIDDEN_PATTERNS=(
 # Placeholders that are obviously not somebody's account.
 PATTERN_ALLOW="/Users/you/|/home/you/|/home/user/|/Users/user/|/home/runner/"
 
+# The architecture decision records are internal, so a reference to one in a
+# mirrored file points a public reader at a document they cannot open. Keep the
+# reasoning in the comment and drop the number.
+ADR_PATTERN='\bADRs? ?-?[0-9]{4}\b'
+
 fail=0
 while IFS= read -r file; do
     for skip in "${EXCLUDED_FROM_MIRROR[@]}"; do
@@ -55,6 +60,11 @@ while IFS= read -r file; do
             fail=1
         fi
     done
+    hit=$(grep -noE -- "$ADR_PATTERN" "$file" 2>/dev/null | head -1)
+    if [ -n "$hit" ]; then
+        echo "❌ $file:${hit%%:*} names an internal decision record (${hit#*:}), which a public reader cannot open."
+        fail=1
+    fi
     for term in "${FORBIDDEN[@]}"; do
         if grep -qF -- "$term" "$file" 2>/dev/null; then
             echo "❌ $file names '$term', which is internal-only and would be published."

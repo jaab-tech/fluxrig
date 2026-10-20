@@ -8,11 +8,10 @@ filename = "logs/fluxrig.log"
 [store]
 dir = "data"
 
-[bus]
+[snake]
 url = "nats://localhost:4222"
 domain = "flux"
 
 [telemetry]
-enabled = true
 batch_interval = "1s"
 base_subject = "flux.telemetry"

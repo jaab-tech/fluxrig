@@ -107,38 +107,20 @@ func (d *DaemonLogic) scheduleExpiry(key string, value []byte, emit func(*fluxms
 		delete(d.timers, key)
 	}
 
-	// Calculate Timeout Duration
-	ttl := d.gear.config.DefaultTTL
-
-	// The per-message TTL override must be honored regardless of
-	// include_values: that setting controls only whether handleTimeout's
-	// emitted event carries the full original value, a separate concern from
-	// whether this entry's own expiry respects what the scenario asked for.
-	// Decoding here used to be skipped unless include_values was set, which
-	// silently ignored a documented, correctly-stored override for the
-	// (default) common case.
+	// Calculate Timeout Duration. The per-message override must be honored
+	// regardless of include_values: that setting controls only whether
+	// handleTimeout's emitted event carries the full original value, a
+	// separate concern from whether this entry's own expiry respects what the
+	// scenario asked for. The same resolver the store uses sets the KV entry's
+	// own storage TTL, so the timer and the storage expiry agree.
 	var msg fluxmsg.FluxMsg
-	// We ignore error here to allow robust governance (fallback to default TTL)
-	if err := cbor.Unmarshal(value, &msg); err == nil {
-		// Check Metadata override
-		if val, ok := msg.Metadata[fluxmsg.MetaCoatCheckTTL]; ok {
-			if parsed, parseErr := time.ParseDuration(val); parseErr == nil {
-				ttl = parsed
-			} else {
-				d.gear.ctx.Logger().Warn("ttl override parse failed", "key", key, "val", val, "error", parseErr)
-			}
-		}
-	} else {
+	// A decode failure falls back to the default TTL, which resolveTTL applies
+	// from a nil message; governance stays robust rather than failing here.
+	if err := cbor.Unmarshal(value, &msg); err != nil {
 		d.gear.ctx.Logger().Warn("daemon unmarshal failed", "key", key, "error", err)
+		msg = fluxmsg.FluxMsg{}
 	}
-
-	// SAFETY CAP: Enforce MaxTTL to avoid long-lived keys if users request excessive TTLs
-	// The bucket itself is backed by MaxTTL in NATS (EnsureBucket), so keys naturally expire there.
-	// But we also cap the application timer to ensure we emit the event.
-	if ttl > d.gear.config.MaxTTL {
-		d.gear.ctx.Logger().Warn("ttl capped by safety limit", "key", key, "requested", ttl, "limit", d.gear.config.MaxTTL)
-		ttl = d.gear.config.MaxTTL
-	}
+	ttl := d.gear.resolveTTL(&msg, d.gear.config.DefaultTTL, d.gear.config.MaxTTL)
 
 	// Set Timer
 	timer := time.AfterFunc(ttl, func() {

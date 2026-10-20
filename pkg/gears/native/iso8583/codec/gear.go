@@ -5,6 +5,7 @@ package codec
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -15,9 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/moov-io/iso8583"
-	"github.com/moov-io/iso8583/encoding"
 	"github.com/moov-io/iso8583/field"
-	"github.com/moov-io/iso8583/prefix"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -54,9 +53,10 @@ const (
 
 // Gear implements the NativeGear interface for the ISO8583 Codec.
 type Gear struct {
-	logger *slog.Logger
-	name   string
-	emit   func(*fluxmsg.FluxMsg)
+	logger  *slog.Logger
+	name    string
+	emit    func(*fluxmsg.FluxMsg)
+	emitter sdk.PortEmitter
 
 	moovSpec  *iso8583.MessageSpec
 	meta      *sdl.FieldMeta
@@ -81,6 +81,7 @@ type Gear struct {
 func (g *Gear) Init(ctx sdk.GearContext) error {
 	g.name = ctx.GearName()
 	g.logger = ctx.Logger().With("type", "codec_iso8583")
+	g.emitter = ctx.Emitter()
 	config := ctx.Config()
 
 	// 1. Load Spec
@@ -222,8 +223,23 @@ func (g *Gear) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.Flux
 			"spec_version", g.meta.SpecVersion,
 		)
 
-		if g.onError == "drop" {
+		switch g.onError {
+		case "drop":
 			return nil, nil // Filter out
+		case "reject":
+			// The message leaves on the error port, so the scenario can answer it.
+			reason := ReasonFailed
+			var rejection ruleRejection
+			if errors.As(err, &rejection) {
+				reason = ReasonViolation
+			}
+			msg.Metadata["error.reason"] = reason
+			msg.Metadata["error.gear"] = g.name
+			msg.Metadata["error.message"] = err.Error()
+			if errEmit := g.emitter.Emit(portError, msg); errEmit != nil {
+				g.logger.Warn("Rejected message not emitted; is the error port wired?", "direction", dir, "error", errEmit)
+			}
+			return nil, nil
 		}
 		return msg, err
 	}
@@ -326,6 +342,7 @@ func (g *Gear) decode(msg *fluxmsg.FluxMsg) (_ string, _ []int, err error) {
 	}
 
 	mti, _ := isoMsg.GetString(0)
+	mti = fixedWidth(isoMsg.GetField(0), mti)
 	if len(mti) > 0 {
 		for len(mti) < 4 {
 			mti = "0" + mti
@@ -350,6 +367,7 @@ func (g *Gear) decode(msg *fluxmsg.FluxMsg) (_ string, _ []int, err error) {
 		if err != nil {
 			continue
 		}
+		val = fixedWidth(isoMsg.GetField(i), val)
 
 		raw, rawErr := isoMsg.GetBytes(i)
 		stored := storable(val, raw, rawErr)
@@ -395,6 +413,7 @@ func (g *Gear) decode(msg *fluxmsg.FluxMsg) (_ string, _ []int, err error) {
 					if err != nil {
 						return
 					}
+					subVal = fixedWidth(subField, subVal)
 					subRaw, subRawErr := subField.Bytes()
 					if subRawErr != nil {
 						return
@@ -420,72 +439,37 @@ func (g *Gear) decode(msg *fluxmsg.FluxMsg) (_ string, _ []int, err error) {
 	return mti, presentFields, nil
 }
 
-// patchMoovSpecForDecode patches the moovSpec to ensure all field specs have proper Enc/Pref
-// before decoding. This prevents nil pointer dereferences in the moov library's Unpack method.
-//
-// Deliberately never assigns spec.Pad: moov unpads on unpack whenever Pad
-// is set, so a default Pad would strip leading zeros from every decoded
-// value ("0110"->"110", "00"->""). Packing pads inline through safePacker
-// below instead, which reads spec.Pad without writing it.
+// patchMoovSpecForDecode makes the compiled spec safe to pack and unpack.
+// See sdl.MakeNilSafe.
 func (g *Gear) patchMoovSpecForDecode() {
-	if g.moovSpec == nil {
-		return
+	sdl.MakeNilSafe(g.moovSpec)
+}
+
+// fixedWidth gives a decoded fixed-length field back the width the wire
+// carried. The library strips a field's padding when it unpacks, so DE 11
+// "000042" reads as "42" and an all-zero DE 3 reads as "0". The wire
+// re-encodes either one correctly, but Data and every alias would carry the
+// trimmed value, and a rule or a translation that compares the fixed-width
+// value would see a different string. A variable-length field keeps the value
+// as unpacked: its width is whatever the sender chose.
+func fixedWidth(f field.Field, val string) string {
+	// Text fields only. A Binary or Hex field renders its bytes as hex, two
+	// characters per byte, while its Length counts bytes: padding that string
+	// to Length would mix the two units and change the bytes a re-encode
+	// produces. A composite is handled through its own subfields.
+	switch f.(type) {
+	case *field.String, *field.Numeric:
+	default:
+		return val
 	}
-	// Pack-only safe packer: pads inline when the spec declares a Pad,
-	// passes through otherwise. Never assigns spec.Pad (see above).
-	safePacker := field.PackerFunc(func(data []byte, spec *field.Spec) ([]byte, error) {
-		enc := spec.Enc
-		if enc == nil {
-			enc = encoding.ASCII
-		}
-		pref := spec.Pref
-		if pref == nil {
-			pref = prefix.ASCII.Fixed
-		}
-		if spec.Pad != nil {
-			data = spec.Pad.Pad(data, spec.Length)
-		}
-		encodedValue, err := enc.Encode(data)
-		if err != nil {
-			return nil, fmt.Errorf("failed to encode content: %w", err)
-		}
-		lengthPrefix, err := pref.EncodeLength(spec.Length, len(data))
-		if err != nil {
-			return nil, fmt.Errorf("failed to encode length: %w", err)
-		}
-		return append(lengthPrefix, encodedValue...), nil
-	})
-	// Recursive function to patch a field and its subfields
-	var patchField func(fld field.Field)
-	patchField = func(fld field.Field) {
-		if fld == nil {
-			return
-		}
-		spec := fld.Spec()
-		if spec == nil {
-			return
-		}
-		// Set default encoding if missing
-		if spec.Enc == nil {
-			spec.Enc = encoding.ASCII
-		}
-		// Set default prefix if missing
-		if spec.Pref == nil {
-			spec.Pref = prefix.ASCII.Fixed
-		}
-		// Pack through the nil-safe packer. Composite fields ignore
-		// spec.Packer (they assemble subfields directly), so setting
-		// it here is harmless for them.
-		spec.Packer = safePacker
-		// Recursively patch subfields
-		for _, subField := range spec.Subfields {
-			patchField(subField)
-		}
+	spec := f.Spec()
+	if spec == nil || spec.Pad == nil || spec.Pref == nil || spec.Length <= 0 {
+		return val
 	}
-	// Patch all fields in the moovSpec
-	for _, fld := range g.moovSpec.Fields {
-		patchField(fld)
+	if !strings.HasSuffix(spec.Pref.Inspect(), ".Fixed") || len(val) >= spec.Length {
+		return val
 	}
+	return string(spec.Pad.Pad([]byte(val), spec.Length))
 }
 
 // storable picks the representation a decoded value must take to survive the
@@ -828,11 +812,25 @@ func (g *Gear) applyRules(ctx context.Context, msg *fluxmsg.FluxMsg, mti, dir st
 	msg.Metadata["codec.violations"] = fmt.Sprint(len(violations))
 
 	if enforcing && sdl.Rejects(violations) {
-		return fmt.Errorf("message does not satisfy spec %s %s: %s",
-			g.meta.SpecID, g.meta.SpecVersion, firstRejection(violations))
+		return ruleRejection(fmt.Sprintf("message does not satisfy spec %s %s: %s",
+			g.meta.SpecID, g.meta.SpecVersion, firstRejection(violations)))
 	}
 	return nil
 }
+
+// Values of error.reason on a message the codec rejects.
+const (
+	ReasonViolation = "violation"    // a rule of the spec, with validation: enforce
+	ReasonFailed    = "codec_failed" // the message could not be decoded or encoded
+)
+
+const portError = "error"
+
+// ruleRejection is the error of a message that a rule of the spec rejects, as
+// opposed to one that could not be decoded or encoded.
+type ruleRejection string
+
+func (e ruleRejection) Error() string { return string(e) }
 
 // firstRejection names one violation for the error. All of them are logged; an
 // error string that carried a dozen would be unreadable where it surfaces.

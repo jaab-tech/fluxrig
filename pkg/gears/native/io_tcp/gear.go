@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/jaab-tech/fluxrig/pkg/ctrl"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/jaab-tech/fluxrig/pkg/sdk"
 )
@@ -72,7 +73,9 @@ func (g *Gear) Start(ctx context.Context, emit func(*fluxmsg.FluxMsg)) error {
 		if g.config.Connect == "" {
 			return fmt.Errorf("io_tcp: missing connect address")
 		}
-		g.impl = NewClient(g.config, g.ctx.Logger(), g.emit, g.ctx.IDGen())
+		client := NewClient(g.config, g.ctx.Logger(), g.emit, g.ctx.IDGen())
+		g.publishLinkState(client)
+		g.impl = client
 	default:
 		return fmt.Errorf("io_tcp: unknown mode %q", g.config.Mode)
 	}
@@ -106,4 +109,31 @@ func (g *Gear) Drain(ctx context.Context) error {
 		return nil
 	}
 	return g.impl.Drain(ctx)
+}
+
+// publishLinkState publishes the client's connection transitions on the
+// control plane, at link.<gear>, as conn.up and conn.down. A routing gear whose
+// port ends at this client (the conductor) follows them to know whether the
+// port may receive traffic. A client owns one connection, so the gear's state
+// is the connection's state.
+func (g *Gear) publishLinkState(client *Client) {
+	cp, ok := g.ctx.ControlPlane().(ctrl.ControlPlane)
+	if !ok || cp == nil {
+		return
+	}
+	gearName := g.ctx.GearName()
+	target := "link." + gearName
+	client.OnLinkState(func(up bool, connID string) {
+		cmd := ctrl.Command{
+			Cmd:  "conn.down",
+			Args: map[string]string{"conn_id": connID, "gear": gearName, "endpoint": g.config.Connect},
+			Src:  gearName,
+		}
+		if up {
+			cmd.Cmd = "conn.up"
+		}
+		if err := cp.Publish(target, cmd); err != nil {
+			g.log.Warn("link-state publish failed", "cmd", cmd.Cmd, "error", err)
+		}
+	})
 }

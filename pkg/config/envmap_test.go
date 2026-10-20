@@ -103,7 +103,15 @@ func assertEveryLeafFieldRoundTrips(t *testing.T, zero any, load func() (any, er
 		case reflect.Slice:
 			val = fmt.Sprintf("sentinel-%d-a,sentinel-%d-b", i, i)
 		default:
-			val = fmt.Sprintf("sentinel-%d", i)
+			// A string field whose tag marks it as a duration must carry a
+			// value time.ParseDuration accepts: config load now validates
+			// every duration field, so a "sentinel-N" here would fail the
+			// very check this test exists to coexist with.
+			if isDurationField(l.path[len(l.path)-1]) {
+				val = fmt.Sprintf("%ds", 1+i)
+			} else {
+				val = fmt.Sprintf("sentinel-%d", i)
+			}
 		}
 		want[strings.Join(l.path, ".")] = val
 		t.Setenv(l.envVar, val)

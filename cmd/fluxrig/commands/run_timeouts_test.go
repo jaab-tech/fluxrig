@@ -168,3 +168,21 @@ func TestParseRackTimeouts_NamesTheSettingThatIsWrong(t *testing.T) {
 		})
 	}
 }
+
+// rack.outbox_backpressure_timeout: empty selects the default, "0s" turns
+// the wait off, and a negative value is refused.
+func TestParseRackTimeouts_OutboxBackpressure(t *testing.T) {
+	cfg := validTimeouts()
+	out, err := parseRackTimeouts(cfg)
+	require.NoError(t, err)
+	assert.Negative(t, int64(out.outboxBackpressure), "empty selects the runtime default")
+
+	cfg.Rack.OutboxBackpressureTimeout = "0s"
+	out, err = parseRackTimeouts(cfg)
+	require.NoError(t, err)
+	assert.Zero(t, out.outboxBackpressure)
+
+	cfg.Rack.OutboxBackpressureTimeout = "-1s"
+	_, err = parseRackTimeouts(cfg)
+	require.ErrorContains(t, err, "rack.outbox_backpressure_timeout")
+}

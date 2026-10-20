@@ -10,8 +10,10 @@ import (
 	"github.com/jaab-tech/fluxrig/pkg/gears/native/coatcheck"
 	"github.com/jaab-tech/fluxrig/pkg/gears/native/conductor"
 	"github.com/jaab-tech/fluxrig/pkg/gears/native/io_tcp"
+	iso20022codec "github.com/jaab-tech/fluxrig/pkg/gears/native/iso20022/codec"
 	iso8583codec "github.com/jaab-tech/fluxrig/pkg/gears/native/iso8583/codec"
 	iso8583io "github.com/jaab-tech/fluxrig/pkg/gears/native/iso8583/io"
+	"github.com/jaab-tech/fluxrig/pkg/gears/native/translate"
 	"github.com/jaab-tech/fluxrig/pkg/gears/native/wasm"
 	"github.com/jaab-tech/fluxrig/pkg/sdk"
 )
@@ -34,6 +36,10 @@ func NewFactory() *Factory {
 	f.Register("coatcheck", func() sdk.NativeGear { return coatcheck.New() })
 	f.Register("conductor", func() sdk.NativeGear { return conductor.New() })
 	f.Register("wasm", func() sdk.NativeGear { return wasm.New() })
+
+	// Roadmap gears: the manifest is real, Init refuses to run.
+	f.Register("codec_iso20022", func() sdk.NativeGear { return &iso20022codec.Gear{} })
+	f.Register("translate", func() sdk.NativeGear { return &translate.Gear{} })
 
 	// Optional gears, selected at build time. See factory_bento.go /
 	// factory_nobento.go
@@ -78,7 +84,7 @@ func (f *Factory) Register(typeStr string, ctor func() sdk.NativeGear) {
 }
 
 // categoryForType is a fallback classification for gears without a manifest,
-// used only until every gear declares one (ADR 0045 Phase 2).
+// used only until every gear declares one.
 func categoryForType(typeStr string) sdk.GearCategory {
 	switch {
 	case len(typeStr) >= 3 && typeStr[:3] == "io_":

@@ -19,6 +19,10 @@ type natsKV struct {
 }
 
 func (k *natsKV) Put(ctx context.Context, bucket, key string, value []byte) (uint64, error) {
+	return k.PutWithTTL(ctx, bucket, key, value, 0)
+}
+
+func (k *natsKV) PutWithTTL(ctx context.Context, bucket, key string, value []byte, ttl time.Duration) (uint64, error) {
 	if k.js == nil {
 		return 0, errors.New("nats bus not connected")
 	}
@@ -28,11 +32,32 @@ func (k *natsKV) Put(ctx context.Context, bucket, key string, value []byte) (uin
 		return 0, fmt.Errorf("failed to get bucket %s: %w", bucket, err)
 	}
 
-	rev, err := kv.Put(ctx, key, value)
-	if err != nil {
-		return 0, err
+	if ttl <= 0 {
+		return kv.Put(ctx, key, value)
 	}
-	return rev, nil
+
+	// Create is the only KV operation that carries a per-message TTL
+	// (jetstream.KeyTTL); Put and Update do not. Create succeeds when the key
+	// is absent or holds only a delete marker. A key a scenario re-parks is an
+	// existing live key, so Create returns ErrKeyExists and the value is
+	// updated with Put. The entry then keeps the TTL set when it was first
+	// stored, which is the same order of magnitude as the new one and never
+	// longer than the bucket ceiling.
+	//
+	// Consequence, deliberate and narrow: a re-park whose own TTL differs from
+	// the first park's keeps the ORIGINAL expiry, because Put cannot carry a
+	// new one. The two parks of one key almost always resolve the same TTL
+	// (same gear config, same resolveTTL inputs), so this is an edge case, not
+	// a correctness bug; it would matter only for a scenario that changes
+	// meta.coatcheck.ttl for a key already in flight.
+	rev, err := kv.Create(ctx, key, value, jetstream.KeyTTL(ttl))
+	if err == nil {
+		return rev, nil
+	}
+	if errors.Is(err, jetstream.ErrKeyExists) {
+		return kv.Put(ctx, key, value)
+	}
+	return 0, err
 }
 
 func (k *natsKV) Get(ctx context.Context, bucket, key string) ([]byte, uint64, error) {
@@ -158,12 +183,20 @@ func (k *natsKV) EnsureBucket(ctx context.Context, bucket string, storage string
 		st = jetstream.MemoryStorage
 	}
 
+	// LimitMarkerTTL is what makes the client set AllowMsgTTL on the stream,
+	// which is required for a per-message TTL (jetstream.KeyTTL) to be
+	// accepted. It is independent of the entry TTL: it is how long a delete
+	// marker is kept for a direct get. Without it the bucket would reject the
+	// per-entry TTL and a key would live for the bucket TTL only.
+	const deleteMarkerTTL = 2 * time.Minute
+
 	_, err := k.js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{
-		Bucket:   bucket,
-		Storage:  st,
-		Replicas: replicas,
-		TTL:      ttl,
-		History:  1, // We only care about current state for CoatCheck
+		Bucket:         bucket,
+		Storage:        st,
+		Replicas:       replicas,
+		TTL:            ttl,
+		LimitMarkerTTL: deleteMarkerTTL,
+		History:        1, // We only care about current state for CoatCheck
 	})
 
 	return err

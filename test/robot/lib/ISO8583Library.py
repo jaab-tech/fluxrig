@@ -254,27 +254,21 @@ class ISO8583Library:
         25: ("n", 2), 26: ("n", 2), 35: ("ll", 37), 37: ("n", 12), 38: ("a", 6),
         39: ("a", 2), 41: ("a", 8), 42: ("a", 15), 43: ("a", 40),
         48: ("lll", 999), 49: ("n", 3), 70: ("n", 3),
-        # 70 exists so secondary-bitmap attempts fail with the
-        # explanatory moov Length-16 error below, not "no format".
     }
 
     def build_iso_message(self, mti, bitmap="binary", **fields):
         """Builds an ASCII ISO 8583 message and returns it as a hex string.
 
         Fields are passed as `f<N>=value`, because Robot keyword arguments
-        cannot begin with a digit. Only the primary bitmap is emitted, which
-        covers fields 1..64.
+        cannot begin with a digit. The bitmap follows ISO 8583: a primary
+        bitmap for fields 1..64, and a secondary one only when a field
+        above 64 is present, announced by bit 1.
 
-        `bitmap` selects the wire encoding of the primary bitmap, and the
-        two paths in this stack genuinely disagree:
-        - "binary" (default): 8 raw bytes. What the io_iso8583 gateway
-          gears parse, and what classic ASCII interfaces carry.
-        - "hex": 32 ASCII characters (primary plus the zeroed secondary
-          slot). What the moov-spec codec/sim gears unpack: their bitmap
-          spec carries Length 16, which always reads 32 characters.
-        A 16-character primary-only bitmap satisfies neither reader and
-        fails far downstream (e.g. a later field short), so it is not
-        offered: pick the reader you are sending to.
+        `bitmap` selects the wire encoding of each bitmap:
+        - "binary" (default): 8 raw bytes per bitmap. What the io_iso8583
+          gateway gears parse, and what classic ASCII interfaces carry.
+        - "hex": 16 ASCII hex characters per bitmap. What the reference
+          spec (examples/specs/iso8583-v87-ascii.yaml) packs and unpacks.
 
         Fixed alphanumeric fields must be supplied at their exact declared
         length rather than being padded here. `DE 43` is the reason: its country
@@ -289,6 +283,7 @@ class ISO8583Library:
             parsed[int(name[1:])] = str(value)
 
         primary = 0
+        secondary = 0
         body = ""
         for num in sorted(parsed):
             fmt, length = self._FIELD_FORMATS.get(num, (None, None))
@@ -312,34 +307,22 @@ class ISO8583Library:
                     raise ValueError(f"DE {num}: {len(value)} exceeds max {length}")
                 body += str(len(value)).rjust(digits, "0") + value
 
-            if 1 <= num <= 64:
+            if 2 <= num <= 64:
                 primary |= 1 << (64 - num)
             elif 65 <= num <= 128:
-                # Secondary bitmaps have no correct spelling on this
-                # stack: moov Length-16 bitmaps always occupy 32 wire
-                # characters per unpack iteration, so a secondary can
-                # neither fit in 32 nor align in 64. Failing loudly
-                # beats emitting a bitmap every reader misparses.
-                raise ValueError(
-                    f"DE {num}: secondary bitmaps (fields 65-128) are not "
-                    "supported by this builder on the moov Length-16 wire "
-                    "format; test the MTI pairing without the field instead"
-                )
+                secondary |= 1 << (128 - num)
             else:
                 raise ValueError(f"DE {num}: only fields 1..128 supported")
 
-        # Bitmap wire form follows the `bitmap` argument (see docstring:
-        # the readers disagree). Either spelling goes through .hex()
-        # twice or once so fromhex restores the intended wire bytes.
+        # Bit 1 announces the secondary bitmap. Either spelling goes
+        # through .hex() twice or once so fromhex restores the wire bytes.
+        if secondary:
+            primary |= 1 << 63
         raw_bitmap = primary.to_bytes(8, "big")
+        if secondary:
+            raw_bitmap += secondary.to_bytes(8, "big")
         if bitmap == "hex":
-            # 32 ASCII characters: primary hex plus the zeroed secondary
-            # slot moov Length-16 bitmaps always occupy. Verified by a
-            # moov pack/unpack round trip. NOTE: real acquirers send 16
-            # characters when no secondary bitmap exists, so this is
-            # interop debt if these specs ever face a live host.
-            bitmap_hex = raw_bitmap.hex() + "0" * 16
-            bitmap_part = bitmap_hex.encode().hex()
+            bitmap_part = raw_bitmap.hex().upper().encode().hex()
         elif bitmap == "binary":
             bitmap_part = raw_bitmap.hex()
         else:

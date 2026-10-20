@@ -5,10 +5,14 @@ package registry
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/jaab-tech/fluxrig/pkg/security"
 )
 
 var (
@@ -26,7 +30,7 @@ var (
 type Rack struct {
 	MachineID uuid.UUID `json:"machine_id"`
 	Name      string    `json:"name"`
-	Status    string    `json:"status"` // pending, active, offline
+	Status    string    `json:"status"` // pending, active, inactive
 	Version   string    `json:"version"`
 	IP        string    `json:"ip"`
 	Port      int       `json:"port"`
@@ -38,12 +42,49 @@ type Rack struct {
 	// is explicit rather than relied on: fxamacker/cbor falls back to the
 	// json tag when no cbor tag is present, which already covers this today,
 	// but that is an implicit library behavior to lean on for a secret.
-	Secret      string         `json:"-" cbor:"-"`
+	Secret string `json:"-" cbor:"-"`
+	// SecretHash is what the registry keeps of the secret: the hex SHA-256.
+	// Secret itself is set only on the Rack a fresh registration returns,
+	// the one moment the plaintext exists, so the first passport can carry
+	// it. Everywhere else Secret is empty and a presented secret is checked
+	// with SecretMatches.
+	SecretHash string `json:"-" cbor:"-"`
+	// Online reports whether a heartbeat arrived within the liveness TTL.
+	// It is presence, separate from Status: a suspended Rack can be online,
+	// an active one offline.
+	Online      bool           `json:"online"`
 	FirstSeen   time.Time      `json:"first_seen"`
 	LastSeen    time.Time      `json:"last_seen"`
 	UpdateCount int            `json:"update_count"`
 	Stats       map[string]any `json:"stats"`
 	Config      map[string]any `json:"config"`
+}
+
+// ActiveScenario is the active-scenario pointer: which scenario is active,
+// and the scenario as it was registered and pushed, entity IDs included. A
+// restarted Mixer restores it from Content, so what it pushes to a Rack
+// matches, byte for byte, what that Rack already runs.
+type ActiveScenario struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+	Content []byte `json:"content,omitempty"`
+}
+
+// HashSecret returns the form the registry stores a secret in: the hex
+// SHA-256. A secret is 32 random bytes, so nothing about it is guessable and
+// no salt or slow hash is needed.
+func HashSecret(secret string) string {
+	sum := sha256.Sum256([]byte(secret))
+	return hex.EncodeToString(sum[:])
+}
+
+// SecretMatches reports whether presented hashes to storedHash, in constant
+// time. An empty presented secret or an empty stored hash never matches.
+func SecretMatches(storedHash, presented string) bool {
+	if storedHash == "" || presented == "" {
+		return false
+	}
+	return security.SecretsEqual(storedHash, HashSecret(presented))
 }
 
 // LogEntry represents a single telemetry log.

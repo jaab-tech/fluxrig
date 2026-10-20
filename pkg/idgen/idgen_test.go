@@ -52,7 +52,7 @@ func TestIDGenerator_NextEntityID(t *testing.T) {
 }
 
 // Before this fix, a Nil machine ID (a Rack that has not enrolled yet -
-// ADR 0002's Zero Config bootstrap, a real and expected state, not a caller
+// The Zero Config bootstrap, a real and expected state, not a caller
 // error) overwrote bytes 9-12 with Nil's own zero bytes, so every
 // not-yet-enrolled generator produced the same constant hint there. Two
 // separate calls must not land the same bytes in that region now that
@@ -104,9 +104,56 @@ func (failingReader) Read([]byte) (int, error) {
 }
 
 func TestRandomSuffix(t *testing.T) {
-	s1 := RandomSuffix(4)
+	s1, err := RandomSuffix(4)
+	require.NoError(t, err)
 	assert.Equal(t, 4, len(s1))
-	s2 := RandomSuffix(8)
+
+	s2, err := RandomSuffix(8)
+	require.NoError(t, err)
 	assert.Equal(t, 8, len(s2))
 	assert.NotEqual(t, s1, s2)
+
+	// Odd and zero lengths must not panic and must honour the length.
+	s3, err := RandomSuffix(3)
+	require.NoError(t, err)
+	assert.Equal(t, 3, len(s3))
+
+	s0, err := RandomSuffix(0)
+	require.NoError(t, err)
+	assert.Equal(t, "", s0)
+}
+
+// Before this fix, RandomSuffix returned the constant "0000" when the entropy
+// source failed, so a caller received a plausible, wrong suffix with no signal.
+// It must now surface the error instead.
+func TestRandomSuffix_EntropyFailureReturnsError(t *testing.T) {
+	orig := randRead
+	randRead = func([]byte) (int, error) {
+		return 0, errors.New("simulated entropy source failure")
+	}
+	defer func() { randRead = orig }()
+
+	suffix, err := RandomSuffix(4)
+	require.Error(t, err)
+	assert.Equal(t, "", suffix, "a failed entropy read must not yield a placeholder suffix")
+}
+
+// The machine-id hint is the low 32 bits, so two machine IDs that differ only
+// above those bits share a hint. They must still produce different entity IDs:
+// the hint is for grouping, not an identity.
+func TestIDGenerator_NewEntityID_SharedHintStillDistinctIDs(t *testing.T) {
+	// Both end in the same 4 bytes (112233445566) and differ above them.
+	a := uuid.MustParse("00000000-0000-0000-0000-112233445566")
+	b := uuid.MustParse("00000000-0000-0000-0001-112233445566")
+
+	genA, err := New(a)
+	require.NoError(t, err)
+	genB, err := New(b)
+	require.NoError(t, err)
+
+	idA := genA.NewEntityID(EntityRack)
+	idB := genB.NewEntityID(EntityRack)
+
+	assert.Equal(t, idA[9:13], idB[9:13], "the two machine IDs share the low-32-bit hint by construction")
+	assert.NotEqual(t, idA, idB, "the full IDs must still differ")
 }

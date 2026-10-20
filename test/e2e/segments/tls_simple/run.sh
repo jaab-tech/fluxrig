@@ -145,16 +145,12 @@ else
     fail "Passport MISSING at $STATE_FILE"
 fi
 
-log_info "Verifying DB Content (Snapshot)..."
-cp "$WORK_DIR/mixer/data/flux.duckdb" "$WORK_DIR/mixer/data/snapshot.duckdb"
-[ -f "$WORK_DIR/mixer/data/flux.duckdb.wal" ] && cp "$WORK_DIR/mixer/data/flux.duckdb.wal" "$WORK_DIR/mixer/data/snapshot.duckdb.wal"
-
-DB_OUT=$(duckdb -readonly -csv -noheader -c "SELECT name, machine_id FROM registry WHERE name='rack-e2e-01' AND type_id=4;" "$WORK_DIR/mixer/data/snapshot.duckdb")
-rm -f "$WORK_DIR/mixer/data/snapshot.duckdb" "$WORK_DIR/mixer/data/snapshot.duckdb.wal"
-if [[ "$DB_OUT" == *"rack-e2e-01"* ]]; then
-    log_success "DB Verification Passed (Rack found in DB)"
+log_info "Verifying Registry Content..."
+REG_OUT=$(registry_dump "tls://localhost:${SNAKE_PORT}" -tls-insecure | awk -F'\t' '$1==4 && $3=="rack-e2e-01"')
+if [[ "$REG_OUT" == *"rack-e2e-01"* ]]; then
+    log_success "Registry Verification Passed (Rack found)"
 else
-    fail "DB Verification Failed (Rack not found in DB snapshot)"
+    fail "Registry Verification Failed (Rack not found in the registry)"
 fi
 
 log_info "Letting agent run for heartbeats (5s)..."

@@ -4,6 +4,10 @@
 package config
 
 import (
+	"fmt"
+	"math"
+	"time"
+
 	"github.com/knadh/koanf/parsers/toml"
 	"github.com/knadh/koanf/providers/env"
 	"github.com/knadh/koanf/providers/file"
@@ -23,6 +27,36 @@ type MixerConfig struct {
 	Ingest        IngestConfig        `koanf:"ingest"`
 	Telemetry     TelemetryConfig     `koanf:"telemetry"`
 	Wasm          WasmConfig          `koanf:"wasm"`
+	Registry      RegistryConfig      `koanf:"registry"`
+}
+
+// RegistryConfig sets where the Mixer keeps its registry: Rack records, the
+// name index, scenario files and the active-scenario pointer, in one
+// JetStream key-value bucket, and presence in a second one whose max age
+// expires it.
+type RegistryConfig struct {
+	// Bucket names the registry bucket.
+	Bucket string `koanf:"bucket" example:"fluxrig_registry"`
+	// LivenessBucket names the presence bucket.
+	LivenessBucket string `koanf:"liveness_bucket" example:"fluxrig_liveness"`
+	// Replicas is the replica count of both buckets. A single Mixer holds one
+	// replica, so a value above 1 needs as many JetStream servers.
+	Replicas int `koanf:"replicas" example:"1"`
+	// MaxValueSize is the largest record in bytes, headers included. In
+	// practice it bounds a scenario file.
+	MaxValueSize int `koanf:"max_value_size" example:"1048576"`
+	// LivenessTTL is how long after its last heartbeat a Rack still counts
+	// as online. Three heartbeat intervals by default.
+	LivenessTTL string `koanf:"liveness_ttl" example:"90s"`
+	// WriteRetries is how many times a registry write that met a concurrent
+	// one is read again and retried before it fails.
+	WriteRetries int `koanf:"write_retries" example:"3"`
+	// SweepInterval is how often the Mixer repairs what a crash between two
+	// registry writes left behind. It also sweeps once at startup.
+	SweepInterval string `koanf:"sweep_interval" example:"10m"`
+	// OrphanMinAge is how old a registry record must be before the sweep
+	// treats it as left behind rather than in progress.
+	OrphanMinAge string `koanf:"orphan_min_age" example:"5m"`
 }
 
 // WasmConfig defines settings for the WebAssembly Supply Chain Security Catalog.
@@ -68,8 +102,21 @@ type ObservabilityConfig struct {
 type EmbeddedConfig struct {
 	// FlushInterval for the embedded stack.
 	FlushInterval string `koanf:"flush_interval" example:"5s"`
-	// RetentionDays for local parquet files.
+	// RetentionDays for local parquet files. Wins over
+	// Rotation.MaxAgeDays when set to a positive value.
 	RetentionDays int `koanf:"retention_days" example:"30"`
+	// Rotation controls the retention sweep over local parquet files.
+	Rotation RotationConfig `koanf:"rotation"`
+}
+
+// RotationConfig controls the retention sweep over local parquet files.
+type RotationConfig struct {
+	// CheckInterval is how often the retention sweep runs. The sweep
+	// also runs once at Mixer startup.
+	CheckInterval string `koanf:"check_interval" example:"1h"`
+	// MaxAgeDays deletes parquet files older than this many days when
+	// RetentionDays is not set to a positive value.
+	MaxAgeDays int `koanf:"max_age_days" example:"30"`
 }
 
 // MixerSettings defines the identity of this Mixer instance.
@@ -143,6 +190,7 @@ func LoadMixer(path string) (*MixerConfig, error) {
 	_ = k.Set("snake.url", "nats://localhost:4222")
 	_ = k.Set("snake.port", 4222)
 	_ = k.Set("snake.domain", "flux")
+	_ = k.Set("snake.cluster_name", "flux")
 	_ = k.Set("snake.stream_name", "flux-msg")
 	_ = k.Set("snake.operation_timeout", "5s")
 	_ = k.Set("snake.inactive_threshold", "30s")
@@ -158,6 +206,9 @@ func LoadMixer(path string) (*MixerConfig, error) {
 	_ = k.Set("snake.kv_max_bytes", 1073741824)
 	_ = k.Set("snake.kv_max_value_size", 1048576)
 	_ = k.Set("snake.kv_ttl", "0s")
+	_ = k.Set("snake.dlq_enabled", true)
+	_ = k.Set("snake.dlq_subject", "flux.dlq")
+	_ = k.Set("snake.dlq_max_age", "720h")
 
 	// Defaults: Telemetry (Self-Monitoring)
 	_ = k.Set("telemetry.service_name", "flux.mixer")
@@ -172,9 +223,20 @@ func LoadMixer(path string) (*MixerConfig, error) {
 	_ = k.Set("observability.tier", "embedded")
 	_ = k.Set("observability.embedded.flush_interval", "5s")
 	_ = k.Set("observability.embedded.retention_days", 30)
+	_ = k.Set("observability.embedded.rotation.check_interval", "1h")
+	_ = k.Set("observability.embedded.rotation.max_age_days", 30)
 	_ = k.Set("enrollment.push_delay", "1s")
 	_ = k.Set("enrollment.auto_adopt", false)
 	_ = k.Set("enrollment.bootstrap_secret", "fluxrig")
+
+	_ = k.Set("registry.bucket", DefaultRegistryBucket)
+	_ = k.Set("registry.liveness_bucket", DefaultRegistryLivenessBucket)
+	_ = k.Set("registry.replicas", DefaultRegistryReplicas)
+	_ = k.Set("registry.max_value_size", DefaultRegistryMaxValueSize)
+	_ = k.Set("registry.liveness_ttl", DefaultRegistryLivenessTTL)
+	_ = k.Set("registry.write_retries", DefaultRegistryWriteRetries)
+	_ = k.Set("registry.sweep_interval", DefaultRegistrySweepInterval)
+	_ = k.Set("registry.orphan_min_age", DefaultRegistryOrphanMinAge)
 
 	_ = k.Set("wasm.catalog_dir", "./data/wasm")
 	_ = k.Set("wasm.trusted_keys_dir", "./data/wasm/keys")
@@ -182,6 +244,14 @@ func LoadMixer(path string) (*MixerConfig, error) {
 	// 2. File (if provided)
 	if path != "" {
 		if err := k.Load(file.Provider(path), toml.Parser()); err != nil {
+			return nil, err
+		}
+		// The file's own keys are validated separately from the merged set,
+		// because the FLUXRIG_ environment namespace also carries process
+		// control variables that are not configuration (FLUXRIG_BIN_DIR and
+		// the test harness's own switches). Only a key the operator wrote in
+		// the file is a candidate for a typo.
+		if err := validateKnownKeys(k, MixerConfig{}); err != nil {
 			return nil, err
 		}
 	}
@@ -198,6 +268,15 @@ func LoadMixer(path string) (*MixerConfig, error) {
 		return nil, err
 	}
 
+	// Fail fast on a duration that does not parse: it would otherwise reach a
+	// consumer that discards the parse error and treats zero as real.
+	if err := validateDurations(&cfg); err != nil {
+		return nil, err
+	}
+	if err := cfg.Registry.validate(); err != nil {
+		return nil, err
+	}
+
 	// Backward Compatibility: Fallback to old field names
 	if cfg.Base.Name == "" {
 		cfg.Base.Name = k.String("mixer.mixer_name")
@@ -207,4 +286,75 @@ func LoadMixer(path string) (*MixerConfig, error) {
 	}
 
 	return &cfg, nil
+}
+
+// Registry defaults, shared by LoadMixer and WithDefaults.
+const (
+	DefaultRegistryBucket         = "fluxrig_registry"
+	DefaultRegistryLivenessBucket = "fluxrig_liveness"
+	DefaultRegistryReplicas       = 1
+	DefaultRegistryMaxValueSize   = 1 << 20
+	DefaultRegistryLivenessTTL    = "90s"
+	DefaultRegistryWriteRetries   = 3
+	DefaultRegistrySweepInterval  = "10m"
+	DefaultRegistryOrphanMinAge   = "5m"
+)
+
+// WithDefaults fills the unset fields whose zero value is never valid with
+// their defaults. LoadMixer applies the same defaults; this covers a config
+// built in code.
+func (r RegistryConfig) WithDefaults() RegistryConfig {
+	if r.Bucket == "" {
+		r.Bucket = DefaultRegistryBucket
+	}
+	if r.LivenessBucket == "" {
+		r.LivenessBucket = DefaultRegistryLivenessBucket
+	}
+	if r.Replicas == 0 {
+		r.Replicas = DefaultRegistryReplicas
+	}
+	if r.MaxValueSize == 0 {
+		r.MaxValueSize = DefaultRegistryMaxValueSize
+	}
+	if r.LivenessTTL == "" {
+		r.LivenessTTL = DefaultRegistryLivenessTTL
+	}
+	if r.SweepInterval == "" {
+		r.SweepInterval = DefaultRegistrySweepInterval
+	}
+	if r.OrphanMinAge == "" {
+		r.OrphanMinAge = DefaultRegistryOrphanMinAge
+	}
+	// WriteRetries is not defaulted here: zero is a valid setting (fail on
+	// the first conflict), and this runs on loaded configs too.
+	return r
+}
+
+// validate refuses registry settings that would fail later, at bucket
+// creation or on the first write.
+func (r RegistryConfig) validate() error {
+	if r.Bucket == "" || r.LivenessBucket == "" || r.Bucket == r.LivenessBucket {
+		return fmt.Errorf("registry.bucket and registry.liveness_bucket must be set and differ")
+	}
+	if r.Replicas < 1 {
+		return fmt.Errorf("registry.replicas must be at least 1, got %d", r.Replicas)
+	}
+	if r.MaxValueSize < 1 || r.MaxValueSize > math.MaxInt32 {
+		return fmt.Errorf("registry.max_value_size must be between 1 and %d, got %d", math.MaxInt32, r.MaxValueSize)
+	}
+	if r.WriteRetries < 0 {
+		return fmt.Errorf("registry.write_retries must not be negative, got %d", r.WriteRetries)
+	}
+	if d, err := time.ParseDuration(r.LivenessTTL); err != nil || d <= 0 {
+		return fmt.Errorf("registry.liveness_ttl must be a positive duration, got %q", r.LivenessTTL)
+	}
+	if d, err := time.ParseDuration(r.SweepInterval); err != nil || d <= 0 {
+		return fmt.Errorf("registry.sweep_interval must be a positive duration, got %q", r.SweepInterval)
+	}
+	// The grace period covers a write sequence in flight. It has to be
+	// positive, or the sweep could undo a registration still in progress.
+	if d, err := time.ParseDuration(r.OrphanMinAge); err != nil || d <= 0 {
+		return fmt.Errorf("registry.orphan_min_age must be a positive duration, got %q", r.OrphanMinAge)
+	}
+	return nil
 }

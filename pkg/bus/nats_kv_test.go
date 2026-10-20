@@ -164,3 +164,89 @@ func TestNatsKV_Watch(t *testing.T) {
 	err = sub.Unsubscribe()
 	require.NoError(t, err)
 }
+
+// newTestKV starts an embedded server and returns a connected bus plus a KV
+// handle whose bucket has per-message TTL enabled (EnsureBucket).
+func newTestKV(t *testing.T, bucket string, bucketTTL time.Duration) (KeyValue, *NatsBus) {
+	t.Helper()
+	ctx := context.Background()
+	s, err := snake.NewServer(ctx, snake.Config{
+		Port:        -1,
+		ClusterName: t.Name(),
+		StoreDir:    t.TempDir(),
+	})
+	require.NoError(t, err)
+	t.Cleanup(s.Shutdown)
+
+	nb := NewNatsBus("flux")
+	require.NoError(t, nb.Connect(s.ClientURL(), ConnectOptions{Name: t.Name()}))
+	t.Cleanup(nb.Close)
+
+	kv := nb.KV()
+	require.NoError(t, kv.EnsureBucket(ctx, bucket, "file", 1, bucketTTL))
+	return kv, nb
+}
+
+// The whole point of the per-key TTL: an entry expires on its own, with no
+// Daemon running. Before this a message that asked for a 1s TTL still lived
+// for the bucket-wide TTL, so a short-lived key (a PAN) outlived its ticket.
+func TestNatsKV_PerKeyTTLExpiresWithoutDaemon(t *testing.T) {
+	ctx := context.Background()
+	// Bucket ceiling far longer than the per-key TTL, so the entry's own TTL
+	// is the only thing that can remove it in the test window.
+	kv, _ := newTestKV(t, "kv_ttl_test", 10*time.Minute)
+
+	_, err := kv.PutWithTTL(ctx, "kv_ttl_test", "short", []byte("payload"), 1*time.Second)
+	require.NoError(t, err)
+
+	// Present immediately.
+	val, _, err := kv.Get(ctx, "kv_ttl_test", "short")
+	require.NoError(t, err)
+	require.Equal(t, []byte("payload"), val)
+
+	// Gone after its own TTL, not the bucket's 10 minutes.
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		val, _, err := kv.Get(ctx, "kv_ttl_test", "short")
+		if err == nil && val == nil {
+			return // expired
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatal("the entry did not expire on its own per-key TTL; it is still held by the bucket TTL")
+}
+
+// A zero-TTL Put must keep the old behavior: it lives for the bucket TTL, not
+// for a per-key window. This is what proves the new path did not change the
+// default one for every other KV user.
+func TestNatsKV_ZeroTTLKeepsBucketTTL(t *testing.T) {
+	ctx := context.Background()
+	kv, _ := newTestKV(t, "kv_zero_ttl_test", 10*time.Minute)
+
+	_, err := kv.Put(ctx, "kv_zero_ttl_test", "long", []byte("payload"))
+	require.NoError(t, err)
+
+	// Still present well past a short window, as the bucket TTL allows.
+	time.Sleep(3 * time.Second)
+	val, _, err := kv.Get(ctx, "kv_zero_ttl_test", "long")
+	require.NoError(t, err)
+	assert.Equal(t, []byte("payload"), val, "a zero-TTL put must not gain a short per-key expiry")
+}
+
+// Re-storing an existing key must not fail: Create returns ErrKeyExists for a
+// live key and the value is updated. Coat Check re-parks the same correlation
+// key on a retry.
+func TestNatsKV_PutWithTTLUpsertsExistingKey(t *testing.T) {
+	ctx := context.Background()
+	kv, _ := newTestKV(t, "kv_upsert_test", 10*time.Minute)
+
+	_, err := kv.PutWithTTL(ctx, "kv_upsert_test", "k", []byte("first"), 30*time.Second)
+	require.NoError(t, err)
+
+	_, err = kv.PutWithTTL(ctx, "kv_upsert_test", "k", []byte("second"), 30*time.Second)
+	require.NoError(t, err, "a re-park of an existing key must update, not fail")
+
+	val, _, err := kv.Get(ctx, "kv_upsert_test", "k")
+	require.NoError(t, err)
+	assert.Equal(t, []byte("second"), val)
+}

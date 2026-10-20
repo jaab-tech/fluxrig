@@ -56,7 +56,7 @@ func TestFactory(t *testing.T) {
 	}
 }
 
-// TestManifestCoverage enforces the ADR 0045 contract: every registered gear
+// TestManifestCoverage enforces the manifest contract: every registered gear
 // has a manifest whose type matches, a category, ports, and a config schema
 // (except gears documented as taking none). Fails loudly when a new gear is
 // registered without a manifest, so the catalog cannot silently regress.

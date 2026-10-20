@@ -23,12 +23,15 @@ type rackTimeouts struct {
 	offlineStart      time.Duration
 	offlineRetry      time.Duration
 	laneSend          time.Duration
-	connect           time.Duration
-	reconnectWait     time.Duration
-	enrollTimeout     time.Duration
-	enrollInterval    time.Duration
-	heartbeat         time.Duration
-	inactiveThreshold time.Duration
+	// outboxBackpressure: zero parks a live emission behind its subject's
+	// backlog at once, without waiting; negative selects the default.
+	outboxBackpressure time.Duration
+	connect            time.Duration
+	reconnectWait      time.Duration
+	enrollTimeout      time.Duration
+	enrollInterval     time.Duration
+	heartbeat          time.Duration
+	inactiveThreshold  time.Duration
 }
 
 // The documented defaults from pkg/config's LoadRack, repeated here so a
@@ -100,6 +103,15 @@ func parseRackTimeouts(cfg *config.RackConfig) (rackTimeouts, error) {
 	}
 	if out.laneSend, err = time.ParseDuration(cfg.Rack.LaneSendTimeout); err != nil {
 		return out, fmt.Errorf("invalid rack.lane_send_timeout: %w", err)
+	}
+	// Zero is meaningful here too: park at once, as before backpressure.
+	// A negative wait is a typo, not a setting.
+	// Empty (a config built in code) selects the runtime's default.
+	out.outboxBackpressure = -1
+	if v := cfg.Rack.OutboxBackpressureTimeout; v != "" {
+		if out.outboxBackpressure, err = time.ParseDuration(v); err != nil || out.outboxBackpressure < 0 {
+			return out, fmt.Errorf("invalid rack.outbox_backpressure_timeout %q: want a duration of 0s or more", v)
+		}
 	}
 
 	// These six used to be parsed ad hoc in runSession with the parse error

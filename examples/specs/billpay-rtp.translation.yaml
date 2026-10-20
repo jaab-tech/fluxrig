@@ -1,0 +1,62 @@
+spec:
+  kind: "translation"
+  id: "billpay-rtp"
+  version: "1.0.0"
+
+  # The protocol specs that this translation connects.
+  specs:
+    card: "iso8583-v87-ascii:v3.0.0"
+    rail: "iso20022-rtp:v1.0.0"
+
+  # The participant identifier of the operator on the rail. It goes into the
+  # identifiers that this translation and the codec generate.
+  participant_id: "99000000101"
+
+  lookups:
+    # The directory of billers. The terminal sends the biller code in DE 42.
+    billers:
+      key: "card:merchant_id"
+      fields: ["name", "routing", "account"]
+      source: "billers:v1"
+
+  tables:
+    # TxSts, or TxSts/reason code, to an ISO 8583 response code (DE 39).
+    tx_status_to_resp_code:
+      "ACTC": "00"          # accepted
+      "ACWP": "00"          # accepted without posting
+      "RCVD": "09"          # received, in progress
+      "RJCT/AM02": "13"     # amount over the limit
+      "RJCT/AM04": "51"     # insufficient funds
+      "RJCT/AC03": "14"     # invalid creditor account
+      "RJCT/AC04": "14"     # closed account
+      "RJCT/AC06": "14"     # blocked account
+      default: "05"         # any other rejection: do not honour
+
+  translations:
+    payment_request:
+      from: "card:0200"
+      to: "rail:pacs.008.001.08"
+      bindings:
+        - { to: "instr_id", generate: "instr_id" }
+        - { to: "end_to_end_id", from: "rrn" }
+        - { to: "tx_id", from: "rrn" }
+        - { to: "local_instrument", value: "STANDARD" }
+        - { to: "category_purpose", value: "CONSUMER" }
+        - { to: "settlement_amount", from: "txn_amount", format: "amount", currency: "txn_currency" }
+        # The payer: the settlement account of the operator.
+        - { to: "debtor_name", value: "Example Payments Operator" }
+        - { to: "debtor_account", value: "5500001111" }
+        - { to: "debtor_agent", value: "990000001" }
+        # The payee: the biller, from the directory.
+        - { to: "creditor_name", lookup: "billers.name" }
+        - { to: "creditor_account", lookup: "billers.account" }
+        - { to: "creditor_agent", lookup: "billers.routing" }
+        - { to: "remittance_info", from: "terminal_id" }
+        # The participant of the bank of the biller, on the rail.
+        - { to: "receiver_participant", value: "99000000201" }
+
+    payment_status:
+      from: "rail:pacs.002.001.10"
+      to: "card:0210"
+      bindings:
+        - { to: "resp_code", from: ["tx_status", "status_reason"], table: "tx_status_to_resp_code" }

@@ -292,7 +292,7 @@ func sortedKeys(m map[string]bool) []string {
 var nameRegex = regexp.MustCompile(`^[a-z0-9_-]+$`)
 
 // A wire endpoint is "gear.port" or "rack.gear.port": two or three dot-free
-// segments (ADR 0043). Port names may NOT contain dots — dots are pure level
+// segments. Port names may NOT contain dots — dots are pure level
 // separators — so three-level addressing is unambiguous by segment count.
 var portRefRegex = regexp.MustCompile(`^[a-z0-9_-]+\.[a-z0-9_-]+(\.[a-z0-9_-]+)?$`)
 

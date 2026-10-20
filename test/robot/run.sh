@@ -16,12 +16,15 @@ RESULTS_DIR="${BASE_DIR}/results"
 if [ ! -d "$VENV_DIR" ]; then
     echo "[ROBOT] Creating venv..."
     python3 -m venv "$VENV_DIR"
-    "$VENV_DIR/bin/pip" install --upgrade pip
+    "$VENV_DIR/bin/python3" -m pip install --upgrade pip
 fi
 
 # 2. Sync Dependencies (Always ensure we have what's in requirements.txt)
 echo "[ROBOT] Syncing dependencies..."
-"$VENV_DIR/bin/pip" install -q -r "${BASE_DIR}/requirements.txt"
+# Always through the venv's interpreter, never its pip or robot scripts: those
+# carry the venv's absolute path in their first line, and stop working when the
+# repository moves. The interpreter finds its venv from where it sits.
+"$VENV_DIR/bin/python3" -m pip install -q -r "${BASE_DIR}/requirements.txt"
 
 # Run Robot Framework
 # We use a temp directory for global results to avoid polluting the source tree
@@ -31,6 +34,31 @@ WORK_DIR="${TEST_ROOT}/work"
 RESULTS_DIR="${TEST_ROOT}/results"
 
 mkdir -p "$WORK_DIR" "$RESULTS_DIR"
+# The process that owns this run root, so pruning below never removes a root
+# whose run is still going (several runs can share this machine).
+echo "$$" > "${TEST_ROOT}/.owner"
+# Every suite creates its workspace under this root (lib/keywords/process.py,
+# Setup Workspace): <work>/<suite directory name>, with a suffix when several
+# .robot files share a directory.
+export FLUXRIG_ROBOT_WORK_ROOT="$WORK_DIR"
+
+# Keep the newest run roots and remove the rest. FLUXRIG_ROBOT_KEEP_RUNS sets how
+# many (default 10, this run included); 0 keeps them all. A root whose owner is
+# still alive is kept whatever its age: removing it would delete a run that is
+# still writing its logs.
+KEEP_RUNS="${FLUXRIG_ROBOT_KEEP_RUNS:-10}"
+if [ "$KEEP_RUNS" -gt 0 ] 2>/dev/null; then
+    ls -1d /tmp/fluxrig/robot_run_* 2>/dev/null | sort -r | tail -n +"$((KEEP_RUNS + 1))" | while read -r old; do
+        [ "$old" = "$TEST_ROOT" ] && continue
+        # `|| true`: an older root has no owner file, and under `set -e` a failed
+        # read would end this script.
+        owner=$(cat "$old/.owner" 2>/dev/null || true)
+        if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
+            continue
+        fi
+        rm -rf "$old"
+    done
+fi
 
 # Determine Suite Directory for Symlinks
 TARGET="$1"
@@ -62,9 +90,8 @@ ln -s "$WORK_DIR" "${LINK_BASE}/work"
 echo "Running Robot Framework..."
 echo "Run Root:    $TEST_ROOT"
 echo "Results Dir: $RESULTS_DIR"
-echo "Work Dir:    $WORK_DIR"
+echo "Work Root:   $WORK_DIR (one directory per suite; each suite prints its own)"
 echo "Symlink:     ${LINK_BASE}/results -> $RESULTS_DIR"
-echo "Symlink:     ${LINK_BASE}/work -> $WORK_DIR"
 
 TARGETS="$@"
 if [ -z "$TARGETS" ]; then
@@ -119,7 +146,7 @@ if [ "${FLUXRIG_ROBOT_EXIT_ON_FAILURE}" = "true" ]; then
     EXTRA_ARGS="--exitonfailure"
 fi
 
-"$VENV_DIR/bin/robot" \
+"$VENV_DIR/bin/python3" -m robot \
     --outputdir "$RESULTS_DIR" \
     --pythonpath "${BASE_DIR}/lib" \
     --pythonpath "${BASE_DIR}/lib/keywords" \

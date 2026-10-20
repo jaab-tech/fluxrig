@@ -23,9 +23,9 @@ import (
 // those, so it would be a different fact wearing the right name.
 type SpecSummary struct {
 	Name string `json:"name" example:"iso8583-v87-ascii"`
-	Tag  string `json:"tag" example:"v2.2.0"`
+	Tag  string `json:"tag" example:"v3.0.0"`
 	Hash string `json:"hash" example:"1c8831d23bdd8458feafe6a506c5d3730605b78fd22b5d5c7f1c147043ef71af"`
-	URN  string `json:"urn" example:"iso8583-v87-ascii:v2.2.0"`
+	URN  string `json:"urn" example:"iso8583-v87-ascii:v3.0.0"`
 
 	// ImportedAt is absent for anything filed before the store kept dates.
 	ImportedAt *time.Time `json:"imported_at,omitempty" example:"2026-09-06T18:47:26Z"`
@@ -40,7 +40,7 @@ type SpecSummary struct {
 	// Latest reports whether a reference without a tag resolves here.
 	Latest bool `json:"latest" example:"true"`
 	// Doc is where this version's protocol reference is served.
-	Doc string `json:"doc" example:"/api/v1/specs/iso8583-v87-ascii/v2.2.0/doc"`
+	Doc string `json:"doc" example:"/api/v1/specs/iso8583-v87-ascii/v3.0.0/doc"`
 }
 
 // summarise turns store listings into the API's shape.

@@ -6,6 +6,7 @@ package lockfile
 import (
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLockFile(t *testing.T) {
@@ -39,4 +40,51 @@ func TestLockFile(t *testing.T) {
 		t.Fatalf("Re-acquire failed: %v", err3)
 	}
 	_ = l3.Release()
+}
+
+// AcquireWithTimeout must wait for a held lock and take it once it is free.
+// This is what lets a second index writer queue behind the first and merge,
+// instead of failing or overwriting.
+func TestAcquireWithTimeout_WaitsForRelease(t *testing.T) {
+	tmpDir := t.TempDir()
+	lockPath := filepath.Join(tmpDir, "index.lock")
+
+	held, err := Acquire(lockPath)
+	if err != nil {
+		t.Fatalf("first acquire failed: %v", err)
+	}
+
+	// Release after a short delay; the waiter must take the lock well within
+	// a generous timeout.
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		_ = held.Release()
+	}()
+
+	start := time.Now()
+	waited, err := AcquireWithTimeout(lockPath, 5*time.Second)
+	if err != nil {
+		t.Fatalf("AcquireWithTimeout failed: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed < 50*time.Millisecond {
+		t.Errorf("AcquireWithTimeout returned too fast (%s); it did not wait for the release", elapsed)
+	}
+	_ = waited.Release()
+}
+
+// A lock that is never released must time out, and the error must say so.
+func TestAcquireWithTimeout_TimesOut(t *testing.T) {
+	tmpDir := t.TempDir()
+	lockPath := filepath.Join(tmpDir, "index.lock")
+
+	held, err := Acquire(lockPath)
+	if err != nil {
+		t.Fatalf("first acquire failed: %v", err)
+	}
+	defer func() { _ = held.Release() }()
+
+	_, err = AcquireWithTimeout(lockPath, 150*time.Millisecond)
+	if err == nil {
+		t.Fatal("expected a timeout when the lock is held for the whole window")
+	}
 }

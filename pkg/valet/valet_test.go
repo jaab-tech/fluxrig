@@ -575,3 +575,75 @@ func TestConcurrentSmoke(t *testing.T) {
 		t.Fatalf("contended park counts = %v, want 1 Parked / 9 AttachedOpen", counts)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Overload shedding (MaxInFlight)
+// ---------------------------------------------------------------------------
+
+// At the bound a NEW park is refused, and only then: retransmission and replay
+// of already-accepted work still succeed, so a duplicate is never shed.
+func TestMaxInFlight_ShedsNewButNotDuplicates(t *testing.T) {
+	clk := newFakeClock()
+	e := newTestEngine(t, clk, func(c *Config) { c.MaxInFlight = 2 })
+	ctx := context.Background()
+
+	if _, _, err := e.Park(ctx, ParkRequest{Key: "k1"}); err != nil {
+		t.Fatalf("park k1: %v", err)
+	}
+	if _, _, err := e.Park(ctx, ParkRequest{Key: "k2"}); err != nil {
+		t.Fatalf("park k2: %v", err)
+	}
+
+	// At the bound: a new key is shed.
+	_, tk, err := e.Park(ctx, ParkRequest{Key: "k3"})
+	if !errors.Is(err, ErrOverloaded) {
+		t.Fatalf("third park: got %v, want ErrOverloaded", err)
+	}
+	if tk != nil {
+		t.Fatalf("a shed park must not return a ticket, got %v", tk)
+	}
+
+	// A retransmission of an open key still attaches, even at the bound. This
+	// is the ordering guarantee: the bound stops new work, not duplicates.
+	res, _, err := e.Park(ctx, ParkRequest{Key: "k1"})
+	if err != nil {
+		t.Fatalf("retransmission at the bound must attach, got %v", err)
+	}
+	if res != AttachedOpen {
+		t.Fatalf("retransmission: got %v, want AttachedOpen", res)
+	}
+}
+
+// The bound is on live tickets: redeeming one frees a slot for a new park.
+func TestMaxInFlight_RedeemFreesASlot(t *testing.T) {
+	clk := newFakeClock()
+	e := newTestEngine(t, clk, func(c *Config) { c.MaxInFlight = 1 })
+	ctx := context.Background()
+
+	if _, _, err := e.Park(ctx, ParkRequest{Key: "k1"}); err != nil {
+		t.Fatalf("park k1: %v", err)
+	}
+	if _, _, err := e.Park(ctx, ParkRequest{Key: "k2"}); !errors.Is(err, ErrOverloaded) {
+		t.Fatalf("park k2 at bound: got %v, want ErrOverloaded", err)
+	}
+
+	if _, err := e.Redeem(ctx, "k1", fluxmsg.New()); err != nil {
+		t.Fatalf("redeem k1: %v", err)
+	}
+	if _, _, err := e.Park(ctx, ParkRequest{Key: "k2"}); err != nil {
+		t.Fatalf("park k2 after redeem: %v (the bound must count live tickets)", err)
+	}
+}
+
+// Zero MaxInFlight is unbounded: the default behavior is unchanged.
+func TestMaxInFlight_ZeroIsUnbounded(t *testing.T) {
+	clk := newFakeClock()
+	e := newTestEngine(t, clk, nil) // no MaxInFlight
+	ctx := context.Background()
+
+	for i := 0; i < 100; i++ {
+		if _, _, err := e.Park(ctx, ParkRequest{Key: string(rune('a'+i%26)) + string(rune('0'+i/26))}); err != nil {
+			t.Fatalf("park %d: %v", i, err)
+		}
+	}
+}

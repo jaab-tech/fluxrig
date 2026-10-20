@@ -19,7 +19,7 @@ const maxWalkDepth = 32 // cycle/misconfiguration guard
 // to gears through their context, so sensing always matches the live wiring
 // and topology is never duplicated in gear configuration.
 // terminusOf reports how the binding walk should treat a gear type when it is
-// reached as a wire endpoint, from that gear's manifest (ADR 0045). It
+// reached as a wire endpoint, from that gear's manifest. It
 // replaces the hard-coded io-gear-type set, so a new I/O gear is classified by
 // its manifest, not by a table the runtime must remember to update.
 func computeBindings(sc *registry.Scenario, rackName string, gearDeploy map[string]string, terminusOf func(gearType string) sdk.TerminusKind) map[string]map[string]sdk.PortBinding {

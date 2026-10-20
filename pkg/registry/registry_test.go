@@ -7,27 +7,23 @@ import (
 	"context"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/jaab-tech/fluxrig/pkg/registry"
-	"github.com/jaab-tech/fluxrig/pkg/store/duckdb"
+	"github.com/jaab-tech/fluxrig/pkg/registry/kvstore"
 )
 
+// setupTestRegistry returns the Mixer's registry over in-memory buckets.
+// These tests are the registry.Registry contract, whatever backs it.
 func setupTestRegistry(t *testing.T) (registry.Registry, func()) {
-	store, err := duckdb.NewStore(slog.Default(), "")
-	if err != nil {
-		t.Fatalf("Failed to create store: %v", err)
-	}
-
-	if err := store.Migrate(context.Background()); err != nil {
-		_ = store.Close()
-		t.Fatalf("Migrate failed: %v", err)
-	}
-
+	t.Helper()
+	store := kvstore.New(slog.Default(), kvstore.NewMemoryBucket(0), kvstore.NewMemoryBucket(time.Minute), nil, uuid.New(),
+		kvstore.Config{MaxValueSize: 1 << 20, WriteRetries: 3})
 	store.SetAutoAdopt(true)
 	store.SetBootstrapSecret("rack")
-	return store, func() { _ = store.Close() }
+	return store, func() {}
 }
 
 func TestRegistry_Register_Static(t *testing.T) {

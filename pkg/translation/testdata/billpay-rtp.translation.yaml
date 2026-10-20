@@ -1,0 +1,48 @@
+spec:
+  kind: "translation"
+  id: "billpay-rtp"
+  version: "1.0.0"
+  specs:
+    card: "../../examples/specs/iso8583-v87-ascii.yaml"
+    rail: "../../examples/specs/iso20022-rtp.yaml"
+  participant_id: "99000000101"
+  lookups:
+    billers:
+      key: "card:merchant_id"
+      fields: ["name", "routing", "account"]
+      source: "testdata/lookups/billers.yaml"
+  tables:
+    tx_status_to_resp_code:
+      "ACTC": "00"
+      "ACWP": "00"
+      "RCVD": "09"
+      "RJCT/AM02": "13"
+      "RJCT/AM04": "51"
+      "RJCT/AC03": "14"
+      "RJCT/AC04": "14"
+      "RJCT/AC06": "14"
+      default: "05"
+  translations:
+    payment_request:
+      from: "card:0200"
+      to: "rail:pacs.008.001.08"
+      bindings:
+        - { to: "instr_id", generate: "instr_id" }
+        - { to: "end_to_end_id", from: "rrn" }
+        - { to: "tx_id", from: "rrn" }
+        - { to: "local_instrument", value: "STANDARD" }
+        - { to: "category_purpose", value: "CONSUMER" }
+        - { to: "settlement_amount", from: "txn_amount", format: "amount", currency: "txn_currency" }
+        - { to: "debtor_name", value: "Example Payments Operator" }
+        - { to: "debtor_account", value: "5500001111" }
+        - { to: "debtor_agent", value: "990000001" }
+        - { to: "creditor_name", lookup: "billers.name" }
+        - { to: "creditor_account", lookup: "billers.account" }
+        - { to: "creditor_agent", lookup: "billers.routing" }
+        - { to: "remittance_info", from: "terminal_id" }
+        - { to: "receiver_participant", value: "99000000201" }
+    payment_status:
+      from: "rail:pacs.002.001.10"
+      to: "card:0210"
+      bindings:
+        - { to: "resp_code", from: ["tx_status", "status_reason"], table: "tx_status_to_resp_code" }

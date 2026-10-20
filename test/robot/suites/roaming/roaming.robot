@@ -98,7 +98,7 @@ An Operator Slower Than The Time Budget Does Not Hold Up The Payment
     Outcome Seen By Authorizer Should Be    ${reply}    RS12
 
 An Operator Error Is Named As One
-    ${reply}=    Authorize    ${CARD_OPERATOR_DOWN}    UY    000107
+    ${reply}=    Authorize    ${CARD_OPERATOR_DOWN}    UY    000112
     Outcome Seen By Authorizer Should Be    ${reply}    RS11
 
 A Card Absent From The Enrolment Snapshot Still Authorizes
@@ -112,11 +112,29 @@ Every Authorization Is Approved Regardless Of The Signal
     ...                field; acting on it is the institution's decision, and a
     ...                suite that let the enrichment decline would be testing a
     ...                policy this scenario does not hold.
-    FOR    ${card}    IN    ${CARD_IN_UY}    ${CARD_IN_BR}    ${CARD_OPERATOR_DOWN}
-        ${reply}=    Authorize    ${card}    UY    000109
+    FOR    ${card}    ${stan}    IN
+    ...    ${CARD_IN_UY}    000113
+    ...    ${CARD_IN_BR}    000114
+    ...    ${CARD_OPERATOR_DOWN}    000115
+        ${reply}=    Authorize    ${card}    UY    ${stan}
         ${ascii}=    Reply As Ascii    ${reply}
         Should Contain    ${ascii}    00    msg=DE 39 must approve
     END
+
+A Trace Number Reused On One Terminal Reaches The Request That Sent It
+    [Documentation]    Every other case here sends its own trace number, so a
+    ...                failure there points at what it tests. This one reuses a
+    ...                trace number on purpose: the same terminal, twice in a row,
+    ...                while the first entry is still alive. The correlation entry
+    ...                carries the connection the reply goes back to, so the
+    ...                second request must replace it before its reply returns.
+    ...                If the store is written after the request moves on, a fast
+    ...                reply finds the first entry and goes to the first
+    ...                request's closed connection, and this case times out.
+    ${first}=    Authorize    ${CARD_IN_BR}    UY    000116
+    Outcome Seen By Authorizer Should Be    ${first}    RS01
+    ${second}=    Authorize    ${CARD_IN_UY}    UY    000116
+    Outcome Seen By Authorizer Should Be    ${second}    RS00
 
 The Reply To The Scheme Carries No Private Field
     [Documentation]    The reply is relayed to the scheme exactly as the

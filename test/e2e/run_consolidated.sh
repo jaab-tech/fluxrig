@@ -98,6 +98,7 @@ SEGMENTS=(
     "20_security_regression:$BASE_DIR/20_security_regression/run.sh"
     "19_card_data_iso:$BASE_DIR/19_card_data_iso/run.sh"
     "io_tcp:$BASE_DIR/segments/io_tcp/run.sh"
+    "retention:$BASE_DIR/segments/retention/run.sh"
 )
 
 # 12_wasm_polyglot is NOT in SEGMENTS above and never shares a batch with

@@ -119,7 +119,7 @@ func caAndClientCert(t *testing.T) (caCertPath, serverCertPath, serverKeyPath, c
 	return caCertPath, serverCertPath, serverKeyPath, clientCertPath, clientKeyPath, pool
 }
 
-// Resolved (ADR 0054, question 6): configuring TLS makes it required.
+// Resolved: configuring TLS makes it required.
 // AllowNonTLS defaults to false, so a plain connection is refused once a
 // certificate is given, the way the Mixer gives it one. TLS with no client
 // certificate is still accepted: TLSVerify is a separate, still-off-by-default

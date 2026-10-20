@@ -66,7 +66,7 @@
 spec:
   id: "iso8583-v87-ascii"
   name: "ISO 8583:1987 (ASCII)"
-  version: "2.2.0"
+  version: "3.0.0"
   encoding: "ascii"
   overview: |-
     An ISO 8583 message is a message type indicator, a bitmap, and the data
@@ -121,6 +121,11 @@ spec:
         # all but a few fields. Declaring it here keeps encoding a spec decision
         # rather than something each gear remembers.
       0: {padding: {type: Left, pad: "0"}}
+        # The primary bitmap is 8 bytes (16 hex characters), and bit 1 says a
+        # secondary bitmap follows. The base declares one 16-byte bitmap, which
+        # packs 128 bits on every message and never sets bit 1, so a peer that
+        # follows the standard reads the secondary half as data.
+      1: {length: 8}
       7: {padding: {type: Left, pad: "0"}}
       8: {padding: {type: Left, pad: "0"}}
       9: {padding: {type: Left, pad: "0"}}

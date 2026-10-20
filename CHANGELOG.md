@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 | Version | Date | Status | Summary |
 | :--- | :--- | :--- | :--- |
+| [v0.13.0](#v0130) | 2026-10-20 | Delivered | ISO 20022 support: an ISO 8583 network bridges to the RTP rail, specs and lookup data upload to the Mixer, the registry lives on the bus, and a Rack parks messages while the bus is down |
+| [v0.12.0](#v0120) | 2026-09-28 | Delivered | The Mixer's API and a Rack's enrollment and heartbeat now require authentication, a Rack pins the Mixer's signing key, and guaranteed-lane messages ack only once handled |
 | [v0.11.0](#v0110) | 2026-09-24 | Delivered | The message store is encrypted at rest, wires choose a lane (hot or guaranteed), and the first licensed enterprise gears ship alongside the core release |
 | [v0.10.0](#v0100) | 2026-09-07 | Delivered | The semantic layer stops being documentation: a spec's rules are enforced on traffic |
 | [v0.9.0](#v090) | 2026-09-03 | Delivered | Enrichment from outside the message, and correlation keys that survive a bus hop |
@@ -25,6 +27,292 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 | [v0.7.1](#v071) | 2026-08-10 | Delivered | ISO 8583 TLV length hardening |
 | [v0.7.0](#v070) | 2026-08-01 | Delivered | Payment switch: Conductor gear, gear manifests, ISO 8583 TLS |
 
+
+## [v0.13.0] - 2026-10-20 {#v0130}
+
+**Before upgrading,** follow [Upgrading fluxrig: from v0.12 to v0.13](https://fluxrig.org/docs/reference/operations/upgrading#v012-to-v013). It gives the steps in order. The BREAKING entries below explain each change.
+
+### Added
+
+- **ISO 20022 support: the `codec_iso20022` and `translate` gears.** A
+  scenario can now bridge an ISO 8583 terminal network to the RTP network of
+  The Clearing House. `codec_iso20022` converts `pacs.008.001.08` and
+  `pacs.002.001.10` to structured fields and back, driven by an ISO 20022
+  protocol spec. `translate` maps the fields of one spec to another, as a
+  translation spec says. See the
+  [ISO 20022 codec](https://fluxrig.org/docs/reference/gears/codec-iso20022),
+  the [translate gear](https://fluxrig.org/docs/reference/gears/translate) and
+  the [bridge tutorial](https://fluxrig.org/docs/tutorials/iso8583_iso20022_bridge),
+  which `make test-robot-billpay` runs.
+- **Upload a spec or lookup data to the Mixer.** `POST /api/v1/specs`, and
+  `fluxrig spec import --api`, file an artefact in the Mixer's spec store.
+  The Mixer checks it with the loader of its kind (ISO 8583, ISO 20022,
+  translation, or data) and refuses one that a Rack cannot load. A
+  translation spec must name artefacts that the store already holds. The
+  body is bounded by `mixer.max_payload_size`. A `name:tag` that already
+  names other content gets `409`.
+- **A scenario carries what its translation specs name.** The Mixer sends a
+  Rack the specs that its gears name and, for a translation spec, its
+  protocol specs and its lookup records too. A Rack then runs a translation
+  with none of its files.
+- **`fluxrig scenario import --api --activate`** activates the scenario after
+  the import. The API supported it, but the command could not ask for it.
+- **`fluxrig gears doc --write --skip-types`.** Names the gear types another
+  binary documents (the enterprise gears, refreshed by `fluxrig-ent`). Their
+  reference blocks are left as they are and listed, instead of failing the
+  run. `make gear-docs` skips `sim_source` and `sim_responder`.
+- **`iso8583-tool` sends a bill payment.** New auth flags: `-auth-proc-code`,
+  `-auth-amount`, `-auth-currency`, `-auth-merchant-id` and `-auth-rrn`
+  (`auto` derives the RRN from the date and the STAN). `-auth-report` is
+  also written for a single transaction.
+- **Conductor overload shedding (`valet.max_in_flight`).** The number of open
+  tickets a Conductor holds is now bounded. A stuck destination used to
+  accumulate tickets in RAM until each timed out; past the bound a new request
+  is shed on the error port with `error.reason=overloaded` instead. The default
+  is `0` (unbounded), so existing scenarios are unchanged. A retransmission of
+  an already-open key and a replay of a retained outcome are never shed: the
+  bound stops new work, not duplicates of work already accepted.
+- **Offline store-and-forward.** A gear emission to a bus-bound subject
+  while the bus is down is now parked in a bounded in-memory outbox instead
+  of failing the message. When the bus returns, the outbox drains.
+  `rack.outbox_max_messages` (10000) caps it; when full the oldest entry is
+  dropped and counted, and the emitting gear is never blocked.
+  `rack.outbox_order` sets the drain order. With `subject` (the default), a
+  message never reaches the bus ahead of an older one on the same subject: a
+  reversal parked after its authorization arrives after it, and a live
+  emission on a subject that still has parked messages queues behind them.
+  While the bus is up and the outbox drains, such an emission first waits
+  up to `rack.outbox_backpressure_timeout` (1s) for that backlog to clear
+  and then goes straight to the bus, so the emitting gear slows to the
+  drain's pace instead of filling the outbox until the cap drops messages.
+  With the bus down nothing waits. `0s` turns the wait off.
+  With `none`, the drain forwards whatever the bus takes, as it takes it.
+  A message is dropped only when the bus marks it as one it can never
+  accept (it fails validation, cannot be encoded, or exceeds the payload
+  limit). Any other refusal keeps it parked, so a dead bus never eats the
+  queue, however many rejoins fail. `rack.outbox_drain_retries` (3) is how
+  many more times the drain tries a refused message before it moves on. A
+  drain starts on rejoin and on the first emission the bus accepts, so a
+  reconnect inside the bus connection also empties the outbox.
+  Metrics: `flux.outbox.parked/drained/dropped`
+  and `flux.outbox.depth`. Memory only: a restart with a non-empty outbox
+  loses it, and the reference says so.
+- **`fluxrig-mixer --repair`.** A corrupt stream no longer leaves the
+  operator with only "move the directory away". With the Mixer stopped, the
+  mode starts the embedded server without provisioning, diagnoses each
+  managed stream (healthy, drifted, absent, unreadable), and reports. Drift
+  is fixed by updating the stream config and an absent stream is created;
+  both lose nothing. An unreadable stream blocks with exit 1 and names
+  `--force`, which recreates it and reports exactly what was discarded.
+  Boot failures name the mode as the next step. There is still no automatic
+  repair at boot, on purpose.
+- **Telemetry retention sweep.** The Mixer now starts the retention janitor
+  at boot. It deletes Parquet telemetry files older than
+  `observability.embedded.retention_days` (30 days by default), once at
+  startup and then every `observability.embedded.rotation.check_interval`
+  (1 hour by default). Before this, nothing removed old telemetry and the
+  Parquet tree grew without bound. The sweep deletes `.parquet` files only:
+  rows in the DuckDB `telemetry_*` tables are not removed.
+- `observability.embedded.rotation.check_interval` and
+  `observability.embedded.rotation.max_age_days` are now read. `max_age_days`
+  is the fallback when `retention_days` is not positive.
+- `snake.cluster_name` and `snake.store_dir` are now read. Both were already
+  fields of the embedded server's own configuration but had no key on the
+  config struct, so setting them had no effect. `store_dir` empty keeps the
+  default, a `snake` directory under `store.dir`.
+- **Dead letter queue.** A message no consumer can process is now kept
+  instead of dropped. The Mixer provisions a `flux-dlq` stream, and the bus
+  republishes the message there when its payload does not decode, fails
+  validation, or the handler fails on every redelivery. The original bytes
+  are stored unchanged with the failure context in headers, so an operator
+  can find the message, fix the cause, and replay it. Keys:
+  `snake.dlq_enabled` (default true), `snake.dlq_subject` (default
+  `flux.dlq`), `snake.dlq_max_age` (default 720h).
+
+### Changed
+
+- **BREAKING: the reference ISO 8583 spec packs a standard bitmap.**
+  `examples/specs/iso8583-v87-ascii.yaml` packed one 128-bit bitmap on
+  every message and never set bit 1. A peer that follows ISO 8583 reads 16
+  hex characters of primary bitmap, so it read the second half as data,
+  and its own messages did not unpack. The spec now declares an 8-byte
+  primary bitmap: 16 hex characters, and a secondary bitmap only when a
+  field above 64 is present, announced by bit 1. A peer that was built
+  against the old layout must change with it. The spec's version is now
+  `3.0.0`, because the store keeps every version unchanged: a Mixer that
+  already holds `iso8583-v87-ascii:v2.2.0` keeps serving the old layout
+  under that name. Upload `examples/specs/iso8583-v87-ascii.yaml` and change
+  each `iso8583-v87-ascii:v2.2.0` reference to `iso8583-v87-ascii:v3.0.0`.
+  Reported by [Galih Lasahido](https://github.com/galihlasahido).
+- **BREAKING: the Mixer refuses to start without its API.** With no
+  `api.auth_token`, or an API port that is in use, the Mixer used to report
+  ready, enroll Racks and deploy its startup scenario with no management API.
+  Nobody could manage it or upload to it. It now exits with code 1 before it
+  reports ready, and an API that stops later stops the Mixer. Set
+  `api.auth_token`, or `api.auth_disabled_dangerously = true` for a test.
+- **`on_error: reject` emits on an `error` port.** `codec_iso8583`,
+  `codec_iso20022` and `translate` send a rejected message out of their
+  `error` port, with `error.reason`, `error.gear` and `error.message`, so a
+  scenario can answer the sender. Before, `codec_iso8583` returned the error
+  to the runtime, which logged it and dropped the message. An unwired
+  `error` port still drops it. On the guaranteed lane a rejected message is
+  now acknowledged, not redelivered to the dead letter queue.
+- **BREAKING: the registry lives on the bus.** Rack records, the name index,
+  scenario files and the active-scenario pointer now live in a JetStream
+  key-value bucket (`registry.bucket`, default `fluxrig_registry`), not in
+  the Mixer's DuckDB file or under `store.dir/scenarios`. Every write is
+  checked against the revision it read, so two Hellos that claim one name
+  can no longer both succeed. Nothing is migrated:
+  - Every Rack enrolls again on its own: the empty registry denies its old
+    identity, and the Rack drops it and enrolls with the bootstrap secret.
+    It comes back with a new MachineID and waits in `pending` unless
+    `enrollment.auto_adopt` is on. Approve each Rack again.
+  - Import each scenario again, then activate it.
+  - Upgrade every Rack before the Mixer. The Mixer stores only a hash of a
+    Rack's secret, so only the first passport carries the secret. A Rack
+    keeps it in a file beside its passport (`base.state_file` with a
+    `.secret` suffix). A Rack of this version works under an earlier Mixer.
+    A Rack of an earlier version under this Mixer reads the next passport's
+    empty secret as its own and stops authenticating.
+  - The upgrade deletes the old Rack, Mixer and Snake rows from DuckDB,
+    plaintext secrets included.
+- **Every pull request needs an issue, and community pull requests target
+  `dev`.** `CONTRIBUTING.md` states the rule, a pull request template asks
+  for `Closes #<issue>`, and a check fails a community pull request that
+  references no issue or that does not target `dev`.
+- **Robot runs keep their workspaces under the run root they print.** Each
+  suite works in `<run root>/work/<suite directory>`, and `run.sh` keeps the
+  newest 10 run roots under `/tmp/fluxrig` (`FLUXRIG_ROBOT_KEEP_RUNS`, `0`
+  keeps all). A run root that a run still uses is never removed.
+- **A restarted Mixer restores its active scenario.** It reads the
+  scenario from the registry at startup, as it was registered and sent, and
+  reports it. It pushes nothing on its own. A Rack that enrolls or rejoins
+  receives the scenario byte for byte as before, so a Rack that already runs
+  it keeps its gears. `--scenario` still overrides. The restore never waits
+  for a Rack: startup is not held up by one that is gone.
+- **Presence is separate from status.** A heartbeat now records presence in
+  a second bucket (`registry.liveness_bucket`) whose entries expire after
+  `registry.liveness_ttl` (90s, three heartbeat intervals). The API reports
+  `online` for each Rack. A Rack that stops sending heartbeats shows as not
+  online; its status (`pending`, `active`, `inactive`) does not change.
+- **New `[registry]` section.** `bucket`, `liveness_bucket`, `replicas` (1),
+  `max_value_size` (1 MiB, headers included; bounds a
+  scenario file), `liveness_ttl` (90s) and `write_retries` (3).
+- **The registry repairs what a crash between two writes leaves behind.**
+  At startup and every `registry.sweep_interval` (10m), the Mixer deletes a
+  Rack record that never finished registering (no name points at it, so its
+  secret never reached a Rack), completes or rolls back a rename that
+  stopped halfway, and deletes a name key whose entity is gone. A record
+  younger than `registry.orphan_min_age` (5m) is left alone: it may still be
+  in progress. A failure to mint an ID is now an error. It no longer
+  produces a record with the nil ID.
+
+- **A configuration with a stray or misspelled key now refuses to start.**
+  The load reports the key instead of ignoring it. A key that mapped to no
+  setting used to be dropped silently, so the process ran with a default the
+  operator meant to override and nothing said so. The Rack's `rack.bus.*`
+  and legacy `bus.*` aliases, `store.state_file`, `store.scenario_file` and
+  the Mixer's `mixer.mixer_name` are read by the loader and stay accepted.
+  Config files in this repository were corrected where they carried keys no
+  setting reads.
+- **A duration that does not parse now refuses to start, and names the
+  field.** Durations were parsed where they were used, often with the error
+  ignored, so a typo such as `operation_timeout = "5 seconds"` became zero:
+  the timer it bounds fired immediately, or panicked a ticker.
+- **`idgen.RandomSuffix` returns an error again instead of a placeholder.**
+  It returned the constant `"0000"` when the entropy source failed, so a
+  caller received a plausible, wrong suffix with no signal. The signature is
+  now `RandomSuffix(n int) (string, error)`. It has no caller in this
+  repository; the change affects an external user of the exported symbol.
+
+### Fixed
+
+- **The roaming example writes its correlation entry before the
+  authorization moves on.** `examples/scenarios/roaming_enrichment.yaml`
+  forwarded each authorization before its correlation entry was written
+  (`await_store: false`), but that entry carries the connection the reply
+  must go back to. An authorizer that answered in a few milliseconds beat
+  the write: the reply found no entry and was lost, or, when a trace number
+  repeated on the same terminal within the entry's TTL, found the older
+  entry and was written to the other request's connection. The store now
+  completes before the request moves on (`await_store: true`), so a write
+  that fails now fails the authorization. The correlation key must still be
+  unique among the requests in flight: two at once with the same key share
+  one entry. Copy this change into a scenario derived from the example.
+- **`coatcheck` bounds the awaited store write.** `store_timeout` (default
+  `5s`) now limits every store write. Before, it applied only to the detached
+  write (`await_store: false`), and the awaited write could wait without a
+  bound.
+- **`codec_iso8583` decodes a fixed-length field at its declared width.**
+  The library strips a field's padding when it unpacks, so DE 11 `000042`
+  decoded as `42`, an all-zero DE 3 as `0`, and the MTI in `Data` as `200`.
+  The wire re-encoded correctly, but `Data` and every alias carried the
+  trimmed value, so a rule or a translation that compared the fixed-width
+  value saw a different string. A fixed-length text field (String or
+  Numeric) with a padder now decodes at the width the wire carried. A
+  variable-length field, and a Binary or Hex field, is unchanged. Reported by [Galih Lasahido](https://github.com/galihlasahido).
+- **A scenario with global gears reaches the Racks that are already
+  enrolled.** Activation pushed a scenario only to the Racks it names, in
+  `racks:` or in a gear's `deploy:`. A gear with no `deploy` target reached
+  a Rack only if that Rack enrolled after the activation, so activating such
+  a scenario on a running fleet reached no Rack. Activation now pushes it to
+  every active Rack. The push that follows an enrollment skips a Rack that
+  the activation has already reached, so its gears do not restart twice.
+- **A Rack with a new `state_dir` can enroll.** The Rack pinned the Mixer key
+  before its state directory existed, so its first enrollment failed with
+  "pin mixer key: no such file or directory" and the Rack stopped.
+- **The Conductor routes to an `io_tcp` client.** A Conductor port is
+  available only after the I/O gear at its end reports `conn.up`, and only
+  `io_iso8583` reported it. A route that ended at an `io_tcp` client failed
+  every request with `no_destination`. The `io_tcp` client now publishes its
+  link state.
+- **A spec imported while the Mixer runs is sent with the next scenario.**
+  The Mixer opened its spec store twice, and each instance kept its own
+  index, so the scenario controller did not see what the API stored until a
+  restart.
+- **`iso8583-tool` packs the reference v87 spec.** DE 3 of that spec has no
+  encoding of its own, and the tool packed it with the spec as compiled, so
+  every auth request that carried DE 3 panicked. The tool now makes the
+  spec nil-safe as the codec does (`sdl.MakeNilSafe`). It also reads a fixed
+  field with its padding, so an MTI reads `0210`, not `210`, and compares
+  with `-auth-expect-mti`.
+- **The Mixer's Hello throttle no longer grows without bound.** It kept one
+  entry for every Rack name and machine ID it had ever seen. A Hello carries
+  its name unverified, so a stream of distinct names grew the Mixer's memory
+  for as long as it ran. Expired entries are now removed at most once per
+  throttle window.
+
+- **The raw bus subscription path now records receive metrics, and the bus
+  byte counters are no longer empty.** `SubscribeRaw` (used by the Coat Check
+  daemon) delegated with no instrumentation, so its consumed messages were
+  invisible to `flux.nats.messages_received`. `flux.nats.bytes_received` and
+  `flux.nats.bytes_published` were declared and never incremented; both are
+  now recorded where the payload size is in hand (the raw paths), so the byte
+  series reports real values instead of reading as a system that is not
+  reporting.
+- **A fully qualified `urn:flux:<kind>:<name>:<tag>` reference now resolves.**
+  `Load` split a reference at its last colon by hand, so a
+  `urn:flux:spec:visa:latest` reference read the name as `urn:flux:spec:visa`
+  and looked up the wrong artifact. A single parser now owns both the short
+  `name:tag` form (unchanged) and the reserved scheme, and rejects the
+  malformed cases instead of resolving them wrongly.
+- **A Coat Check entry now carries its own TTL, so it expires without the
+  daemon.** The bucket was created with `max_ttl` as its bucket-wide TTL, so
+  every key lived that long whatever the message asked for: a key whose
+  `meta.coatcheck.ttl` was 30 seconds still sat for `max_ttl` (5 minutes), and
+  a slow or crashed daemon extended that to `max_ttl` past the crash. The
+  store now writes each entry with the TTL its message resolved to (the
+  override, else `default_ttl`, capped at `max_ttl`), and the bucket opts
+  into per-message TTL. The daemon still emits the timeout event; the storage
+  expiry no longer depends on it being alive. An existing bucket keeps the
+  entries already in it; the change applies to new writes.
+- **Concurrent spec imports no longer lose a version.** A CLI and a Mixer
+  share one `index.json`, and both did read-modify-write on it, so the second
+  writer overwrote the first writer's entry with its stale in-memory copy. The
+  artifact's bytes stayed in the store but became unreachable by name. An
+  import now takes a cross-process lock on `index.lock`, re-reads the file,
+  merges its entry into what is on disk, and replaces the file atomically, so a
+  reader never sees a torn index either.
 
 ## [v0.12.0] - 2026-09-28 {#v0120}
 
@@ -687,7 +975,8 @@ The payment-switch release: the **Conductor** transaction switch, a manifest sys
 - **Snake Protocol**: Secure tunneling implementation for Rack-to-Mixer connectivity.
 - **FluxMsg**: Canonical JSON schema for inter-gear communication.
 
-[Unreleased]: https://github.com/jaab-tech/fluxrig/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/jaab-tech/fluxrig/compare/v0.13.0...HEAD
+[v0.13.0]: https://github.com/jaab-tech/fluxrig/releases/tag/v0.13.0
 [v0.12.0]: https://github.com/jaab-tech/fluxrig/releases/tag/v0.12.0
 [v0.7.0]: https://github.com/jaab-tech/fluxrig/releases/tag/v0.7.0
 [v0.6.1]: https://github.com/jaab-tech/fluxrig/releases/tag/v0.6.1

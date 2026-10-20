@@ -119,6 +119,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/gears", s.handleGears)
 	mux.HandleFunc("GET /api/v1/gears/{type}", s.handleGearManifest)
 	mux.HandleFunc("GET /api/v1/specs", s.handleSpecs)
+	mux.HandleFunc("POST /api/v1/specs", s.handleSpecUpload)
 	mux.HandleFunc("GET /api/v1/specs/{name}", s.handleSpecHistory)
 	mux.HandleFunc("GET /api/v1/specs/{name}/{tag}", s.handleSpecSource)
 	mux.HandleFunc("GET /api/v1/specs/{name}/{tag}/doc", s.handleSpecDoc)
@@ -168,21 +169,29 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 // operator who forgets to set a token gets a refusal to start, not a silently
 // open management API.
 func (s *Server) Start(addr string) error {
+	l, err := s.Listen(addr)
+	if err != nil {
+		return err
+	}
+	return s.Serve(l)
+}
+
+// Listen checks the API configuration and binds addr. It is separate from
+// Serve so that the Mixer can refuse to start, rather than run without its
+// API, when the token is missing or the port cannot be bound.
+func (s *Server) Listen(addr string) (net.Listener, error) {
 	if s.cfg == nil {
-		return fmt.Errorf("mixer API: no config; refusing to start")
+		return nil, fmt.Errorf("mixer API: no config; refusing to start")
 	}
 	if s.cfg.API.AuthToken == "" {
 		if !s.cfg.API.AuthDisabledDangerously {
-			return fmt.Errorf("mixer API: api.auth_token is not set; set it, or set " +
+			return nil, fmt.Errorf("mixer API: api.auth_token is not set; set it, or set " +
 				"api.auth_disabled_dangerously = true to run with no auth (not recommended)")
 		}
 		slog.Warn("Mixer management API starting with authentication disabled",
 			"setting", "api.auth_disabled_dangerously")
 	}
 
-	handler := s.Handler()
-
-	// Log using global/standard logger which is slog at this point
 	slog.Info("Mixer Control Plane listening", "addr", addr)
 
 	lc := net.ListenConfig{
@@ -213,13 +222,17 @@ func (s *Server) Start(addr string) error {
 	}
 
 	if err != nil {
-		return fmt.Errorf("mixer API bind failed after %d attempts: %w", maxAttempts, err)
+		return nil, fmt.Errorf("mixer API bind failed after %d attempts: %w", maxAttempts, err)
 	}
+	return l, nil
+}
 
+// Serve answers API requests on l until the listener closes.
+func (s *Server) Serve(l net.Listener) error {
 	readTimeout, _ := time.ParseDuration(s.cfg.API.ReadHeaderTimeout)
 	server := &http.Server{
-		Addr:              addr,
-		Handler:           handler,
+		Addr:              l.Addr().String(),
+		Handler:           s.Handler(),
 		ReadHeaderTimeout: readTimeout,
 	}
 
@@ -282,7 +295,15 @@ func (s *Server) handleRacks(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(list)
+		// Marshal before writing: an encode failure after the header is sent
+		// answers 200 with an empty body, which reads as "no Racks".
+		body, err := json.Marshal(list)
+		if err != nil {
+			http.Error(w, "encode rack list: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(append(body, '\n'))
 		return
 	}
 	// POST: Manual Registration (if needed)

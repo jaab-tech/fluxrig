@@ -10,29 +10,36 @@ proof the tutorial's claims are true rather than plausible.
 
 ## `roaming.robot` (Functional)
 
-Eleven tests over one topology. Four cover the comparison itself: a handset in
-the merchant's country, a handset elsewhere, a country code that covers several
-countries, and an empty country list, which is its own outcome and not a
+Fourteen tests over one topology. Four cover the comparison itself: a handset
+in the merchant's country, a handset elsewhere, a country code that covers
+several countries, and an empty country list, which is its own outcome and not a
 mismatch. Four cover the ways the signal can be missing: a reply without country
 fields, an operator slower than the time budget, an operator error, and a card
 absent from the enrolment snapshot.
 
-The last three are the ones worth reading, because they assert what must **not**
-happen. Every authorization is approved regardless of the signal, so enrichment
-never becomes a decline. The reply to the scheme carries no private field. And
-the phone number reaches neither the wire nor the logs.
+Three cover the correlation key: a trace number reused on one terminal reaches
+the request that sent it, a reversal reusing its authorization's trace number
+does not collide with it, and an expired correlation entry loses the reply
+loudly. Every other test sends its own trace number, so a failure there points
+at what it tests.
+
+The last three assert what must **not** happen. Every authorization is approved
+regardless of the signal, so enrichment never becomes a decline. The reply to
+the scheme carries no private field. And the phone number reaches neither the
+wire nor the logs.
 
 ## `stress_load.robot` (Load / Correlation)
 
-Three load cases over the **exact enrichment path shipped in the public example**
-(`examples/scenarios/roaming_enrichment.yaml` with `await_store: false`, which
-spawns one unbounded goroutine per message):
+Four load cases over the **exact enrichment path shipped in the public example**
+(`examples/scenarios/roaming_enrichment.yaml`, whose correlation store is
+written before the request moves on, `await_store: true`):
 
 | Test | Shape | What it proves |
 |:---|:---|:---|
-| Sustained Load - Match Outcome | 2 conn, 10 TPS, 10s, one PAN | The match path stays correlated at a steady rate |
-| Concurrent Multi-Outcome | 7 terminals x 30 conn x 60 txns | Correlation holds while every telco outcome runs at once |
-| High Concurrency | 7 terminals x 60 conn x 60 txns | Peak goroutine pressure on Coat Check with the write detached |
+| Sustained Load - Match Outcome | 4 conn, 200 TPS, 15s, one PAN | The match path stays correlated at a steady rate |
+| Concurrent Multi-Outcome | 7 terminals x 4 conn x 250 txns at 60 TPS | Correlation holds while every telco outcome runs at once |
+| High Concurrency | 7 terminals x 6 conn x 300 txns at 120 TPS | Correlation holds at peak load on the Coat Check store |
+| Reversals Share Trace Numbers | 0200 and 0400 fleets, 4 conn x 200 txns at 60 TPS, one trace range | The message class keeps a reversal from colliding with its authorization |
 
 The correlation key is `(mti_class, DE 41, DE 11)`, so each terminal in a fleet
 gets its own STAN block: sharing one would make the keys collide and route a

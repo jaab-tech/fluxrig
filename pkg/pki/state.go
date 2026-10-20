@@ -207,9 +207,15 @@ func LoadPinnedMixerKey(statePath string) (ed25519.PublicKey, error) {
 	return ed25519.PublicKey(data), nil
 }
 
-// PinMixerKey persists pub as the trust anchor for statePath.
+// PinMixerKey persists pub as the trust anchor for statePath. The first
+// passport of a Rack is verified, and so pinned, before anything else creates
+// the state directory, so the pin creates it.
 func PinMixerKey(statePath string, pub ed25519.PublicKey) error {
-	return os.WriteFile(PinnedKeyPath(statePath), pub, 0600)
+	path := PinnedKeyPath(statePath)
+	if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
+		return err
+	}
+	return os.WriteFile(path, pub, 0600)
 }
 
 // VerifyMixer checks the envelope's signature using a provided Cluster Public Key.

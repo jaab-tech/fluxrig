@@ -287,9 +287,9 @@ gears:
       # leading digits they share, and the codec exposes it for this purpose.
       #
       # numeric, because both fields are fixed-width and the two sides of this
-      # exchange are decoded against different specs. Without it a value padded
-      # on one side and trimmed on the other yields two different keys and the
-      # match is silently lost. `trim`, the default, is the safer choice where
+      # exchange are decoded against different specs. Without it the same value
+      # at two different widths (000123 and 123) yields two different keys, and
+      # the match is silently lost. `trim`, the default, is the safer choice where
       # padding may be significant.
       key_fields: ["meta.iso8583.mti_class", "data.iso8583.field.41", "data.iso8583.field.11"]
       key_normalize: "numeric"
@@ -298,12 +298,12 @@ gears:
       # and knows nothing about the scheme's socket, so without carrying that
       # identifier across, the switch has an answer and nowhere to write it.
       value_fields: ["meta.received_at", "meta.conn.id"]
-      # The message does not wait for this write. The entry exists only to
-      # measure the authorizer, so losing one loses a measurement; blocking the
-      # authorization on a control-plane write, or failing it when that write
-      # fails, would trade a payment for a metric.
-      await_store: false
-      store_timeout: "1s"
+      # The message waits for this write. The entry carries the connection the
+      # reply must go back to, so the reply depends on it. An authorizer can
+      # answer in a few milliseconds, faster than a detached write lands; the
+      # reply then finds no entry and is lost, or, when a trace number repeats
+      # within the TTL, an older entry, and is written to someone else's socket.
+      await_store: true
 
   # ── Authorizer side ───────────────────────────────────────────────────────
   - name: "encode-issuer"

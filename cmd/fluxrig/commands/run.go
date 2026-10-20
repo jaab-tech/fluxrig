@@ -180,7 +180,7 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 			logger.Debug("Loaded Cached Passport", "id", s.MachineID, "name", s.Name)
 			cfg.Rack.MachineID = s.MachineID
 			cfg.Base.Name = s.Name // Ensure name is loaded for telemetry init
-			secret = s.Secret
+			secret = rackSecret(statePath, s.Secret)
 			currentStatus = s.Status
 		} else {
 			logger.Error("Failed to verify cached passport", "error", errVer)
@@ -197,6 +197,9 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 	limits, errLimits := parseRackTimeouts(cfg)
 	if errLimits != nil {
 		return errLimits
+	}
+	if errOrder := rt.ValidateOutboxOrder(cfg.Rack.OutboxOrder); errOrder != nil {
+		return errOrder
 	}
 	cleanupTimeout, drainTimeout, convTimeout := limits.cleanup, limits.drain, limits.convergence
 	handshakeInterval, subRetryWait, opTimeout := limits.handshake, limits.subscriptionRetry, limits.operation
@@ -237,6 +240,8 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 		// elapses (up to ~37s by default, longer with a configured timeout).
 		Ctx: ctx,
 	}
+	opts.DLQEnabled = cfg.Snake.DLQEnabled
+	opts.DLQSubject = cfg.Snake.DLQSubject
 	opts.InitialRetryTimeout = offlineStartBound(cfg.Rack.MachineID, offlineStartTimeout)
 	natsBus := bus.NewNatsBus(cfg.Snake.StreamName)
 	busConnected := false
@@ -325,6 +330,8 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 		logger.Info("Initializing Runtime Manager", "id", nodeID, "name", nodeName)
 		rtManager = rt.NewManager(nodeID, nodeName, managedBus, nodeGen, specMgr, opTimeout, convTimeout, handshakeInterval, cfg.Logging.Trace, cfg.Logging.Debug, pubKey)
 		rtManager.SetLaneConfig(cfg.Rack.LaneQueueSize, laneSendTimeout)
+		_ = rtManager.SetOutboxConfig(cfg.Rack.OutboxMaxMessages, cfg.Rack.OutboxDrainRetries, cfg.Rack.OutboxOrder) // order validated at startup
+		rtManager.SetOutboxBackpressure(limits.outboxBackpressure)
 	}
 
 	// Initial Init (might be 0/pending)
@@ -464,6 +471,8 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 							if !adopted {
 								rtManager = rt.NewManager(cfg.Rack.MachineID, cfg.Base.Name, natsBus, gen, specMgr, opTimeout, convTimeout, handshakeInterval, cfg.Logging.Trace, cfg.Logging.Debug, mixerPublicKey(statePath))
 								rtManager.SetLaneConfig(cfg.Rack.LaneQueueSize, laneSendTimeout)
+								_ = rtManager.SetOutboxConfig(cfg.Rack.OutboxMaxMessages, cfg.Rack.OutboxDrainRetries, cfg.Rack.OutboxOrder) // order validated at startup
+								rtManager.SetOutboxBackpressure(limits.outboxBackpressure)
 							}
 							if errStart := rtManager.Start(); errStart != nil {
 								logger.Error("Failed to start runtime (resume)", "error", errStart)
@@ -510,8 +519,12 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 						return errSave
 					}
 					logger.Info("Passport Saved", "path", statePath)
+					if errSecret := storePassportSecret(statePath, state.Secret); errSecret != nil {
+						logger.Error("Failed to store the rack secret", "error", errSecret)
+						return errSecret
+					}
 					mID = state.MachineID
-					secret = state.Secret
+					secret = rackSecret(statePath, state.Secret)
 
 					if resp.Status == "active" {
 						// INITIALIZE TELEMETRY WITH CONFIRMED IDENTITY
@@ -653,6 +666,9 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 							if errSave := env.Save(statePath); errSave != nil {
 								logger.Error("Adoption: Failed to save passport", "path", statePath, "error", errSave)
 							} else {
+								if errSecret := storePassportSecret(statePath, state.Secret); errSecret != nil {
+									logger.Error("Adoption: Failed to store the rack secret", "error", errSecret)
+								}
 								logger.Info("Received Updated Passport via Heartbeat", "id", state.MachineID, "name", state.Name)
 								logger.Info("Adoption: Passport Saved", "path", statePath)
 
@@ -973,6 +989,9 @@ func handleEnrollmentDenial(logger *slog.Logger, statePath string, cfg *config.R
 	logger.Warn("Registration denied; dropping cached identity", "message", message)
 	if errRemove := os.Remove(statePath); errRemove != nil && !os.IsNotExist(errRemove) {
 		logger.Error("Failed to remove stale passport", "path", statePath, "error", errRemove)
+	}
+	if errRemove := removeRackSecret(statePath); errRemove != nil {
+		logger.Error("Failed to remove stale rack secret", "path", secretPath(statePath), "error", errRemove)
 	}
 	// The pinned Mixer key belongs to the file path, not to the old
 	// identity. If the file stays, the old key still guards the new

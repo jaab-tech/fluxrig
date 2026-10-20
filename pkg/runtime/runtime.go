@@ -6,6 +6,7 @@ package runtime
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -66,6 +67,7 @@ type Manager struct {
 	clusterPubKey []byte
 	mu            sync.Mutex
 	portsMu       sync.RWMutex // guards lazy port-ID assignment in gearPorts (emit hot path)
+	outbox        *outbox      // bus-bound emissions parked while the bus is down
 }
 
 func NewManager(machineID uuid.UUID, name string, b bus.Bus, ig *idgen.IDGenerator, specMgr manager.Manager, opTimeout, convTimeout, handshakeInterval time.Duration, trace, debug bool, clusterPubKey []byte) *Manager {
@@ -90,9 +92,60 @@ func NewManager(machineID uuid.UUID, name string, b bus.Bus, ig *idgen.IDGenerat
 		gearIDs:            make(map[string]uuid.UUID),
 		hotSubjects:        make(map[string]chan struct{}),
 		busSubjects:        make(map[string]bool),
+		outbox:             newOutbox(0, 0),
 	}
 	m.lane = newLocalLane(0, 0, m.logger)
 	return m
+}
+
+// SetOutboxConfig caps how many bus-bound emissions wait in memory while the
+// bus is down, sets how many times the drain tries each one before it moves
+// on, and sets the drain order (OutboxOrderSubject or OutboxOrderNone).
+// Non-positive values and an empty order select the defaults. An unknown
+// order is an error and changes nothing. It applies immediately: the outbox
+// is drained and recreated only by parking, never by configuration.
+func (m *Manager) SetOutboxConfig(maxMessages, drainRetries int, order string) error {
+	if err := ValidateOutboxOrder(order); err != nil {
+		return err
+	}
+	if maxMessages <= 0 {
+		maxMessages = defaultOutboxMaxMessages
+	}
+	if drainRetries <= 0 {
+		drainRetries = defaultOutboxDrainRetries
+	}
+	if order == "" {
+		order = defaultOutboxOrder
+	}
+	m.outbox.mu.Lock()
+	defer m.outbox.mu.Unlock()
+	m.outbox.max = maxMessages
+	m.outbox.retries = drainRetries
+	m.outbox.ordered = order == OutboxOrderSubject
+	return nil
+}
+
+// SetOutboxBackpressure sets how long a live emission waits for its subject's
+// parked backlog to clear while the bus is up, before it parks behind it.
+// Zero parks at once; a negative value selects the default.
+func (m *Manager) SetOutboxBackpressure(wait time.Duration) {
+	if wait < 0 {
+		wait = defaultOutboxBackpressure
+	}
+	m.outbox.mu.Lock()
+	m.outbox.wait = wait
+	m.outbox.mu.Unlock()
+}
+
+// kickDrain starts an outbox drain in the background. A drain already running
+// makes it a no-op, so an emission path can call it freely.
+func (m *Manager) kickDrain(quiet bool) {
+	// The drain is marked as running before its goroutine starts, so an
+	// emission right after SetBus waits for it rather than parking.
+	if !m.outbox.beginDrain(quiet) {
+		return
+	}
+	go m.outbox.runDrain(context.Background(), m.bus.Publish, m.logger, quiet)
 }
 
 // SetBus replaces the bus under the gears that are already running. A Rack that
@@ -100,10 +153,14 @@ func NewManager(machineID uuid.UUID, name string, b bus.Bus, ig *idgen.IDGenerat
 // Mixer returns and the Rack has a connected bus it hands it over here, and the
 // gears use it from then on without being started again. The control plane the
 // gears hold is bound to the new connection, so the commands the Mixer sends reach
-// them too.
+// them too. A non-nil bus also starts the outbox drain: whatever was parked
+// while the bus was down is forwarded now, in the order rack.outbox_order sets.
 func (m *Manager) SetBus(b bus.Bus) {
 	m.busRef.set(b)
 	m.bindControlPlane()
+	if b != nil {
+		m.kickDrain(false)
+	}
 }
 
 // SameIdentity reports whether the Manager was built for this machine, name and Mixer
@@ -290,13 +347,41 @@ func (m *Manager) publishPort(ctx context.Context, gearName, port string, msg *f
 		return nil
 	}
 
+	// With subject order, an emission on a subject that still has parked
+	// messages queues behind them: sent now, it would reach the bus first.
+	// While the bus is up and the drain is moving, it first waits (bounded)
+	// for the backlog to clear, so it can go straight to the bus instead of
+	// growing a queue the cap would trim.
+	m.outbox.waitClear(emitCtx, subject)
+	if m.outbox.parkIfHeld(subject, msg) {
+		m.kickDrain(true)
+		return nil
+	}
+
 	if perr := m.bus.Publish(emitCtx, subject, msg); perr != nil {
-		m.logger().Error("emit failed", "gear", gearName, "port", port, "error", perr)
-		if tm := telemetry.GetMetrics(); tm != nil {
-			tm.GearErrors.Add(context.Background(), 1,
-				metric.WithAttributes(attribute.String("gear", gearName)))
+		// The bus leg failed. If there was never a bus, the emission had no
+		// bus leg at all and the error stands. Otherwise the message is
+		// parked in the outbox and forwarded when the bus returns, and the
+		// emission reports success: the gear's job is done once the message
+		// is accepted for delivery, on the lane now and on the bus later.
+		if errors.Is(perr, errNoBus) {
+			m.logger().Error("emit failed", "gear", gearName, "port", port, "error", perr)
+			if tm := telemetry.GetMetrics(); tm != nil {
+				tm.GearErrors.Add(context.Background(), 1,
+					metric.WithAttributes(attribute.String("gear", gearName)))
+			}
+			return fmt.Errorf("emit %s.%s: %w", gearName, port, perr)
 		}
-		return fmt.Errorf("emit %s.%s: %w", gearName, port, perr)
+		m.logger().Warn("bus publish failed, parking emission for forward on rejoin",
+			"gear", gearName, "port", port, "subject", subject, "error", perr)
+		m.outbox.park(subject, msg)
+		return nil
+	}
+	// The bus took this one, so it is up. Anything parked while it was down
+	// goes now, without waiting for a SetBus that a reconnect inside the bus
+	// never makes.
+	if m.outbox.len() > 0 {
+		m.kickDrain(true)
 	}
 	return nil
 }
@@ -411,7 +496,7 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err
 			return fmt.Errorf("create gear %s error: %w", gSpec.Name, err)
 		}
 
-		// Validate the gear config against its manifest schema (ADR 0045), so
+		// Validate the gear config against its manifest schema, so
 		// a bad value or a missing required field fails activation here rather
 		// than misbehaving at runtime.
 		if err = m.factory.ValidateConfig(gSpec.Type, gSpec.Config); err != nil {
@@ -709,6 +794,18 @@ func (m *Manager) Shutdown() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.stopAll()
+	// A shutdown with a live bus and a non-empty outbox gets one bounded
+	// drain attempt; with no bus there is nowhere to send, so the count of
+	// what is dropped is logged and the process exits with it on record.
+	if n := m.outbox.len(); n > 0 {
+		m.logger().Info("shutting down with parked emissions", "parked", n)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		m.outbox.drain(ctx, m.bus.Publish, m.logger, false)
+		if left := m.outbox.len(); left > 0 {
+			m.logger().Warn("shutdown dropped parked emissions", "dropped", left)
+		}
+	}
 }
 
 // Drain signals all active gears to stop accepting new work and complete pending work.

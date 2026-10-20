@@ -5,7 +5,7 @@ package conductor
 
 import "github.com/jaab-tech/fluxrig/pkg/sdk"
 
-// Manifest describes the Conductor gear: its port model (ADR 0043), its
+// Manifest describes the Conductor gear: its port model, its
 // configuration schema, and its status. It is not a transparent pass-through,
 // so the binding walk stops at it rather than following through.
 func (g *Gear) Manifest() sdk.Manifest {
@@ -38,12 +38,12 @@ const configSchemaJSON = `{
   "properties": {
     "origin": {
       "type": "string",
-      "description": "This Conductor's name in the mesh; required only when it hands requests to, or serves requests from, other Conductors."
+      "description": "This Conductor's name in the mesh. It is required only when it hands requests to, or serves requests from, other Conductors."
     },
     "known_origins": {
       "type": "array",
       "items": { "type": "string" },
-      "description": "Optional allowlist of peer Conductor names this gear will route a reply back to, by the origin stamp a request arrived with. Every origin is always checked against a safe identifier format regardless; naming peers here additionally rejects one that is not an expected peer, rather than routing to whatever string arrived."
+      "description": "Optional allowlist of peer Conductor names this gear will route a reply back to, by the origin stamp a request arrived with. Every origin is always checked against a safe identifier format regardless. Naming peers here additionally rejects one that is not an expected peer, rather than routing to whatever string arrived."
     },
     "correlation_key": {
       "type": "array",
@@ -81,7 +81,7 @@ const configSchemaJSON = `{
     },
     "valet": {
       "type": "object",
-      "description": "Correlation-engine (ticket store) settings: store backend and ticket lifetimes.",
+      "description": "Correlation-engine (ticket store) settings: store backend, ticket lifetimes, and the in-flight bound. valet.max_in_flight (integer, default 0, which means unbounded) caps the open tickets. A new request past the bound is shed on the error port with error.reason=overloaded.",
       "properties": {
         "store": {
           "type": "string",

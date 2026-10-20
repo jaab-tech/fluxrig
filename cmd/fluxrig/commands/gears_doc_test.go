@@ -96,3 +96,27 @@ func TestInjectDocsUnknownType(t *testing.T) {
 		t.Fatal("expected error for unknown gear type in marker")
 	}
 }
+
+// A type another binary documents is left as it is, and does not fail the
+// run; any other unknown type still does.
+func TestInjectDocsSkipTypes(t *testing.T) {
+	dir := t.TempDir()
+	block := "<!-- AUTOGEN:manifest:sim_source START -->\nkept\n<!-- AUTOGEN:manifest:sim_source END -->\n"
+	path := filepath.Join(dir, "sim_source.md")
+	if err := os.WriteFile(path, []byte(block), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := injectDocs(gears.NewFactory(), dir, &out, "sim_source"); err != nil {
+		t.Fatalf("a skipped type must not fail the run: %v", err)
+	}
+	if got, _ := os.ReadFile(path); string(got) != block {
+		t.Fatalf("a skipped block was rewritten:\n%s", got)
+	}
+	if !strings.Contains(out.String(), "left for another binary: sim_source") {
+		t.Errorf("skipped block not reported: %s", out.String())
+	}
+	if err := injectDocs(gears.NewFactory(), dir, &out, "sim_responder"); err == nil {
+		t.Fatal("a type outside the skip list must still fail")
+	}
+}

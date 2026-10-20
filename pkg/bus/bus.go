@@ -5,12 +5,20 @@ package bus
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 )
+
+// ErrInvalidMessage marks a publish that failed because of the message itself:
+// it fails validation, cannot be encoded, or exceeds the server's payload
+// limit. Sending it again cannot succeed, on this bus or on any other. Every
+// other publish error says nothing about the message, and a caller must treat
+// it as "the bus did not take it", not as "the message is bad".
+var ErrInvalidMessage = errors.New("bus: invalid message")
 
 // ConnectOptions holds parameters for establishing a connection.
 type ConnectOptions struct {
@@ -33,6 +41,12 @@ type ConnectOptions struct {
 	// between retry attempts instead of only after the whole retry budget
 	// elapses. Nil means only InitialRetryAttempts/InitialRetryTimeout bound it.
 	Ctx context.Context
+	// DLQ routes a message no consumer could process to a dead letter stream
+	// instead of dropping it. DLQEnabled is the switch; DLQSubject is the
+	// subject prefix the dead letter stream captures. Disabled keeps the
+	// previous behavior: log and discard.
+	DLQEnabled bool
+	DLQSubject string
 }
 
 // Bus defines the standard behavior for our messaging layer.

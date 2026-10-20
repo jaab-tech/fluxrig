@@ -130,6 +130,10 @@ type MockKeyValue struct {
 }
 
 func (m *MockKeyValue) Put(ctx context.Context, bucket, key string, value []byte) (uint64, error) {
+	return m.PutWithTTL(ctx, bucket, key, value, 0)
+}
+
+func (m *MockKeyValue) PutWithTTL(ctx context.Context, bucket, key string, value []byte, ttl time.Duration) (uint64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.data == nil {

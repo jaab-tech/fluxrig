@@ -64,7 +64,7 @@ func get(t *testing.T, s *Server, h http.HandlerFunc, target string) *httptest.R
 func TestTheAPIRendersAStoredSpec(t *testing.T) {
 	s := storeWith(t, referenceSpec(t), "iso.yaml")
 
-	rec := get(t, s, s.handleSpecDoc, "/api/v1/specs/iso8583-v87-ascii/v2.2.0/doc")
+	rec := get(t, s, s.handleSpecDoc, "/api/v1/specs/iso8583-v87-ascii/v3.0.0/doc")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -88,8 +88,8 @@ func TestTheAPIRendersAStoredSpec(t *testing.T) {
 func TestTheAPIServesThePublicVariantByDefault(t *testing.T) {
 	s := storeWith(t, referenceSpec(t), "iso.yaml")
 
-	pub := get(t, s, s.handleSpecDoc, "/api/v1/specs/iso8583-v87-ascii/v2.2.0/doc").Body.String()
-	full := get(t, s, s.handleSpecDoc, "/api/v1/specs/iso8583-v87-ascii/v2.2.0/doc?scope=complete").Body.String()
+	pub := get(t, s, s.handleSpecDoc, "/api/v1/specs/iso8583-v87-ascii/v3.0.0/doc").Body.String()
+	full := get(t, s, s.handleSpecDoc, "/api/v1/specs/iso8583-v87-ascii/v3.0.0/doc?scope=complete").Body.String()
 
 	if !strings.Contains(pub, "private elements are omitted") {
 		t.Error("the default response does not withhold, or does not say it did")
@@ -107,7 +107,7 @@ func TestTheAPIServesThePublicVariantByDefault(t *testing.T) {
 
 func TestTheAPIRendersMarkdownWhenAsked(t *testing.T) {
 	s := storeWith(t, referenceSpec(t), "iso.yaml")
-	rec := get(t, s, s.handleSpecDoc, "/api/v1/specs/iso8583-v87-ascii/v2.2.0/doc?format=markdown")
+	rec := get(t, s, s.handleSpecDoc, "/api/v1/specs/iso8583-v87-ascii/v3.0.0/doc?format=markdown")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -137,8 +137,8 @@ func TestTheAPIRefusesWhatItCannotServe(t *testing.T) {
 	}{
 		"a spec that is not there": {"/api/v1/specs/nope/v1.0.0/doc", http.StatusNotFound},
 		"a tag that is not there":  {"/api/v1/specs/iso8583-v87-ascii/v9.9.9/doc", http.StatusNotFound},
-		"an unknown scope":         {"/api/v1/specs/iso8583-v87-ascii/v2.2.0/doc?scope=internal", http.StatusBadRequest},
-		"an unknown format":        {"/api/v1/specs/iso8583-v87-ascii/v2.2.0/doc?format=pdf", http.StatusBadRequest},
+		"an unknown scope":         {"/api/v1/specs/iso8583-v87-ascii/v3.0.0/doc?scope=internal", http.StatusBadRequest},
+		"an unknown format":        {"/api/v1/specs/iso8583-v87-ascii/v3.0.0/doc?format=pdf", http.StatusBadRequest},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if rec := get(t, s, s.handleSpecDoc, tc.target); rec.Code != tc.want {
@@ -154,7 +154,7 @@ func TestTheAPIRefusesToDocumentASpecThatDoesNotLoad(t *testing.T) {
 	broken := strings.Replace(string(referenceSpec(t)), `values_ref: "response_code"`, `values_ref: "gone"`, 1)
 	s := storeWith(t, []byte(broken), "broken.yaml")
 
-	rec := get(t, s, s.handleSpecDoc, "/api/v1/specs/iso8583-v87-ascii/v2.2.0/doc")
+	rec := get(t, s, s.handleSpecDoc, "/api/v1/specs/iso8583-v87-ascii/v3.0.0/doc")
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("got %d, want 422: %s", rec.Code, rec.Body.String())
 	}
@@ -175,7 +175,7 @@ func TestTheAPIListsWhatTheStoreHolds(t *testing.T) {
 	}
 	found := false
 	for _, it := range items {
-		if it.URN == "iso8583-v87-ascii:v2.2.0" {
+		if it.URN == "iso8583-v87-ascii:v3.0.0" {
 			found = true
 		}
 	}

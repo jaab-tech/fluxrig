@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -62,8 +63,15 @@ var scenarioImportCmd = &cobra.Command{
 				baseURL = "http://localhost:8090"
 			}
 			mixerURL := fmt.Sprintf("%s/api/v1/scenario/import", baseURL)
+			q := url.Values{}
 			if dryRun {
-				mixerURL += "?dry_run=true"
+				q.Set("dry_run", "true")
+			}
+			if activate, _ := cmd.Flags().GetBool("activate"); activate {
+				q.Set("activate", "true")
+			}
+			if len(q) > 0 {
+				mixerURL += "?" + q.Encode()
 			}
 
 			req, errReq := newAPIRequest(cmd, http.MethodPost, mixerURL, bytes.NewReader(content))
@@ -250,6 +258,7 @@ func init() {
 
 	scenarioImportCmd.Flags().BoolVarP(&dryRun, "dry-run", "d", false, "Validate without applying")
 	scenarioImportCmd.Flags().Bool("api", false, "Send to running Mixer API instead of CAS store")
+	scenarioImportCmd.Flags().Bool("activate", false, "With --api: activate the scenario after the import, which deploys it to its Racks")
 	scenarioImportCmd.Flags().String("name", "", "Logical name for the scenario")
 	scenarioImportCmd.Flags().String("tag", "", "Version tag (e.g. v1.0.0)")
 

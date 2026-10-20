@@ -27,6 +27,12 @@ var (
 	// drain; only new work is refused.
 	ErrDraining = errors.New("valet: engine is draining")
 
+	// ErrOverloaded reports a Park for a NEW key while the open-ticket count
+	// is at MaxInFlight. Retransmission attachment and retained replay still
+	// succeed: the bound stops new work, not duplicates of work already
+	// accepted.
+	ErrOverloaded = errors.New("valet: in-flight ticket limit reached")
+
 	// ErrClosed reports any operation after Close.
 	ErrClosed = errors.New("valet: engine is closed")
 )

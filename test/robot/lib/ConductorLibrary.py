@@ -76,6 +76,9 @@ class ConductorLibrary:
             "stan_base": "-auth-stan-base", "timeout": "-auth-timeout",
             "de43": "-auth-de43",
             "mti": "-auth-mti",
+            "proc_code": "-auth-proc-code", "amount": "-auth-amount",
+            "currency": "-auth-currency", "merchant_id": "-auth-merchant-id",
+            "terminal_id": "-auth-terminal-id", "rrn": "-auth-rrn",
         }
         for key, flag in flag_map.items():
             if key in opts and opts[key] is not None:

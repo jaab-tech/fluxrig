@@ -38,54 +38,11 @@ func TestStore_Comprehensive(t *testing.T) {
 	if errMig := s.Migrate(ctx); errMig != nil {
 		t.Fatalf("Migrate failed: %v", errMig)
 	}
-	s.SetBootstrapSecret("secret")
-
-	// 3. Registry Operations (Mixer)
-	mixerMachineID := uuid.New()
+	// Rack, Mixer and Snake records live in the key-value registry; this
+	// store keeps telemetry and the topology rows below, which reference
+	// those IDs without owning them.
 	mixerEID := uuid.New()
-	if errReg := s.RegisterMixer(ctx, mixerMachineID, "test-mixer", mixerEID, "localhost:8080", "v1"); errReg != nil {
-		t.Fatalf("RegisterMixer failed: %v", errReg)
-	}
-
-	id, err := s.GetEntityIDByName(ctx, "test-mixer")
-	if err != nil {
-		t.Errorf("GetEntityIDByName failed: %v", err)
-	}
-	if id != mixerEID {
-		t.Errorf("Expected ID %s, got %s", mixerEID, id)
-	}
-
-	// 4. Registry Interface (Rack)
 	machineID := uuid.New()
-	rack, err := s.Register(ctx, machineID, "test-rack", "secret", "127.0.0.1", 9000, "v0.4.6", nil, mixerEID)
-	if err != nil {
-		t.Fatalf("Register rack failed: %v", err)
-	}
-	if rack.Status != "pending" {
-		t.Errorf("Expected status pending, got %s", rack.Status)
-	}
-
-	// Approve
-	rack, err = s.Approve(ctx, machineID, "approved-rack")
-	if err != nil {
-		t.Fatalf("Approve failed: %v", err)
-	}
-	if rack.Status != "active" || rack.Name != "approved-rack" {
-		t.Errorf("Unexpected rack state: %+v", rack)
-	}
-
-	// 5. Registry Operations (Snake)
-	snakeEID := uuid.New()
-	rackEID := uuid.New()
-	snakeMachineID := uuid.New()
-	if errSnake := s.RegisterSnake(ctx, "test-snake", snakeEID, "v1", rackEID, mixerEID, "1.2.3.4", 9000, "127.0.0.1", 8080, snakeMachineID); errSnake != nil {
-		t.Fatalf("RegisterSnake failed: %v", errSnake)
-	}
-
-	stats := map[string]any{"uptime": "1h"}
-	if errStats := s.UpdateSnakeStats(ctx, snakeEID, stats); errStats != nil {
-		t.Errorf("UpdateSnakeStats failed: %v", errStats)
-	}
 
 	// 6. Telemetry Logs Insert & Query
 	_, err = s.db.ExecContext(ctx, `
@@ -149,11 +106,4 @@ func TestStore_Comprehensive(t *testing.T) {
 		t.Fatalf("RegisterWire failed: %v", err)
 	}
 
-	// 10. Cleanup
-	if err := s.RemoveSnake(ctx, snakeEID); err != nil {
-		t.Errorf("RemoveSnake failed: %v", err)
-	}
-	if err := s.ClearSnakes(ctx); err != nil {
-		t.Errorf("ClearSnakes failed: %v", err)
-	}
 }

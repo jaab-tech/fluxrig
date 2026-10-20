@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -188,7 +189,7 @@ func TestJanitor_Forensic(t *testing.T) {
 	assert.NoError(t, err)
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-	janitor := NewJanitor(logger, tmpDir, 30)
+	janitor := NewJanitor(logger, tmpDir, 30, time.Hour)
 
 	t.Run("Clean", func(t *testing.T) {
 		err := janitor.clean()
@@ -203,5 +204,79 @@ func TestJanitor_Forensic(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		janitor.Start(ctx)
 		cancel() // Stop immediately
+	})
+}
+
+// TestJanitor_KeepsFreshFiles pins the control the e2e suite relies on: a
+// janitor that deletes everything would pass a test that only checks an old
+// file disappeared. The recent file must survive the same sweep.
+func TestJanitor_KeepsFreshFiles(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "janitor_fresh_test")
+	assert.NoError(t, err)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	// A name in the shape the store writes (type_<unix-nanos>.parquet) with a
+	// current timestamp must survive, whatever its mtime says.
+	freshFile := filepath.Join(tmpDir, fmt.Sprintf("logs_%d.parquet", time.Now().UnixNano()))
+	err = os.WriteFile(freshFile, []byte("data"), 0600)
+	assert.NoError(t, err)
+
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	janitor := NewJanitor(logger, tmpDir, 30, time.Hour)
+
+	err = janitor.clean()
+	assert.NoError(t, err)
+
+	_, err = os.Stat(freshFile)
+	assert.NoError(t, err, "a file inside the retention window must survive the sweep")
+}
+
+// TestJanitor_IntervalAndRetentionDefaults pins the fallbacks. A non-positive
+// interval or retention count must not produce a zero ticker or a sweep that
+// deletes everything.
+func TestJanitor_IntervalAndRetentionDefaults(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+
+	janitor := NewJanitor(logger, t.TempDir(), 0, 0)
+	assert.Equal(t, defaultRetentionDays, janitor.retentionDays)
+	assert.Equal(t, defaultInterval, janitor.interval)
+
+	janitor = NewJanitor(logger, t.TempDir(), 7, 15*time.Minute)
+	assert.Equal(t, 7, janitor.retentionDays)
+	assert.Equal(t, 15*time.Minute, janitor.interval)
+}
+
+// TestJanitor_IgnoresImplausibleNameTimestamp pins the guard: a file whose name
+// suffix parses as an epoch too far in the past (a truncated or malformed
+// flush timestamp, not a real one) must fall back to its modification time. A
+// fresh file with such a name must survive; before the guard it was deleted
+// because the name read as 1970.
+func TestJanitor_IgnoresImplausibleNameTimestamp(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+
+	t.Run("fresh file with an old-looking name survives", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		// 987654321 as epoch nanos is 1969-12-31. The mtime is now.
+		fresh := filepath.Join(tmpDir, "logs_987654321.parquet")
+		assert.NoError(t, os.WriteFile(fresh, []byte("data"), 0600))
+
+		janitor := NewJanitor(logger, tmpDir, 30, time.Hour)
+		assert.NoError(t, janitor.clean())
+
+		_, err := os.Stat(fresh)
+		assert.NoError(t, err, "the mtime governs when the name timestamp is implausible")
+	})
+
+	t.Run("old file with a real old name is deleted", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		oldNanos := time.Now().AddDate(-1, 0, 0).UnixNano()
+		old := filepath.Join(tmpDir, fmt.Sprintf("logs_%d.parquet", oldNanos))
+		assert.NoError(t, os.WriteFile(old, []byte("data"), 0600))
+
+		janitor := NewJanitor(logger, tmpDir, 30, time.Hour)
+		assert.NoError(t, janitor.clean())
+
+		_, err := os.Stat(old)
+		assert.True(t, os.IsNotExist(err), "a plausible old name must still be honored")
 	})
 }

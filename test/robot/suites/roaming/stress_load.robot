@@ -17,7 +17,8 @@ Documentation     Roaming enrichment under load.
 ...
 ...               Every case asserts cross_wired == 0: not one reply reached a
 ...               terminal that did not send it. All run against the shipped
-...               scenario with await_store: false, the detached-write path.
+...               scenario, whose correlation store is written before the request
+...               moves on (await_store: true).
 ...
 ...               Two properties of the key are deterministic and live in the
 ...               functional suite instead, because load is the wrong instrument
@@ -97,12 +98,11 @@ Concurrent Multi-Outcome Holds Correlation
     Log    ${rep}[total] txns, p99=${rep}[latency_p99_ms]ms, outcomes=${rep}[by_de42]
 
 High Concurrency Holds Correlation
-    [Documentation]    The case the detached write exists for: seven terminals at
-    ...                120 TPS each, 300 transactions per connection, with
-    ...                await_store false, so
-    ...                the Coat Check store runs one unbounded goroutine per
-    ...                message while the telco call is in flight. Distinct STAN
-    ...                base so keys cannot collide with the previous case.
+    [Documentation]    The peak load on the correlation store: seven terminals at
+    ...                120 TPS each, 300 transactions per connection, every
+    ...                request writing its entry before it moves on, while the
+    ...                telco call is in flight. Distinct STAN base so keys
+    ...                cannot collide with the previous case.
     [Tags]    roaming    stress
     ${fleet}=    Start Auth Fleet    pan_list=${OUTCOME_PANS}    target=127.0.0.1:${SCHEME_PORT}
     ...    spec=${SPEC}    work_dir=${WORK_DIR}    conns=6    count=300    rate=120    stan_base=500000    timeout=300    merchant_country=UY

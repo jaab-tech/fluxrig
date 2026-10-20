@@ -234,8 +234,10 @@ func NewServer(ctx context.Context, cfg Config) (*Server, error) {
 			// there is no automatic recovery here on purpose - discarding a
 			// store that might still hold undelivered guaranteed messages
 			// without an operator's say-so is its own kind of data loss.
+			// Diagnose and repair it with the Mixer stopped:
+			// fluxrig-mixer -c <config> --repair
 			// Moving the directory away starts a genuinely empty store.
-			return nil, fmt.Errorf("snake: failed to provision stream %q in %s: %w (if the store cannot be repaired, move the directory away to start an empty one)", cfg.StreamName, cfg.StoreDir, err)
+			return nil, fmt.Errorf("snake: failed to provision stream %q in %s: %w (diagnose with: fluxrig-mixer -c <config> --repair; if the store cannot be repaired, move the directory away to start an empty one)", cfg.StreamName, cfg.StoreDir, err)
 		}
 		slog.Info("Streams provisioned")
 	}
@@ -252,6 +254,25 @@ func NewServer(ctx context.Context, cfg Config) (*Server, error) {
 
 // ProvisionStream checks if a stream exists and creates it if not.
 func (s *Server) ProvisionStream(ctx context.Context, name string, subjects []string) error {
+	return s.provisionStream(ctx, name, subjects, s.streamMaxAge)
+}
+
+// ProvisionStreamWithAge is ProvisionStream with an explicit max age, for a
+// stream whose retention is its own rather than the message stream's. The dead
+// letter stream uses it: a poison message should age out on its own schedule,
+// not the business stream's. An empty or unparseable age falls back to the
+// server's own streamMaxAge.
+func (s *Server) ProvisionStreamWithAge(ctx context.Context, name string, subjects []string, maxAge string) error {
+	age := s.streamMaxAge
+	if maxAge != "" {
+		if parsed, err := time.ParseDuration(maxAge); err == nil {
+			age = parsed
+		}
+	}
+	return s.provisionStream(ctx, name, subjects, age)
+}
+
+func (s *Server) provisionStream(ctx context.Context, name string, subjects []string, maxAge time.Duration) error {
 
 	// Connect to self with retry resilience
 	var nc *nats.Conn
@@ -295,7 +316,7 @@ func (s *Server) ProvisionStream(ctx context.Context, name string, subjects []st
 
 		cfg := info.Config
 		cfg.Subjects = subjects
-		cfg.MaxAge = s.streamMaxAge
+		cfg.MaxAge = maxAge
 		// Applied unconditionally, like MaxAge above: zero is a real, documented
 		// setting ("no limit"), not "leave whatever the stream already has". An
 		// operator who lowers, or clears, a limit on an existing stream expects
@@ -316,7 +337,7 @@ func (s *Server) ProvisionStream(ctx context.Context, name string, subjects []st
 		Storage:   jetstream.FileStorage,
 		Retention: jetstream.LimitsPolicy, // Keep until limits
 		Replicas:  1,
-		MaxAge:    s.streamMaxAge,
+		MaxAge:    maxAge,
 		MaxBytes:  s.streamMaxBytes,
 	})
 

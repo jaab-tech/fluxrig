@@ -868,3 +868,46 @@ func TestFieldToKeyPartAgreesAcrossGears(t *testing.T) {
 		t.Fatalf("FieldToKeyPart(%v) = %q, want %q (the raw bytes as a string)", track2, got, want)
 	}
 }
+
+// At the in-flight bound the Conductor sheds a new request with a
+// deterministic decline on the error port, not a gear error: overload is a
+// handled condition, and a retransmission of an open key still attaches.
+func TestOverloadShedsNewRequest(t *testing.T) {
+	cfg := switchConfig()
+	cfg["valet"].(map[string]any)["max_in_flight"] = 1
+
+	em := &capEmitter{}
+	g := New()
+	g.clock = newFakeClock()
+	if err := g.Init(&mockCtx{cfg: cfg, emitter: em}); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	defer func() { _ = g.Stop() }()
+	ctx := context.Background()
+
+	// First request parks (bound is 1).
+	if err := g.ProcessPort(ctx, "in", request("000001")); err != nil {
+		t.Fatalf("first in: %v", err)
+	}
+	em.take()
+
+	// A second, distinct key is shed.
+	if err := g.ProcessPort(ctx, "in", request("000002")); err != nil {
+		t.Fatalf("shedding must be handled, not returned as a gear error: %v", err)
+	}
+	emits := em.take()
+	if len(emits) != 1 || emits[0].port != "error" || emits[0].msg.Metadata["error.reason"] != "overloaded" {
+		t.Fatalf("emits = %+v, want error/overloaded", emits)
+	}
+	if emits[0].msg.Data["11"] != "000002" {
+		t.Fatalf("the declined message must be the original request, got %v", emits[0].msg.Data)
+	}
+
+	// A retransmission of the open key still attaches and emits nothing new.
+	if err := g.ProcessPort(ctx, "in", request("000001")); err != nil {
+		t.Fatalf("retransmission at the bound must attach: %v", err)
+	}
+	if extra := em.take(); len(extra) != 0 {
+		t.Fatalf("a retransmission must be absorbed, not shed or re-routed: %+v", extra)
+	}
+}

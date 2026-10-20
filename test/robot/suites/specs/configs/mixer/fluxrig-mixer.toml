@@ -14,7 +14,6 @@ cluster_key_file = "cluster.key"
 port = 4232
 url = "nats://localhost:4232"
 cluster_name = "flux"
-store_dir = "data/js"
 
 
 [observability]

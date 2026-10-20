@@ -5,16 +5,12 @@ package duckdb
 
 import (
 	"context"
-	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -23,19 +19,17 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/jaab-tech/fluxrig/pkg/registry"
-	"github.com/jaab-tech/fluxrig/pkg/security"
 )
 
-// Store manages the DuckDB connection and implements registry.Registry.
+// Store manages the Mixer's local DuckDB: telemetry, and the topology rows
+// derived from the active scenario. The registry of Racks, Mixers and Snakes
+// lives in the JetStream key-value registry (package kvstore).
 type Store struct {
-	db              *sql.DB
-	dataDir         string       // Directory containing the DB file and telemetry
-	isMemory        bool         // true for an ephemeral :memory: store (nothing to lock across processes)
-	log             *slog.Logger // Logger for store operations
-	mu              sync.RWMutex
-	migrateMu       sync.Mutex // guards Migrate's version-check-then-apply sequence
-	autoAdopt       bool
-	bootstrapSecret string
+	db        *sql.DB
+	dataDir   string       // Directory containing the DB file and telemetry
+	isMemory  bool         // true for an ephemeral :memory: store (nothing to lock across processes)
+	log       *slog.Logger // Logger for store operations
+	migrateMu sync.Mutex   // guards Migrate's version-check-then-apply sequence
 }
 
 // NewStore opens a DuckDB database file.
@@ -66,37 +60,6 @@ func (s *Store) DB() *sql.DB {
 	return s.db
 }
 
-func (s *Store) SetAutoAdopt(enabled bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.autoAdopt = enabled
-	s.log.Info("SetAutoAdopt called", "enabled", enabled)
-}
-
-// SetBootstrapSecret sets the shared secret a first-ever Hello for a MachineID
-// must present before RegisterEntity creates a row for it. Nothing previously
-// compared this anywhere, so any MachineID could self-provision an identity.
-func (s *Store) SetBootstrapSecret(secret string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.bootstrapSecret = secret
-}
-
-// generateSecret returns a fresh, random per-identity bearer secret: 32 bytes
-// of CSPRNG output, hex-encoded.
-func generateSecret() (string, error) {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b), nil
-}
-
-func (s *Store) Wipe(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, "DROP TABLE IF EXISTS registry; DROP SEQUENCE IF EXISTS seq_machine_id_server;")
-	return err
-}
-
 // mapError translates database errors to registry package errors.
 func (s *Store) mapError(err error) error {
 	if err == nil {
@@ -110,304 +73,6 @@ func (s *Store) mapError(err error) error {
 		return registry.ErrNameConflict
 	}
 	return err
-}
-
-// Identity & Enrollment (registry.Registry)
-
-func (s *Store) Register(ctx context.Context, machineID uuid.UUID, name string, secret string, ip string, port int, version string, config map[string]any, mixerID uuid.UUID) (*registry.Rack, error) {
-	return s.RegisterEntity(ctx, 4, machineID, name, secret, ip, port, version, config, nil, mixerID)
-}
-
-func (s *Store) RegisterEntity(ctx context.Context, typeID uint8, machineID uuid.UUID, name string, secret string, ip string, port int, version string, config map[string]any, attrs map[string]any, mixerID uuid.UUID) (*registry.Rack, error) {
-	configJSON, _ := json.Marshal(config)
-	attrsJSON, _ := json.Marshal(attrs)
-	now := time.Now().UTC()
-
-	s.log.Info("Registering Entity", "type_id", typeID, "machine_id", machineID, "name", name, "ip", ip, "port", port, "version", version)
-
-	s.mu.RLock()
-	autoAdopt := s.autoAdopt
-	s.mu.RUnlock()
-	status := "pending"
-	if autoAdopt {
-		status = "active"
-	}
-	s.log.Debug("RegisterEntity: autoAdopt status", "autoAdopt", autoAdopt, "status", status)
-
-	// Identity Verification Logic (MachineID based)
-	var existingSecret string
-	var existingName string
-	// Explicitly use string comparison for UUID to avoid driver mapping issues in some DuckDB versions
-	err := s.db.QueryRowContext(ctx, "SELECT secret, name FROM registry WHERE machine_id = ? AND type_id = ?", machineID.String(), typeID).Scan(&existingSecret, &existingName)
-	if err != nil && err != sql.ErrNoRows {
-		return nil, s.mapError(err)
-	}
-
-	if err == nil {
-		// Entity exists with THIS MachineID, verify secret. An empty incoming
-		// secret is rejected too, not only a mismatched one: an empty secret
-		// proves nothing, and a row whose stored secret happens to be empty
-		// (a Hello that never set one) must not become a permanent bypass.
-		if !security.SecretsEqual(existingSecret, secret) {
-			return nil, errors.New("identity mismatch: incorrect secret for existing MachineID")
-		}
-		// Update (Preserve approved name from DB, don't overwrite with handshake name)
-		_, err = s.db.ExecContext(ctx, `
-			UPDATE registry SET 
-				ip = ?, 
-				port = ?, 
-				last_seen = ?, 
-				version = ?,
-				config = ?,
-				attributes = ?,
-				update_count = update_count + 1
-			WHERE machine_id = ? AND type_id = ?
-		`, ip, port, now, version, string(configJSON), string(attrsJSON), machineID, typeID)
-	} else {
-		// New MachineID - Check if name is already taken by ANY entity (Global UNIQUE constraint)
-		if name != "" {
-			var conflictSecret string
-			var conflictMachineID uuid.UUID
-			var conflictTypeID uint8
-			errName := s.db.QueryRowContext(ctx, "SELECT secret, machine_id, type_id FROM registry WHERE name = ?", name).Scan(&conflictSecret, &conflictMachineID, &conflictTypeID)
-			if errName == nil {
-				// Name exists. Verify if it's the SAME type and secret matches for adoption.
-				if conflictTypeID == typeID && security.SecretsEqual(conflictSecret, secret) {
-					s.log.Info("Adopting existing name via Secret match", "name", name, "type_id", typeID, "old_machine_id", conflictMachineID, "new_machine_id", machineID)
-					// Update existing record with NEW machineID (Adoption)
-					_, err = s.db.ExecContext(ctx, `
-						UPDATE registry SET 
-							machine_id = ?,
-							ip = ?, 
-							port = ?, 
-							last_seen = ?, 
-							version = ?,
-							config = ?,
-							attributes = ?,
-							update_count = update_count + 1
-						WHERE name = ? AND type_id = ?
-					`, machineID, ip, port, now, version, string(configJSON), string(attrsJSON), name, typeID)
-					if err != nil {
-						return nil, s.mapError(err)
-					}
-					return s.GetEntity(ctx, typeID, machineID)
-				}
-				// No match or no secret, or different type (Global Name Conflict)
-				s.log.Warn("Registration Denied: Global name conflict", "name", name, "requested_type", typeID, "existing_type", conflictTypeID, "existing_machine_id", conflictMachineID)
-				return nil, registry.ErrNameConflict
-			} else if errName != sql.ErrNoRows {
-				return nil, s.mapError(errName)
-			}
-		}
-
-		// Fresh Registration. A MachineID never seen before must present the
-		// bootstrap secret: nothing compared it before this, so any caller who
-		// could reach the enrollment path could self-provision an identity.
-		s.mu.RLock()
-		bootstrapSecret := s.bootstrapSecret
-		s.mu.RUnlock()
-		if !security.SecretsEqual(secret, bootstrapSecret) {
-			s.log.Warn("Registration Denied: bootstrap secret mismatch", "name", name, "machine_id", machineID)
-			return nil, registry.ErrBootstrapSecretMismatch
-		}
-
-		if machineID == uuid.Nil {
-			machineID, _ = uuid.NewV7()
-			s.log.Info("Self-provisioning new MachineID", "name", name, "id", machineID)
-		}
-
-		// Generate v0.4.6 style EntityID (UUID v7 with metadata)
-		eid, _ := uuid.NewV7()
-		copy(eid[9:13], machineID[12:16]) // MachineID hint
-		eid[13] = typeID                  // EntityType
-
-		// The bootstrap secret only gates entry: every zero-config caller
-		// presents the same one, so storing it as this row's own secret would
-		// let a second caller "adopt" the first one's name later just by
-		// knowing the same public default. A freshly generated, unique secret
-		// becomes this identity's actual bearer credential from here on,
-		// returned to the caller in its Passport.
-		issuedSecret, errGen := generateSecret()
-		if errGen != nil {
-			return nil, fmt.Errorf("failed to issue a secret for the new registration: %w", errGen)
-		}
-
-		_, err = s.db.ExecContext(ctx, `
-			INSERT INTO registry (entity_id, type_id, machine_id, name, status, version, ip, port, secret, first_seen, last_seen, config, attributes, mixer_id)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`, eid, typeID, machineID, name, status, version, ip, port, issuedSecret, now, now, string(configJSON), string(attrsJSON), mixerID)
-	}
-
-	if err != nil {
-		return nil, s.mapError(err)
-	}
-	return s.GetEntity(ctx, typeID, machineID)
-}
-
-func (s *Store) Approve(ctx context.Context, id uuid.UUID, newName string) (*registry.Rack, error) {
-	// Check if the entity exists
-	var currentName string
-	err := s.db.QueryRowContext(ctx, "SELECT name FROM registry WHERE machine_id = ? AND type_id = 4", id).Scan(&currentName)
-	if err != nil {
-		return nil, s.mapError(err)
-	}
-
-	// If a new name is provided, check for conflicts with OTHER entities
-	if newName != "" && newName != currentName {
-		var conflict bool
-		_ = s.db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM registry WHERE name = ? AND machine_id != ?)", newName, id).Scan(&conflict)
-		if conflict {
-			return nil, registry.ErrNameConflict
-		}
-	} else {
-		newName = currentName // Keep current name if empty
-	}
-
-	res, err := s.db.ExecContext(ctx, `UPDATE registry SET status = 'active', name = ? WHERE machine_id = ? AND type_id = 4`, newName, id)
-	if err != nil {
-		return nil, s.mapError(err)
-	}
-	rows, _ := res.RowsAffected()
-	if rows == 0 {
-		return nil, registry.ErrNotFound
-	}
-	return s.Get(ctx, id)
-}
-
-func (s *Store) List(ctx context.Context, status string) ([]*registry.Rack, error) {
-	query := `
-		SELECT 
-			machine_id, 
-			COALESCE(name, ''), 
-			COALESCE(status, ''), 
-			COALESCE(version, ''), 
-			COALESCE(ip, ''), 
-			COALESCE(port, 0), 
-			COALESCE(secret, ''), 
-			COALESCE(first_seen, '1970-01-01 00:00:00'), 
-			COALESCE(last_seen, '1970-01-01 00:00:00'), 
-			COALESCE(update_count, 0),
-			COALESCE(config, '{}'),
-			COALESCE(stats, '{}')
-		FROM registry WHERE type_id = 4`
-	var args []any
-	if status != "" {
-		query += " AND status = ?"
-		args = append(args, status)
-	}
-	rows, err := s.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, s.mapError(err)
-	}
-	defer func() { _ = rows.Close() }()
-	var racks []*registry.Rack
-	for rows.Next() {
-		var r registry.Rack
-		var configStr, statsStr string
-		if errScan := rows.Scan(&r.MachineID, &r.Name, &r.Status, &r.Version, &r.IP, &r.Port, &r.Secret, &r.FirstSeen, &r.LastSeen, &r.UpdateCount, &configStr, &statsStr); errScan != nil {
-			return nil, errScan
-		}
-		_ = json.Unmarshal([]byte(configStr), &r.Config)
-		_ = json.Unmarshal([]byte(statsStr), &r.Stats)
-		racks = append(racks, &r)
-	}
-	if errRows := rows.Err(); errRows != nil {
-		return nil, errRows
-	}
-	return racks, nil
-}
-
-func (s *Store) Get(ctx context.Context, id uuid.UUID) (*registry.Rack, error) {
-	return s.GetEntity(ctx, 4, id)
-}
-
-func (s *Store) GetEntity(ctx context.Context, typeID uint8, id uuid.UUID) (*registry.Rack, error) {
-	var r registry.Rack
-	var configStr, statsStr string
-	err := s.db.QueryRowContext(ctx, `
-		SELECT 
-			machine_id, 
-			COALESCE(name, ''), 
-			COALESCE(status, ''), 
-			COALESCE(version, ''), 
-			COALESCE(ip, ''), 
-			COALESCE(port, 0), 
-			COALESCE(secret, ''), 
-			COALESCE(first_seen, '1970-01-01 00:00:00'), 
-			COALESCE(last_seen, '1970-01-01 00:00:00'), 
-			COALESCE(update_count, 0),
-			COALESCE(config, '{}'),
-			COALESCE(stats, '{}')
-		FROM registry WHERE machine_id = ? AND type_id = ?
-	`, id, typeID).Scan(&r.MachineID, &r.Name, &r.Status, &r.Version, &r.IP, &r.Port, &r.Secret, &r.FirstSeen, &r.LastSeen, &r.UpdateCount, &configStr, &statsStr)
-	if err != nil {
-		return nil, s.mapError(err)
-	}
-	_ = json.Unmarshal([]byte(configStr), &r.Config)
-	_ = json.Unmarshal([]byte(statsStr), &r.Stats)
-	return &r, nil
-}
-
-func (s *Store) Heartbeat(ctx context.Context, id uuid.UUID, stats map[string]any, config map[string]any) error {
-	return s.HeartbeatEntity(ctx, 4, id, stats, config)
-}
-
-func (s *Store) HeartbeatEntity(ctx context.Context, typeID uint8, id uuid.UUID, stats map[string]any, config map[string]any) error {
-	statsJSON, _ := json.Marshal(stats)
-	configJSON, _ := json.Marshal(config)
-	res, err := s.db.ExecContext(ctx, `UPDATE registry SET last_seen = ?, stats = ?, config = ? WHERE machine_id = ? AND type_id = ?`, time.Now().UTC(), string(statsJSON), string(configJSON), id, typeID)
-	if err != nil {
-		return s.mapError(err)
-	}
-	rows, _ := res.RowsAffected()
-	if rows == 0 {
-		return registry.ErrNotFound
-	}
-	return nil
-}
-
-func (s *Store) Remove(ctx context.Context, id uuid.UUID) error {
-	return s.RemoveEntity(ctx, 4, id)
-}
-
-func (s *Store) RemoveByName(ctx context.Context, name string) error {
-	res, err := s.db.ExecContext(ctx, "DELETE FROM registry WHERE name = ? AND type_id = 4", name)
-	if err != nil {
-		return s.mapError(err)
-	}
-	rows, _ := res.RowsAffected()
-	if rows == 0 {
-		return registry.ErrNotFound
-	}
-	return nil
-}
-
-func (s *Store) RemoveEntity(ctx context.Context, typeID uint8, id uuid.UUID) error {
-	res, err := s.db.ExecContext(ctx, "DELETE FROM registry WHERE machine_id = ? AND type_id = ?", id, typeID)
-	if err != nil {
-		return s.mapError(err)
-	}
-	rows, _ := res.RowsAffected()
-	if rows == 0 {
-		return registry.ErrNotFound
-	}
-	return nil
-}
-
-func (s *Store) UpdateStatus(ctx context.Context, id uuid.UUID, status string) error {
-	return s.UpdateStatusEntity(ctx, 4, id, status)
-}
-
-func (s *Store) UpdateStatusEntity(ctx context.Context, typeID uint8, id uuid.UUID, status string) error {
-	res, err := s.db.ExecContext(ctx, "UPDATE registry SET status = ? WHERE machine_id = ? AND type_id = ?", status, id, typeID)
-	if err != nil {
-		return s.mapError(err)
-	}
-	rows, _ := res.RowsAffected()
-	if rows == 0 {
-		return registry.ErrNotFound
-	}
-	return nil
 }
 
 // Telemetry Queries (registry.Registry)
@@ -462,83 +127,6 @@ func (s *Store) QueryMetrics(ctx context.Context, q registry.MetricQuery) ([]reg
 }
 
 // Mixed Registry Operations (Legacy/Internal)
-
-func (s *Store) RegisterMixer(ctx context.Context, mid uuid.UUID, name string, eid uuid.UUID, addr, version string) error {
-	s.log.Info("Registering Mixer Component", "mid", mid, "name", name, "eid", eid, "addr", addr, "version", version)
-	now := time.Now()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	if _, errDel := tx.ExecContext(ctx, "DELETE FROM registry WHERE entity_id = ? AND type_id = 2", eid); errDel != nil {
-		return errDel
-	}
-	attrs, _ := json.Marshal(map[string]any{"api_address": addr})
-	stats, _ := json.Marshal(map[string]any{"goroutines": runtime.NumGoroutine(), "cpu_cores": runtime.NumCPU()})
-	_, errReg := tx.ExecContext(ctx, `
-		INSERT INTO registry (entity_id, type_id, machine_id, name, status, version, first_seen, last_seen, stats, config, attributes)
-		VALUES (?, 2, ?, ?, 'active', ?, ?, ?, ?, ?, ?)
-	`, eid, mid, name, version, now, now, string(stats), "{}", string(attrs))
-	if errReg != nil {
-		return s.mapError(errReg)
-	}
-	return tx.Commit()
-}
-
-func (s *Store) RegisterSnake(ctx context.Context, name string, eid uuid.UUID, version string, fromRack uuid.UUID, toMixer uuid.UUID, rackIP string, rackPort int, mixerIP string, mixerPort int, machineID uuid.UUID) error {
-	s.log.Info("Registering Snake Transport", "name", name, "eid", eid, "from_rack", fromRack, "to_mixer", toMixer, "machine_id", machineID)
-	now := time.Now()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	if _, errDel := tx.ExecContext(ctx, "DELETE FROM registry WHERE entity_id = ? AND type_id = 9", eid); errDel != nil {
-		return errDel
-	}
-	attrs, _ := json.Marshal(map[string]any{
-		"rack": fromRack.String(), "mixer": toMixer.String(), "rack_ip": rackIP, "rack_port": rackPort, "mixer_ip": mixerIP, "mixer_port": mixerPort,
-	})
-	_, errReg := tx.ExecContext(ctx, `
-		INSERT INTO registry (entity_id, type_id, machine_id, mixer_id, name, status, version, first_seen, last_seen, stats, attributes)
-		VALUES (?, 9, ?, ?, ?, 'active', ?, ?, ?, ?, ?)
-	`, eid, machineID, toMixer, name, version, now, now, "{}", string(attrs))
-	if errReg != nil {
-		return s.mapError(errReg)
-	}
-	return tx.Commit()
-}
-
-func (s *Store) UpdateSnakeStats(ctx context.Context, eid uuid.UUID, stats map[string]any) error {
-	statsJSON, _ := json.Marshal(stats)
-	res, err := s.db.ExecContext(ctx, `UPDATE registry SET stats = ?, last_seen = ? WHERE entity_id = ? AND type_id = 9`, string(statsJSON), time.Now(), eid)
-	if err != nil {
-		return s.mapError(err)
-	}
-	rows, _ := res.RowsAffected()
-	if rows == 0 {
-		return fmt.Errorf("snake not found: %s", eid)
-	}
-	return nil
-}
-
-func (s *Store) ClearSnakes(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, "DELETE FROM registry WHERE type_id = 9")
-	return err
-}
-
-func (s *Store) RemoveSnake(ctx context.Context, eid uuid.UUID) error {
-	res, err := s.db.ExecContext(ctx, "DELETE FROM registry WHERE entity_id = ? AND type_id = 9", eid)
-	if err != nil {
-		return s.mapError(err)
-	}
-	rows, _ := res.RowsAffected()
-	if rows == 0 {
-		return fmt.Errorf("snake not found: %s", eid)
-	}
-	return nil
-}
 
 func (s *Store) GetEntityIDByName(ctx context.Context, name string) (uuid.UUID, error) {
 	var eid uuid.UUID
@@ -637,22 +225,6 @@ func (s *Store) RegisterPort(ctx context.Context, eid uuid.UUID, name string, po
 		return s.mapError(errReg)
 	}
 	return tx.Commit()
-}
-
-func (s *Store) ActivateRack(ctx context.Context, rackName string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE registry SET status = 'active', last_seen = ? WHERE name = ? AND type_id = 4 AND status = 'pending'`, time.Now(), rackName)
-	return s.mapError(err)
-}
-
-// GetRackByName only matches an active Rack. Scenario registration (its one
-// caller, via waitForRack) must never see a pending Rack as found: doing so
-// used to let scenario import promote it to active as a side effect, well
-// outside the approval flow. A pending Rack now reads exactly like a Rack
-// that has not enrolled yet, and the caller's own retry loop already handles
-// that by waiting up to its timeout.
-func (s *Store) GetRackByName(ctx context.Context, rackName string) (machineID uuid.UUID, err error) {
-	err = s.db.QueryRowContext(ctx, `SELECT machine_id FROM registry WHERE name = ? AND type_id = 4 AND status = 'active'`, rackName).Scan(&machineID)
-	return machineID, s.mapError(err)
 }
 
 func (s *Store) ClearScenarioEntities(ctx context.Context) error {

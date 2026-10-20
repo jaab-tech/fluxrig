@@ -1,0 +1,26 @@
+[logging]
+level = "debug"
+filename = "logs/mixer.log"
+
+[api]
+port = 8112
+
+[snake]
+port = 4311
+url = "nats://localhost:4311"
+
+[store]
+dir = "./data"
+database_file = "flux.duckdb"
+cluster_key_file = "cluster.key"
+
+[observability]
+enabled = true
+tier = "embedded"
+
+[observability.embedded]
+flush_interval = "2s"
+retention_days = 30
+
+[enrollment]
+auto_adopt = true

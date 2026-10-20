@@ -44,6 +44,12 @@ type Metrics struct {
 	// Bus Metrics (aggregate)
 	BusPublishCount  metric.Int64Counter
 	BusPublishErrors metric.Int64Counter
+
+	// Outbox Metrics (offline store-and-forward)
+	OutboxParked  metric.Int64Counter
+	OutboxDrained metric.Int64Counter
+	OutboxDropped metric.Int64Counter
+	OutboxDepth   metric.Int64UpDownCounter
 }
 
 // NewMetrics initializes all metrics using the provided meter.
@@ -133,6 +139,20 @@ func NewMetrics(meter metric.Meter) (*Metrics, error) {
 	}
 	if m.BusPublishErrors, err = meter.Int64Counter("flux.bus.publish_errors", metric.WithDescription("Total bus publish errors")); err != nil {
 		return nil, fmt.Errorf("failed to create bus.publish_errors: %w", err)
+	}
+
+	// 6. Outbox Metrics (offline store-and-forward)
+	if m.OutboxParked, err = meter.Int64Counter("flux.outbox.parked", metric.WithDescription("Bus-bound emissions parked while the bus is down")); err != nil {
+		return nil, fmt.Errorf("failed to create outbox.parked: %w", err)
+	}
+	if m.OutboxDrained, err = meter.Int64Counter("flux.outbox.drained", metric.WithDescription("Parked emissions forwarded after the bus returned")); err != nil {
+		return nil, fmt.Errorf("failed to create outbox.drained: %w", err)
+	}
+	if m.OutboxDropped, err = meter.Int64Counter("flux.outbox.dropped", metric.WithDescription("Parked emissions dropped: outbox full, or failed every drain attempt")); err != nil {
+		return nil, fmt.Errorf("failed to create outbox.dropped: %w", err)
+	}
+	if m.OutboxDepth, err = meter.Int64UpDownCounter("flux.outbox.depth", metric.WithDescription("Emissions currently parked in the outbox")); err != nil {
+		return nil, fmt.Errorf("failed to create outbox.depth: %w", err)
 	}
 
 	return m, nil

@@ -7,7 +7,7 @@ import "github.com/jaab-tech/fluxrig/pkg/sdk"
 
 // Manifest describes the Wasm logic gear: runs a sandboxed WebAssembly module
 // as a message transform. The module's own parameters are opaque to this
-// schema (ADR 0045 polymorphic-config open question).
+// schema (an open question for polymorphic configs).
 func (g *Gear) Manifest() sdk.Manifest {
 	return sdk.Manifest{
 		Type:     "wasm",

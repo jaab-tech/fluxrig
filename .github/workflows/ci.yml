@@ -22,10 +22,28 @@ on:
   pull_request:
     branches: ['main*']
 
+# One run per branch at a time. A push to a branch with an open PR fires both
+# the push and the pull_request event; without this the single runner runs
+# every commit twice, and a superseded commit keeps its place in the queue.
+# Both events share a group keyed on the branch, so the newer run cancels the
+# older one. Trunk runs are never cancelled: each merge keeps its own record.
+concurrency:
+  group: ci-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: ${{ !startsWith(github.ref_name, 'main') }}
+
 jobs:
   lint:
     runs-on: [self-hosted, oci-int]
     steps:
+      # The self-hosted runner keeps its workspace between jobs. A cached .git
+      # that lacks an object fails every checkout with "missing blob object"
+      # until someone deletes it, so a cache that fails its own check goes.
+      - name: Drop a corrupt cached checkout
+        run: |
+          if [ -d .git ] && ! git -c safe.directory="$PWD" fsck --connectivity-only --no-dangling >/dev/null 2>&1; then
+            echo "The cached checkout is corrupt; removing it."
+            find . -mindepth 1 -delete
+          fi
       - uses: actions/checkout@v7
       - name: Check no compiled binaries are tracked
         run: ./scripts/check_no_binaries.sh
@@ -50,6 +68,15 @@ jobs:
   test:
     runs-on: [self-hosted, oci-int]
     steps:
+      # The self-hosted runner keeps its workspace between jobs. A cached .git
+      # that lacks an object fails every checkout with "missing blob object"
+      # until someone deletes it, so a cache that fails its own check goes.
+      - name: Drop a corrupt cached checkout
+        run: |
+          if [ -d .git ] && ! git -c safe.directory="$PWD" fsck --connectivity-only --no-dangling >/dev/null 2>&1; then
+            echo "The cached checkout is corrupt; removing it."
+            find . -mindepth 1 -delete
+          fi
       - uses: actions/checkout@v7
       - name: Set up Go
         uses: actions/setup-go@v7
@@ -69,6 +96,15 @@ jobs:
   build:
     runs-on: [self-hosted, oci-int]
     steps:
+      # The self-hosted runner keeps its workspace between jobs. A cached .git
+      # that lacks an object fails every checkout with "missing blob object"
+      # until someone deletes it, so a cache that fails its own check goes.
+      - name: Drop a corrupt cached checkout
+        run: |
+          if [ -d .git ] && ! git -c safe.directory="$PWD" fsck --connectivity-only --no-dangling >/dev/null 2>&1; then
+            echo "The cached checkout is corrupt; removing it."
+            find . -mindepth 1 -delete
+          fi
       - uses: actions/checkout@v7
       - name: Set up Go
         uses: actions/setup-go@v7
@@ -83,3 +119,51 @@ jobs:
       # No artifact upload: nothing consumes the binaries (releases are built
       # locally via `make publish`), and storing ~75 MB per push exhausted the
       # Actions storage quota. The build step itself is the CI signal.
+
+  # The suite that proves the offline rejoin end to end. Robot Framework suites
+  # (make test-robot-ci) used to run here too, but they are heavier,
+  # timing-sensitive integration tests -- exactly the profile that gets flaky
+  # under concurrent load on a shared runner. Robot stays valuable for local
+  # and pre-release validation (`make test-robot-ci`, `make test-robot`); it
+  # just does not gate a merge here anymore. The full shell regression
+  # (test/e2e) and the hermetic Robot subset run nightly, and the full Robot
+  # set gates a release.
+  integration:
+    runs-on: [self-hosted, oci-int]
+    steps:
+      # The self-hosted runner keeps its workspace between jobs. A cached .git
+      # that lacks an object fails every checkout with "missing blob object"
+      # until someone deletes it, so a cache that fails its own check goes.
+      - name: Drop a corrupt cached checkout
+        run: |
+          if [ -d .git ] && ! git -c safe.directory="$PWD" fsck --connectivity-only --no-dangling >/dev/null 2>&1; then
+            echo "The cached checkout is corrupt; removing it."
+            find . -mindepth 1 -delete
+          fi
+      - uses: actions/checkout@v7
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.26"
+          cache: true
+      # Direct go build, not `make build`: the Makefile's build target also
+      # regenerates the OpenAPI spec, which needs swag. The e2e suite below
+      # only needs the binaries, so it takes the same swag-free path the
+      # `build` job above already uses instead of installing a prerequisite
+      # this job has no other use for.
+      - name: Build binaries
+        run: |
+          mkdir -p bin
+          go build -v -o bin/fluxrig ./cmd/fluxrig
+          go build -v -o bin/fluxrig-mixer ./cmd/fluxrig-mixer
+          go build -v -o bin/iso8583-tool ./cmd/iso8583-tool
+      # The e2e harness waits for ports and clears them with lsof
+      # (test/e2e/utils/e2e_utils.sh wait_for_port, and most segments). The
+      # runner does not ship it. Guarded, so it costs nothing once the runner
+      # image carries it.
+      - name: Ensure lsof
+        run: command -v lsof || (apt-get update && apt-get install -y lsof)
+      - name: Offline e2e smoke segment
+        run: |
+          export FLUXRIG_E2E_SKIP_BUILD=1
+          bash test/e2e/segments/offline/run.sh

@@ -1,0 +1,55 @@
+name: PR requires an issue
+
+# A pull request with no linked issue is closed and redirected to an issue.
+# This check makes the rule visible on the pull request. Branch protection
+# decides whether it blocks the merge.
+#
+# `pull_request_target`, so the check runs from the base branch's copy of this
+# file. Under `pull_request` it would run from the pull request's merge commit,
+# and a pull request could edit this file to switch its own check off. The job
+# never checks out the contributor's code: it reads the pull request body and
+# base branch from the event, through environment variables only, and its token
+# is read-only.
+
+on:
+  pull_request_target:
+    # 'edited' also fires when the base branch changes, so a retarget re-runs it.
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  issue-link:
+    name: issue link
+    runs-on: ubuntu-latest
+    # Community pull requests come from forks. Maintainers and dependency bots
+    # open branches in this repository, and they do not need an issue for
+    # every branch. The author association is not used: the event reports a
+    # member whose organization membership is private as a contributor.
+    if: >
+      github.event.pull_request.head.repo.full_name != github.repository &&
+      github.actor != 'dependabot[bot]' &&
+      github.actor != 'renovate[bot]'
+    steps:
+      - name: Check the target branch
+        env:
+          BASE: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          if [ "$BASE" != "dev" ]; then
+            echo "::error::Community pull requests target 'dev', not '$BASE'. Public 'main' is rebuilt at each release. Change the base branch to 'dev'."
+            exit 1
+          fi
+      - name: Check the pull request body for an issue reference
+        env:
+          BODY: ${{ github.event.pull_request.body }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if printf '%s' "$BODY" | grep -Eq "#[0-9]+|https://github\.com/${REPO}/(issues|pull)/[0-9]+"; then
+            echo "The pull request references an issue."
+            exit 0
+          fi
+          echo "::error::This pull request does not reference an issue. Open an issue first, then put 'Closes #<number>' in the description."
+          exit 1

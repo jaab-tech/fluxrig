@@ -140,7 +140,7 @@ func TestEnrollmentController_HandleHeartbeat(t *testing.T) {
 	machineID := uuid.New()
 	mockReg := &MockRegistry{
 		GetFunc: func(ctx context.Context, id uuid.UUID) (*registry.Rack, error) {
-			return &registry.Rack{MachineID: id, Name: "test-rack", Status: "active", Secret: "shared-secret"}, nil
+			return &registry.Rack{MachineID: id, Name: "test-rack", Status: "active", SecretHash: registry.HashSecret("shared-secret")}, nil
 		},
 	}
 	mockPub := &MockPublisher{}
@@ -207,7 +207,7 @@ func TestEnrollmentController_HandleHeartbeat_WrongSecretRejected(t *testing.T) 
 	heartbeatCalled := false
 	mockReg := &MockRegistry{
 		GetFunc: func(ctx context.Context, id uuid.UUID) (*registry.Rack, error) {
-			return &registry.Rack{MachineID: id, Name: "test-rack", Status: "active", Secret: "real-secret"}, nil
+			return &registry.Rack{MachineID: id, Name: "test-rack", Status: "active", SecretHash: registry.HashSecret("real-secret")}, nil
 		},
 		HeartbeatFunc: func(ctx context.Context, id uuid.UUID, stats map[string]any) error {
 			heartbeatCalled = true

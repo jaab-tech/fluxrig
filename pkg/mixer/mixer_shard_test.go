@@ -57,14 +57,29 @@ func TestRun_ErrorPaths(t *testing.T) {
 		}
 		app := NewApp(cfg, "", nil)
 
-		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		// The key is generated after the store migrates, and a migration under
+		// -race on a loaded machine can outlast any fixed run budget. Poll for the
+		// key, then stop the Mixer.
+		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-
-		_ = app.Run(ctx)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			_ = app.Run(ctx)
+		}()
 
 		keyPath := filepath.Join(subDir, "generated.key")
-		_, statErr := os.Stat(keyPath)
-		assert.NoError(t, statErr, "Cluster key should have been auto-generated")
+		assert.Eventually(t, func() bool {
+			_, statErr := os.Stat(keyPath)
+			return statErr == nil
+		}, 30*time.Second, 20*time.Millisecond, "Cluster key should have been auto-generated")
+
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(30 * time.Second):
+			t.Fatal("Mixer did not stop after its context was cancelled")
+		}
 	})
 
 	t.Run("StoreInitFailure", func(t *testing.T) {

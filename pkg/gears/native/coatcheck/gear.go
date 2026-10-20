@@ -298,3 +298,30 @@ func describeValue(v any) string {
 		return fmt.Sprintf("%T", v)
 	}
 }
+
+// resolveTTL returns the effective TTL for one entry: the message's
+// MetaCoatCheckTTL override when it parses, else the gear default, capped at
+// max. Both the store (which sets the KV entry's own storage TTL) and the
+// daemon (which sets the timer that emits the timeout) call it, so the expiry
+// they act on cannot disagree.
+//
+// A non-positive result means "no expiry from this helper": the caller decides
+// what that means. The store passes it through as the bucket TTL; the daemon's
+// timer already treats it as its own concern.
+func (g *CoatCheckGear) resolveTTL(msg *fluxmsg.FluxMsg, defaultTTL, maxTTL time.Duration) time.Duration {
+	ttl := defaultTTL
+	if msg != nil {
+		if val, ok := msg.Metadata[fluxmsg.MetaCoatCheckTTL]; ok {
+			if parsed, err := time.ParseDuration(val); err == nil {
+				ttl = parsed
+			} else {
+				g.ctx.Logger().Warn("ttl override parse failed", "val", val, "error", err)
+			}
+		}
+	}
+	if maxTTL > 0 && ttl > maxTTL {
+		g.ctx.Logger().Warn("ttl capped by safety limit", "requested", ttl, "limit", maxTTL)
+		ttl = maxTTL
+	}
+	return ttl
+}

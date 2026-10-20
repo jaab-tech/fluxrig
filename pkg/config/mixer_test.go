@@ -41,6 +41,53 @@ func TestLoadMixer_Defaults(t *testing.T) {
 	if cfg.Snake.KVTTL != "0s" {
 		t.Errorf("Default KVTTL mismatch: got %s", cfg.Snake.KVTTL)
 	}
+	if cfg.Observability.Embedded.RetentionDays != 30 {
+		t.Errorf("Default RetentionDays mismatch: got %d", cfg.Observability.Embedded.RetentionDays)
+	}
+	if cfg.Observability.Embedded.Rotation.CheckInterval != "1h" {
+		t.Errorf("Default Rotation.CheckInterval mismatch: got %s", cfg.Observability.Embedded.Rotation.CheckInterval)
+	}
+	if cfg.Observability.Embedded.Rotation.MaxAgeDays != 30 {
+		t.Errorf("Default Rotation.MaxAgeDays mismatch: got %d", cfg.Observability.Embedded.Rotation.MaxAgeDays)
+	}
+}
+
+// The retention sweep reads both retention_days and rotation.max_age_days, and
+// the rotation check interval. This pins that a TOML file populates all three,
+// because a key that parses but has no field is the defect class this project
+// keeps meeting.
+func TestLoadMixer_RetentionKeys(t *testing.T) {
+	content := `
+[observability.embedded]
+retention_days = 7
+
+[observability.embedded.rotation]
+check_interval = "15m"
+max_age_days = 45
+`
+	tmpfile, err := os.CreateTemp("", "mixer_retention.*.toml")
+	if err != nil {
+		t.Fatalf("Failed to create temp file: %v", err)
+	}
+	defer func() { _ = os.Remove(tmpfile.Name()) }()
+	if _, werr := tmpfile.WriteString(content); werr != nil {
+		t.Fatalf("Failed to write temp file: %v", werr)
+	}
+	_ = tmpfile.Close()
+
+	cfg, err := LoadMixer(tmpfile.Name())
+	if err != nil {
+		t.Fatalf("Failed to load config: %v", err)
+	}
+	if cfg.Observability.Embedded.RetentionDays != 7 {
+		t.Errorf("RetentionDays mismatch: got %d", cfg.Observability.Embedded.RetentionDays)
+	}
+	if cfg.Observability.Embedded.Rotation.CheckInterval != "15m" {
+		t.Errorf("Rotation.CheckInterval mismatch: got %s", cfg.Observability.Embedded.Rotation.CheckInterval)
+	}
+	if cfg.Observability.Embedded.Rotation.MaxAgeDays != 45 {
+		t.Errorf("Rotation.MaxAgeDays mismatch: got %d", cfg.Observability.Embedded.Rotation.MaxAgeDays)
+	}
 }
 
 // Before this fix, snake.tls_ca_file and snake.tls_verify had no field on

@@ -8,8 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -22,7 +20,7 @@ import (
 	"github.com/jaab-tech/fluxrig/pkg/idgen"
 	"github.com/jaab-tech/fluxrig/pkg/manager"
 	"github.com/jaab-tech/fluxrig/pkg/registry"
-	"github.com/jaab-tech/fluxrig/pkg/store/duckdb"
+	"github.com/jaab-tech/fluxrig/pkg/translation"
 )
 
 // ScenarioPublisher defines the interface for publishing scenarios to racks.
@@ -64,20 +62,69 @@ type ScenarioManager interface {
 	GetActiveScenario() *registry.Scenario
 }
 
+// TopologyStore keeps the rows derived from the active scenario (the
+// scenario entity, its gears, ports and wires). They are local to each
+// Mixer and rebuilt from the scenario, not shared.
+type TopologyStore interface {
+	ClearScenarioEntities(ctx context.Context) error
+	RegisterScenario(ctx context.Context, eid uuid.UUID, name, version string, gearCount, wireCount int, mixerID uuid.UUID) error
+	RegisterGear(ctx context.Context, eid uuid.UUID, name, gearType, mode, bind, connect string, scenarioID, machineID uuid.UUID, ports map[string]uuid.UUID, mixerID uuid.UUID) error
+	RegisterPort(ctx context.Context, eid uuid.UUID, name string, portType uint16, gearID, scenarioID, machineID, mixerID uuid.UUID) error
+	RegisterWire(ctx context.Context, eid uuid.UUID, fromName, toName string, fromID, toID, scenarioID, machineID, mixerID uuid.UUID) error
+	GetEntityIDByName(ctx context.Context, name string) (uuid.UUID, error)
+}
+
+// RackDirectory answers which Racks exist and are active.
+type RackDirectory interface {
+	List(ctx context.Context, status string) ([]*registry.Rack, error)
+	GetRackByName(ctx context.Context, name string) (uuid.UUID, error)
+}
+
+// ScenarioRepository keeps scenario files and the active-scenario pointer.
+type ScenarioRepository interface {
+	PutScenario(ctx context.Context, name string, content []byte) error
+	GetScenario(ctx context.Context, name string) ([]byte, error)
+	ListScenarios(ctx context.Context) ([]string, error)
+	SetActive(ctx context.Context, active registry.ActiveScenario) error
+	GetActive(ctx context.Context) (registry.ActiveScenario, error)
+}
+
 // ScenarioController manages the lifecycle of the Active Scenario.
 type ScenarioController struct {
-	log         *slog.Logger
-	dataPath    string // Path to the data directory (e.g. ./data)
-	repoPath    string // Path to the scenarios git repository (dataPath/scenarios)
-	store       *duckdb.Store
-	idGen       *idgen.IDGenerator
-	bus         ScenarioPublisher // For pushing scenarios to racks
-	mu          sync.Mutex
-	active      *registry.Scenario // Currently active scenario
-	repoReady   bool               // Whether the scenarios repo has been initialized
+	log    *slog.Logger
+	topo   TopologyStore
+	racks  RackDirectory
+	repo   ScenarioRepository
+	idGen  *idgen.IDGenerator
+	bus    ScenarioPublisher // For pushing scenarios to racks
+	mu     sync.Mutex
+	active *registry.Scenario // Currently active scenario
+	// activeYAML is the active scenario exactly as it was registered and
+	// pushed. Every push sends these bytes and never re-encodes the struct:
+	// YAML does not round-trip every value (a "\n" delimiter comes back
+	// empty), and a Rack keeps its gears only when a push matches its copy
+	// byte for byte.
+	activeYAML  []byte
 	mixerID     uuid.UUID
 	waitTimeout time.Duration
 	specs       manager.Manager // resolves the spec artefacts a scenario names
+
+	// deliveryMu guards the delivery record. It is separate from mu, which
+	// Activate holds for the whole push: PushActiveToRackSince consults the
+	// record from the enrollment path without waiting on an activation.
+	deliveryMu sync.Mutex
+	// activation counts activations. delivered records, per Rack, the
+	// activation it last received and when, so the push that follows an
+	// enrollment does not send a Rack the scenario that the activation has
+	// just sent it: every push restarts the Rack's gears.
+	activation uint64
+	delivered  map[string]delivery
+}
+
+// delivery is one push of the active scenario to one Rack.
+type delivery struct {
+	activation uint64
+	at         time.Time
 }
 
 // WithSpecStore gives the controller the store it resolves spec references
@@ -89,13 +136,14 @@ func (c *ScenarioController) WithSpecStore(m manager.Manager) *ScenarioControlle
 	return c
 }
 
-func NewScenarioController(log *slog.Logger, dataPath string, store *duckdb.Store, ig *idgen.IDGenerator, mixerID uuid.UUID, waitTimeout time.Duration) *ScenarioController {
-	repoPath := filepath.Join(dataPath, "scenarios")
+// NewScenarioController builds the controller. topo and racks may be nil in
+// a test that exercises neither; repo is required.
+func NewScenarioController(log *slog.Logger, topo TopologyStore, racks RackDirectory, repo ScenarioRepository, ig *idgen.IDGenerator, mixerID uuid.UUID, waitTimeout time.Duration) *ScenarioController {
 	return &ScenarioController{
 		log:         log.With("flux.type", "SCENARIO", "flux.name", "scenario-ctrl"),
-		dataPath:    dataPath,
-		repoPath:    repoPath,
-		store:       store,
+		topo:        topo,
+		racks:       racks,
+		repo:        repo,
 		idGen:       ig,
 		mixerID:     mixerID,
 		waitTimeout: waitTimeout,
@@ -158,22 +206,15 @@ func (c *ScenarioController) Import(ctx context.Context, content []byte, dryRun 
 		return "", nil
 	}
 
-	// 3. Ensure scenarios git repo exists
-	if err := c.ensureScenariosRepo(); err != nil {
-		c.log.Warn("failed to ensure scenarios repo", "error", err)
-	}
-
-	// 4. Persist to Disk & Git Commit
-	// Save scenario by name: data/scenarios/{name}.yaml
+	// 3. Persist in the registry, by name.
 	scenarioName := s.Meta.Name
 	if scenarioName == "" {
 		scenarioName = fmt.Sprintf("scenario-%s", s.Meta.Version)
 	}
 	safeName := sanitizeName(scenarioName)
 
-	scenarioFile := filepath.Join(c.repoPath, safeName+".yaml")
-	if err := os.WriteFile(scenarioFile, content, 0600); err != nil {
-		return safeName, fmt.Errorf("failed to write scenario file: %w", err)
+	if err := c.repo.PutScenario(ctx, safeName, content); err != nil {
+		return safeName, fmt.Errorf("failed to store scenario: %w", err)
 	}
 
 	c.log.Info("scenario imported", "name", safeName, "version", s.Meta.Version)
@@ -185,13 +226,13 @@ func (c *ScenarioController) Import(ctx context.Context, content []byte, dryRun 
 // individual Rack) is refused with ErrUnresolvableGroupTarget: see its doc
 // comment for why groups cannot be resolved here yet.
 func (c *ScenarioController) validateDeployTargets(ctx context.Context, s *registry.Scenario) error {
-	if c.store == nil {
-		c.log.Warn("validateDeployTargets: no store available, skipping validation")
-		return nil // No store available, skip validation
+	if c.racks == nil {
+		c.log.Warn("validateDeployTargets: no rack directory, skipping validation")
+		return nil
 	}
 
 	// Get all active racks from the registry
-	activeRacks, err := c.store.List(ctx, "active")
+	activeRacks, err := c.racks.List(ctx, "active")
 	if err != nil {
 		return fmt.Errorf("failed to list active racks: %w", err)
 	}
@@ -235,22 +276,36 @@ func (c *ScenarioController) validateDeployTargets(ctx context.Context, s *regis
 // Use this to switch between stored scenarios.
 // PushActiveToRack pushes the currently active scenario to a specific rack.
 func (c *ScenarioController) PushActiveToRack(ctx context.Context, rackName string) error {
+	return c.PushActiveToRackSince(ctx, rackName, time.Time{})
+}
+
+// PushActiveToRackSince pushes the active scenario to a Rack that enrolled at
+// since, unless the Rack has already received this activation after since:
+// an activation that ran between the enrollment and this push reached it
+// already, and a second push would restart its gears for nothing. A zero
+// since always pushes.
+func (c *ScenarioController) PushActiveToRackSince(ctx context.Context, rackName string, since time.Time) error {
 	c.mu.Lock()
-	active := c.active
+	active, content := c.active, c.activeYAML
 	c.mu.Unlock()
 
 	if active == nil {
 		return nil // No active scenario to push
 	}
 
-	if c.bus == nil {
-		return fmt.Errorf("scenario bus not initialized")
+	if !since.IsZero() {
+		c.deliveryMu.Lock()
+		d, ok := c.delivered[rackName]
+		current := c.activation
+		c.deliveryMu.Unlock()
+		if ok && d.activation == current && d.at.After(since) {
+			c.log.Info("rack already has the active scenario from its activation; not pushing it again", "rack", rackName)
+			return nil
+		}
 	}
 
-	// We need the original content or we re-marshal the active structure
-	content, err := yaml.Marshal(active)
-	if err != nil {
-		return fmt.Errorf("failed to marshal active scenario: %w", err)
+	if c.bus == nil {
+		return fmt.Errorf("scenario bus not initialized")
 	}
 
 	return c.pushScenarioToRacks(ctx, active, content, rackName)
@@ -261,14 +316,14 @@ func (c *ScenarioController) Activate(ctx context.Context, name string) error {
 	defer c.mu.Unlock()
 
 	safeName := sanitizeName(name)
-	scenarioFile := filepath.Join(c.repoPath, safeName+".yaml")
 
-	// 1. Load scenario from disk
-	// Clean the path to avoid G304
-	scenarioFile = filepath.Clean(scenarioFile)
-	content, err := os.ReadFile(scenarioFile)
-	if err != nil {
+	// 1. Load the scenario from the registry
+	content, errLoad := c.repo.GetScenario(ctx, safeName)
+	if errors.Is(errLoad, registry.ErrNotFound) {
 		return fmt.Errorf("scenario not found: %s", safeName)
+	}
+	if errLoad != nil {
+		return fmt.Errorf("failed to load scenario %s: %w", safeName, errLoad)
 	}
 
 	var s registry.Scenario
@@ -290,27 +345,34 @@ func (c *ScenarioController) Activate(ctx context.Context, name string) error {
 	// declared active - on disk or in memory - while a failure here leaves
 	// that registry half-cleared or never updated: validate the swap by
 	// making it first, then commit, rather than committing and hoping.
-	if c.store != nil && c.idGen != nil {
+	if c.topo != nil && c.idGen != nil {
 		// Clean up existing scenario entities (gears, ports, wires, scenarios) to avoid name conflicts
-		if err := c.store.ClearScenarioEntities(ctx); err != nil {
+		if err := c.topo.ClearScenarioEntities(ctx); err != nil {
 			return fmt.Errorf("failed to clear existing scenario entities: %w", err)
 		}
 
-		if err := c.registerScenarioEntities(ctx, &s); err != nil {
+		if err := c.registerScenarioEntities(ctx, &s, false); err != nil {
 			return fmt.Errorf("failed to register scenario entities: %w", err)
 		}
 	}
 
-	// 3. Update active pointer. The registry above already reflects this
-	// scenario, so committing the pointer here cannot leave the two
-	// disagreeing.
-	activeFile := filepath.Join(c.repoPath, "active")
-	if err := os.WriteFile(activeFile, []byte(safeName), 0600); err != nil {
-		c.log.Warn("failed to write active scenario pointer", "error", err)
+	// 3. Move the active pointer. The topology above already reflects this
+	// scenario. The pointer is what a restarted Mixer reads, so a failure
+	// here is an error: the scenario must not be active in memory only.
+	registered, errEnc := yaml.Marshal(&s)
+	if errEnc != nil {
+		return fmt.Errorf("failed to encode the registered scenario: %w", errEnc)
+	}
+	if err := c.repo.SetActive(ctx, registry.ActiveScenario{Name: safeName, Version: s.Meta.Version, Content: registered}); err != nil {
+		return fmt.Errorf("failed to move the active scenario pointer: %w", err)
 	}
 
 	// 4. Set as active scenario in memory
 	c.active = &s
+	c.activeYAML = registered
+	c.deliveryMu.Lock()
+	c.activation++
+	c.deliveryMu.Unlock()
 
 	// 5. Push scenario to connected racks via NATS. The active pointer, the
 	// in-memory scenario and the registry entities above are already
@@ -320,7 +382,7 @@ func (c *ScenarioController) Activate(ctx context.Context, name string) error {
 	// caller must not be told the activation reached anyone when it did
 	// not, so the error is returned rather than only logged.
 	if c.bus != nil {
-		if err := c.pushScenarioToRacks(ctx, &s, content, ""); err != nil {
+		if err := c.pushScenarioToRacks(ctx, &s, registered, ""); err != nil {
 			c.log.Warn("failed to push scenario to racks", "error", err)
 			return fmt.Errorf("scenario %q is active but was not delivered: %w", safeName, err)
 		}
@@ -330,38 +392,72 @@ func (c *ScenarioController) Activate(ctx context.Context, name string) error {
 	return nil
 }
 
-// List returns all available scenario names in the repository.
-func (c *ScenarioController) List() ([]string, error) {
-	entries, err := os.ReadDir(c.repoPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return []string{}, nil
-		}
-		return nil, err
-	}
-
-	var scenarios []string
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		if strings.HasSuffix(name, ".yaml") && name != "active" {
-			scenarios = append(scenarios, strings.TrimSuffix(name, ".yaml"))
-		}
-	}
-	return scenarios, nil
+// List returns the names of the stored scenarios.
+func (c *ScenarioController) List(ctx context.Context) ([]string, error) {
+	return c.repo.ListScenarios(ctx)
 }
 
-// GetActiveName returns the name of the currently active scenario.
-func (c *ScenarioController) GetActiveName() string {
-	activeFile := filepath.Join(c.repoPath, "active")
-	activeFile = filepath.Clean(activeFile)
-	data, err := os.ReadFile(activeFile)
+// GetActiveName returns the name the active pointer holds, or "" when no
+// scenario was ever activated.
+func (c *ScenarioController) GetActiveName(ctx context.Context) string {
+	active, err := c.repo.GetActive(ctx)
 	if err != nil {
 		return ""
 	}
-	return strings.TrimSpace(string(data))
+	return active.Name
+}
+
+// LoadActive restores the active scenario a previous run left, at startup.
+// It rebuilds the local topology rows and sets the scenario in memory, so the
+// API reports it and a Rack that enrolls later receives it. It pushes nothing:
+// Racks that already run the scenario keep running it undisturbed. A missing
+// pointer is not an error: nothing was ever activated.
+func (c *ScenarioController) LoadActive(ctx context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	active, err := c.repo.GetActive(ctx)
+	if errors.Is(err, registry.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to read the active scenario pointer: %w", err)
+	}
+	name := active.Name
+	// The registered form carries the entity IDs the Racks received, so a
+	// push after the restart is byte-identical to what they run, and a Rack
+	// that resumed its own copy keeps its gears. The imported file is the
+	// fallback for a pointer written without it.
+	content := active.Content
+	fromImport := len(content) == 0
+	if fromImport {
+		if content, err = c.repo.GetScenario(ctx, name); err != nil {
+			return fmt.Errorf("active scenario %s: %w", name, err)
+		}
+	}
+	var s registry.Scenario
+	if err = yaml.Unmarshal(content, &s); err != nil {
+		return fmt.Errorf("active scenario %s: %w", name, err)
+	}
+	if c.topo != nil && c.idGen != nil {
+		if err = c.topo.ClearScenarioEntities(ctx); err != nil {
+			return fmt.Errorf("failed to clear scenario entities: %w", err)
+		}
+		if err = c.registerScenarioEntities(ctx, &s, true); err != nil {
+			return fmt.Errorf("failed to register scenario entities: %w", err)
+		}
+	}
+	if fromImport {
+		// Only the imported file was kept: this is the one case the
+		// registered form has to be encoded here, after registration.
+		if content, err = yaml.Marshal(&s); err != nil {
+			return fmt.Errorf("active scenario %s: %w", name, err)
+		}
+	}
+	c.active = &s
+	c.activeYAML = content
+	c.log.Info("active scenario restored", "name", name, "version", s.Meta.Version)
+	return nil
 }
 
 // sanitizeName makes a caller-supplied name safe wherever this package uses
@@ -391,14 +487,19 @@ func sanitizeName(name string) string {
 
 // registerScenarioEntities persists scenario, gears, and wires to the registry.
 // It also activates any racks defined in the scenario.
-func (c *ScenarioController) registerScenarioEntities(ctx context.Context, s *registry.Scenario) error {
+// registerScenarioEntities writes the topology rows for s. restoring is set
+// when a starting Mixer restores its active scenario: then a Rack is looked
+// up without waiting and a missing one is left unresolved. The rows are a
+// local cache, and waiting would hold up startup before the Mixer can answer
+// the very Hello that would bring that Rack back.
+func (c *ScenarioController) registerScenarioEntities(ctx context.Context, s *registry.Scenario, restoring bool) error {
 	// Register Scenario
 	scenarioEID := c.idGen.NextEntityID(idgen.EntityScenario)
 	scenarioName := s.Meta.Name
 	if scenarioName == "" {
 		scenarioName = fmt.Sprintf("scenario-%s", s.Meta.Version) // Fallback if no name
 	}
-	if err := c.store.RegisterScenario(ctx, scenarioEID, scenarioName, s.Meta.Version, len(s.Gears), len(s.Wires), c.mixerID); err != nil {
+	if err := c.topo.RegisterScenario(ctx, scenarioEID, scenarioName, s.Meta.Version, len(s.Gears), len(s.Wires), c.mixerID); err != nil {
 		return fmt.Errorf("failed to register scenario: %w", err)
 	}
 	c.log.Info("registered scenario", "name", scenarioName, "eid", scenarioEID)
@@ -412,6 +513,15 @@ func (c *ScenarioController) registerScenarioEntities(ctx context.Context, s *re
 	rackMachineIDs := make(map[string]uuid.UUID)
 	for _, rack := range s.Racks {
 		if rack.Name != "" {
+			if restoring {
+				if c.racks == nil {
+					continue
+				}
+				if machineID, err := c.racks.GetRackByName(ctx, rack.Name); err == nil {
+					rackMachineIDs[rack.Name] = machineID
+				}
+				continue
+			}
 			// Get the rack's machine_id with a short retry to handle bootstrap races
 			machineID, err := c.waitForRack(ctx, rack.Name)
 			if err != nil {
@@ -428,10 +538,15 @@ func (c *ScenarioController) registerScenarioEntities(ctx context.Context, s *re
 	for i := range s.Gears {
 		g := &s.Gears[i] // Pointer to modify
 
-		// Idempotent Gear Registration: Reuse ID if name already exists
-		gearEID, err := c.store.GetEntityIDByName(ctx, g.Name)
-		if err != nil {
-			gearEID = c.idGen.NextEntityID(idgen.EntityGear)
+		// Idempotent Gear Registration: keep the ID the scenario already
+		// carries (a restored active scenario), else reuse the one registered
+		// under this name, else mint one.
+		gearEID := g.ID
+		if gearEID == uuid.Nil {
+			var errID error
+			if gearEID, errID = c.topo.GetEntityIDByName(ctx, g.Name); errID != nil {
+				gearEID = c.idGen.NextEntityID(idgen.EntityGear)
+			}
 		}
 		g.ID = gearEID // Assign ID to spec
 
@@ -461,23 +576,29 @@ func (c *ScenarioController) registerScenarioEntities(ctx context.Context, s *re
 		// Phase 3: Register Implicit Ports (In/Out)
 		// Input Port
 		inPortName := g.Name + ".in"
-		inPortID, err := c.store.GetEntityIDByName(ctx, inPortName)
-		if err != nil {
-			inPortID = c.idGen.NextEntityID(idgen.EntityPortInput)
+		inPortID := g.Ports["in"]
+		if inPortID == uuid.Nil {
+			var errID error
+			if inPortID, errID = c.topo.GetEntityIDByName(ctx, inPortName); errID != nil {
+				inPortID = c.idGen.NextEntityID(idgen.EntityPortInput)
+			}
 		}
 
-		if errReg := c.store.RegisterPort(ctx, inPortID, inPortName, uint16(idgen.EntityPortInput), gearEID, scenarioEID, machineID, c.mixerID); errReg != nil {
+		if errReg := c.topo.RegisterPort(ctx, inPortID, inPortName, uint16(idgen.EntityPortInput), gearEID, scenarioEID, machineID, c.mixerID); errReg != nil {
 			c.log.Warn("failed to register input port", "name", inPortName, "error", errReg)
 		}
 
 		// Output Port
 		outPortName := g.Name + ".out"
-		outPortID, err := c.store.GetEntityIDByName(ctx, outPortName)
-		if err != nil {
-			outPortID = c.idGen.NextEntityID(idgen.EntityPortOutput)
+		outPortID := g.Ports["out"]
+		if outPortID == uuid.Nil {
+			var errID error
+			if outPortID, errID = c.topo.GetEntityIDByName(ctx, outPortName); errID != nil {
+				outPortID = c.idGen.NextEntityID(idgen.EntityPortOutput)
+			}
 		}
 
-		if err := c.store.RegisterPort(ctx, outPortID, outPortName, uint16(idgen.EntityPortOutput), gearEID, scenarioEID, machineID, c.mixerID); err != nil {
+		if err := c.topo.RegisterPort(ctx, outPortID, outPortName, uint16(idgen.EntityPortOutput), gearEID, scenarioEID, machineID, c.mixerID); err != nil {
 			c.log.Warn("failed to register output port", "name", outPortName, "error", err)
 		}
 
@@ -489,7 +610,7 @@ func (c *ScenarioController) registerScenarioEntities(ctx context.Context, s *re
 		g.Ports = ports // Assign to spec for Rack transmission
 		gearPortIDs[g.Name] = ports
 
-		if err := c.store.RegisterGear(ctx, gearEID, g.Name, g.Type, mode, bind, connect, scenarioEID, machineID, ports, c.mixerID); err != nil {
+		if err := c.topo.RegisterGear(ctx, gearEID, g.Name, g.Type, mode, bind, connect, scenarioEID, machineID, ports, c.mixerID); err != nil {
 			c.log.Warn("failed to register gear", "name", g.Name, "error", err)
 		} else {
 			c.log.Info("registered gear", "name", g.Name, "eid", gearEID, "machine_id", machineID)
@@ -499,7 +620,10 @@ func (c *ScenarioController) registerScenarioEntities(ctx context.Context, s *re
 	// Register Wires - use the machineID of the source gear's rack
 	for i := range s.Wires {
 		w := &s.Wires[i] // Pointer to modify
-		wireEID := c.idGen.NextEntityID(idgen.EntityWire)
+		wireEID := w.ID  // kept from a restored active scenario
+		if wireEID == uuid.Nil {
+			wireEID = c.idGen.NextEntityID(idgen.EntityWire)
+		}
 		w.ID = wireEID // Assign ID to spec
 
 		// Resolve From/To to Port IDs
@@ -541,7 +665,7 @@ func (c *ScenarioController) registerScenarioEntities(ctx context.Context, s *re
 			}
 		}
 
-		if err := c.store.RegisterWire(ctx, wireEID, w.From, w.To, fromID, toID, scenarioEID, machineID, c.mixerID); err != nil {
+		if err := c.topo.RegisterWire(ctx, wireEID, w.From, w.To, fromID, toID, scenarioEID, machineID, c.mixerID); err != nil {
 			c.log.Warn("failed to register wire", "from", w.From, "to", w.To, "error", err)
 		} else {
 			c.log.Info("registered wire", "from", w.From, "to", w.To, "eid", wireEID, "machine_id", machineID)
@@ -552,24 +676,6 @@ func (c *ScenarioController) registerScenarioEntities(ctx context.Context, s *re
 }
 
 // ensureScenariosRepo creates the scenarios directory if it doesn't exist.
-// Note: Git versioning is NOT used here to avoid nested git repos.
-// Scenarios are versioned by their meta.version field.
-// True GitOps (external repo, webhooks) can be added in a later phase.
-func (c *ScenarioController) ensureScenariosRepo() error {
-	if c.repoReady {
-		return nil
-	}
-
-	// Create directory if it doesn't exist
-	if err := os.MkdirAll(c.repoPath, 0750); err != nil {
-		return fmt.Errorf("failed to create scenarios directory: %w", err)
-	}
-
-	c.log.Info("scenarios directory ready", "path", c.repoPath)
-	c.repoReady = true
-	return nil
-}
-
 // pushScenarioToRacks publishes the scenario to racks.
 // If specificRack is provided, it only pushes to that one.
 // Otherwise, it iterates over s.Racks.
@@ -605,19 +711,35 @@ func (c *ScenarioController) pushScenarioToRacks(ctx context.Context, s *registr
 				add(name)
 			}
 		}
+		// A Global Gear (no deploy) runs on every Rack. A Rack that enrolls
+		// later receives the scenario through PushActiveToRackSince; the
+		// Racks already enrolled receive it here.
+		if hasGlobalGear(s) && c.racks != nil {
+			active, err := c.racks.List(ctx, "active")
+			if err != nil {
+				c.log.Warn("cannot list the active racks for the scenario's global gears", "error", err)
+			}
+			for _, r := range active {
+				add(r.Name)
+			}
+		}
 	}
 
 	// A scenario without push targets activates into nothing. Say so
 	// loudly: this used to be a silent no-op (HTTP 200, zero delivery).
 	if len(targets) == 0 {
-		c.log.Warn("scenario has no push targets: activation is a no-op", "name", scenarioName)
+		if hasGlobalGear(s) {
+			c.log.Warn("scenario has only global gears and no rack is active yet: a rack that enrolls later receives it", "name", scenarioName)
+		} else {
+			c.log.Warn("scenario has no push targets: activation is a no-op", "name", scenarioName)
+		}
 	}
 
 	delivered := 0
 	for _, rackName := range targets {
 		// Get rack machineID from registry with retry
 		var machineID uuid.UUID
-		if c.store != nil {
+		if c.racks != nil {
 			mid, err := c.waitForRack(ctx, rackName)
 			if err != nil {
 				c.log.Warn("skipping scenario push: rack not in registry", "rack", rackName)
@@ -635,15 +757,9 @@ func (c *ScenarioController) pushScenarioToRacks(ctx context.Context, s *registr
 			Timestamp: now,
 		}
 
-		// Marshal scenarios with updated IDs for the payload
-		// We re-marshal because s now contains IDs that were generated during registration
-		updatedContent, err := yaml.Marshal(s)
-		if err == nil {
-			payload.Scenario = updatedContent
-		} else {
-			c.log.Warn("failed to re-marshal scenario with IDs, sending original content", "error", err)
-			payload.Scenario = content
-		}
+		// content is the scenario as registered, IDs included, encoded once
+		// at activation. It is sent as is: re-encoding s could change it.
+		payload.Scenario = content
 
 		payload.Specs = c.collectSpecs(ctx, s)
 
@@ -665,6 +781,7 @@ func (c *ScenarioController) pushScenarioToRacks(ctx context.Context, s *registr
 		} else {
 			c.log.Info("pushed scenario to rack", "rack", rackName, "version", s.Meta.Version)
 			delivered++
+			c.recordDelivery(rackName)
 		}
 	}
 
@@ -678,11 +795,37 @@ func (c *ScenarioController) pushScenarioToRacks(ctx context.Context, s *registr
 	return nil
 }
 
+// recordDelivery notes that rackName received the current activation now.
+func (c *ScenarioController) recordDelivery(rackName string) {
+	c.deliveryMu.Lock()
+	defer c.deliveryMu.Unlock()
+	if c.delivered == nil {
+		c.delivered = make(map[string]delivery)
+	}
+	c.delivered[rackName] = delivery{activation: c.activation, at: time.Now()}
+}
+
+// hasGlobalGear reports whether a scenario has a gear with no deploy target,
+// which runs on every Rack.
+func hasGlobalGear(s *registry.Scenario) bool {
+	for _, g := range s.Gears {
+		switch d := g.Deploy.(type) {
+		case nil:
+			return true
+		case string:
+			if d == "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // waitForRack polls the registry for a rack registration for up to 5 seconds.
 func (c *ScenarioController) waitForRack(ctx context.Context, name string) (uuid.UUID, error) {
 	deadline := time.Now().Add(c.waitTimeout)
 	for time.Now().Before(deadline) {
-		mid, err := c.store.GetRackByName(ctx, name)
+		mid, err := c.racks.GetRackByName(ctx, name)
 		if err == nil {
 			return mid, nil
 		}
@@ -731,25 +874,38 @@ func (c *ScenarioController) collectSpecs(ctx context.Context, s *registry.Scena
 	}
 	seen := make(map[string]bool)
 	var out []fluxmsg.SpecArtifact
+	type pending struct{ ref, gear string }
+	var work []pending
 	for _, g := range s.Gears {
-		ref := specRefFromConfig(g.Config)
-		if ref == "" {
+		if ref := specRefFromConfig(g.Config); ref != "" {
+			work = append(work, pending{ref, g.Name})
+		}
+	}
+	// A translation spec names more artefacts (its protocol specs and its
+	// lookup sources), and the rack resolves those from its store too, so
+	// they travel as well.
+	for len(work) > 0 {
+		p := work[0]
+		work = work[1:]
+		name, tag, ok := storeRef(p.ref)
+		if !ok || seen[p.ref] {
 			continue
 		}
-		name, tag, ok := storeRef(ref)
-		if !ok || seen[ref] {
-			continue
-		}
-		seen[ref] = true
-		content, err := c.specs.Load(ctx, ref)
+		seen[p.ref] = true
+		content, err := c.specs.Load(ctx, p.ref)
 		if err != nil {
 			// Pushing anyway is deliberate: the rack reports an unresolvable spec
 			// against the reference the scenario actually names, which is more use
 			// than the Mixer refusing to deploy over a spec it cannot find.
-			c.log.Warn("spec named by scenario is not in the store", "ref", ref, "gear", g.Name, "error", err)
+			c.log.Warn("spec named by scenario is not in the store", "ref", p.ref, "gear", p.gear, "error", err)
 			continue
 		}
 		out = append(out, fluxmsg.SpecArtifact{Name: name, Tag: tag, Content: content})
+		if refs, isTranslation := translation.References(content); isTranslation {
+			for _, r := range refs {
+				work = append(work, pending{r, p.gear})
+			}
+		}
 	}
 	return out
 }

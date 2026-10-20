@@ -184,15 +184,11 @@ done
 log_success "CLI Metrics Verification Attempted."
 
 section "Registry Verification"
-cp "$MIXER_DB" "$WORK_DIR/mixer/data/snapshot_telemetry.duckdb"
-[ -f "$MIXER_DB.wal" ] && cp "$MIXER_DB.wal" "$WORK_DIR/mixer/data/snapshot_telemetry.duckdb.wal"
-SNAPSHOT_DB="$WORK_DIR/mixer/data/snapshot_telemetry.duckdb"
-
-MIXER_COUNT=$($DB_CLI -noheader -csv "$SNAPSHOT_DB" "SELECT count(*) FROM registry WHERE type_id=2")
-SNAKE_COUNT=$($DB_CLI -noheader -csv "$SNAPSHOT_DB" "SELECT count(*) FROM registry WHERE type_id=9")
-RACK_COUNT=$($DB_CLI -noheader -csv "$SNAPSHOT_DB" "SELECT count(*) FROM registry WHERE type_id=4")
-RACK_MID=$($DB_CLI -noheader -csv "$SNAPSHOT_DB" "SELECT machine_id FROM registry WHERE type_id=4 LIMIT 1")
-rm -f "$SNAPSHOT_DB" "$SNAPSHOT_DB.wal"
+SNAKE_URL="nats://localhost:${SNAKE_PORT}"
+MIXER_COUNT=$(registry_count "$SNAKE_URL" 2)
+SNAKE_COUNT=$(registry_count "$SNAKE_URL" 9)
+RACK_COUNT=$(registry_count "$SNAKE_URL" 4)
+RACK_MID=$(registry_dump "$SNAKE_URL" | awk -F'\t' '$1==4 {print $2; exit}')
 
 [[ "$RACK_MID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || fail "Rack MachineID is not a valid UUID: $RACK_MID"
 [ "$MIXER_COUNT" -eq 1 ] || fail "Expected 1 Mixer, got $MIXER_COUNT"
@@ -263,13 +259,10 @@ else
     fail "CLI failed to list rack."
 fi
 
-log_info "Verifying DB Content (Snapshot)..."
-cp "$WORK_DIR/mixer/data/flux.duckdb" "$WORK_DIR/mixer/data/snapshot_p01.duckdb"
-[ -f "$WORK_DIR/mixer/data/flux.duckdb.wal" ] && cp "$WORK_DIR/mixer/data/flux.duckdb.wal" "$WORK_DIR/mixer/data/snapshot_p01.duckdb.wal"
-DB_OUT=$(duckdb -readonly -csv -noheader -c "SELECT name, machine_id FROM registry WHERE name='rack-e2e-01' AND type_id=4;" "$WORK_DIR/mixer/data/snapshot_p01.duckdb")
-rm -f "$WORK_DIR/mixer/data/snapshot_p01.duckdb" "$WORK_DIR/mixer/data/snapshot_p01.duckdb.wal"
-[[ "$DB_OUT" == *"rack-e2e-01"* ]] || fail "DB Verification Failed (Rack not found in DB snapshot)"
-log_success "DB Verification Passed (Rack found in DB)"
+log_info "Verifying Registry Content..."
+REG_OUT=$(registry_dump "nats://localhost:${SNAKE_PORT}" | awk -F'\t' '$1==4 && $3=="rack-e2e-01"')
+[[ "$REG_OUT" == *"rack-e2e-01"* ]] || fail "Registry Verification Failed (Rack not found in the registry)"
+log_success "Registry Verification Passed (Rack found)"
 
 log_success "Phase 01 OK"
 
@@ -536,7 +529,7 @@ test_api_scenario_lifecycle() {
 
     log_info "Importing and activating a scenario whose Rack has not enrolled..."
     local prior_active
-    prior_active=$(cat "${SPECS_STORE_DIR}/scenarios/active" 2>/dev/null || echo "")
+    prior_active=$(registry_dump "nats://localhost:${SNAKE_PORT}" -active 2>/dev/null || echo "")
 
     HTTP_CODE=$(curl -s -o "${SPECS_OUTPUT}" -w "%{http_code}" -X POST "${API_URL}/scenario/import?activate=true" \
         -H "Content-Type: application/x-yaml" \
@@ -552,15 +545,15 @@ test_api_scenario_lifecycle() {
     # active. The real invariant a refused activation must uphold is that it
     # doesn't change WHICH scenario that is, not that none is active at all.
     local now_active
-    now_active=$(cat "${SPECS_STORE_DIR}/scenarios/active" 2>/dev/null || echo "")
+    now_active=$(registry_dump "nats://localhost:${SNAKE_PORT}" -active 2>/dev/null || echo "")
     if [[ "$now_active" == "payment-flow" ]]; then
         log_error "A refused activation left payment-flow active"; return 1
     fi
     [[ "$now_active" == "$prior_active" ]] || log_warn "Active scenario changed from '$prior_active' to '$now_active' during a refused activation"
-    if [[ -f "${SPECS_STORE_DIR}/scenarios/payment-flow.yaml" ]]; then
+    if registry_dump "nats://localhost:${SNAKE_PORT}" -scenarios | grep -qx "payment-flow"; then
         log_success "Scenario stayed filed, and payment-flow is not active"
     else
-        log_error "The scenario was not filed by the import"; ls -R "${SPECS_STORE_DIR}"; return 1
+        log_error "The scenario was not filed by the import"; registry_dump "nats://localhost:${SNAKE_PORT}" -scenarios; return 1
     fi
 
     start_named_rack "specs" "rack_specs" || return 1
@@ -587,10 +580,10 @@ test_api_scenario_lifecycle() {
         log_error "Topology Status Invalid: $STATUS_JSON"; return 1
     fi
 
-    if [[ -f "${SPECS_STORE_DIR}/scenarios/active" ]] && [[ "$(cat "${SPECS_STORE_DIR}/scenarios/active")" == "payment-flow" ]]; then
-        log_success "Scenario persisted to disk and is active"
+    if [[ "$(registry_dump "nats://localhost:${SNAKE_PORT}" -active)" == "payment-flow" ]]; then
+        log_success "Scenario stored in the registry and active"
     else
-        log_error "payment-flow is not the active scenario on disk"; ls -R "${SPECS_STORE_DIR}"; return 1
+        log_error "payment-flow is not the active scenario in the registry"; registry_dump "nats://localhost:${SNAKE_PORT}" -active; return 1
     fi
 }
 

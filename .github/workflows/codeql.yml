@@ -2,9 +2,9 @@ name: "CodeQL Analysis"
 
 on:
   push:
-    branches: [ "main", "feat/*" ]
+    branches: [ "main", "dev", "feat/*" ]
   pull_request:
-    branches: [ "main" ]
+    branches: [ "main", "dev" ]
   schedule:
     - cron: '24 16 * * 5'
 
@@ -12,7 +12,10 @@ jobs:
   analyze:
     name: Analyze
     if: github.repository == 'jaab-tech/fluxrig' && !contains(github.repository, 'internal')
-    runs-on: [self-hosted, oci-int]
+    # A GitHub-hosted runner: this job runs only in the public repository, where
+    # hosted runners are free. The self-hosted runner does not serve this
+    # repository, and it must not run code from a fork pull request.
+    runs-on: ubuntu-latest
     timeout-minutes: 360
     permissions:
       security-events: write
@@ -29,11 +32,21 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v7
 
+    - name: Set up Go
+      uses: actions/setup-go@v7
+      with:
+        go-version-file: go.mod
+
     - name: Initialize CodeQL
       uses: github/codeql-action/init@v4
       with:
         languages: ${{ matrix.language }}
-        build-mode: "autobuild"
+        # Manual, so the analysed build is exactly `go build ./...`. Autobuild
+        # runs `make` first, whose default target starts with the linter.
+        build-mode: "manual"
+
+    - name: Build
+      run: go build ./...
 
     - name: Perform CodeQL Analysis
       uses: github/codeql-action/analyze@v4

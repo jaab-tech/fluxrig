@@ -131,7 +131,7 @@ definitions:
     properties:
       doc:
         description: Doc is where this version's protocol reference is served.
-        example: /api/v1/specs/iso8583-v87-ascii/v2.2.0/doc
+        example: /api/v1/specs/iso8583-v87-ascii/v3.0.0/doc
         type: string
       hash:
         example: 1c8831d23bdd8458feafe6a506c5d3730605b78fd22b5d5c7f1c147043ef71af
@@ -159,7 +159,7 @@ definitions:
         example: 34441
         type: integer
       tag:
-        example: v2.2.0
+        example: v3.0.0
         type: string
       title:
         description: |-
@@ -168,7 +168,28 @@ definitions:
         example: ISO 8583:1987 (ASCII)
         type: string
       urn:
-        example: iso8583-v87-ascii:v2.2.0
+        example: iso8583-v87-ascii:v3.0.0
+        type: string
+    type: object
+  api.SpecUploaded:
+    properties:
+      hash:
+        example: 5dd8f432c33bc7a61f4cd49c8933e34a94f5586f60b878e99cdb51314ef6eacb
+        type: string
+      kind:
+        description: |-
+          Kind is what the Mixer validated the artefact as: iso8583, iso20022,
+          translation, or data (lookup records, which have no spec header).
+        example: translation
+        type: string
+      name:
+        example: billpay-rtp
+        type: string
+      tag:
+        example: v1.0.0
+        type: string
+      urn:
+        example: billpay-rtp:v1.0.0
         type: string
     type: object
   api.TopologyStatusResponse:
@@ -250,9 +271,15 @@ definitions:
         example: 5s
         type: string
       retentionDays:
-        description: RetentionDays for local parquet files.
+        description: |-
+          RetentionDays for local parquet files. Wins over
+          Rotation.MaxAgeDays when set to a positive value.
         example: 30
         type: integer
+      rotation:
+        allOf:
+        - $ref: '#/definitions/config.RotationConfig'
+        description: Rotation controls the retention sweep over local parquet files.
     type: object
   config.EnrollmentConfig:
     properties:
@@ -330,6 +357,8 @@ definitions:
         $ref: '#/definitions/config.MixerSettings'
       observability:
         $ref: '#/definitions/config.ObservabilityConfig'
+      registry:
+        $ref: '#/definitions/config.RegistryConfig'
       snake:
         $ref: '#/definitions/config.SnakeConfig'
       store:
@@ -427,6 +456,99 @@ definitions:
         type: integer
       namePrefix:
         type: string
+      outboxBackpressureTimeout:
+        description: |-
+          OutboxBackpressureTimeout is how long a live emission waits for older
+          parked messages on its subject to drain while the bus is up, before it
+          parks behind them. With "subject" order it cannot go first, and parking
+          it under load fills the outbox until the cap drops messages. "0s" parks
+          at once. With the bus down nothing waits.
+        example: 1s
+        type: string
+      outboxDrainRetries:
+        description: |-
+          OutboxDrainRetries is how many more times the drain tries a parked
+          emission the bus refuses before it moves on and leaves it parked for
+          the next drain. A refused emission is never dropped: only one the bus
+          marks as invalid is.
+        example: 3
+        type: integer
+      outboxMaxMessages:
+        description: |-
+          OutboxMaxMessages caps how many bus-bound emissions wait in memory
+          while the bus is down. When full the oldest entry is dropped and
+          counted; the emitting gear is never blocked.
+        example: 10000
+        type: integer
+      outboxOrder:
+        description: |-
+          OutboxOrder is the drain order: "subject" (default) never forwards an
+          emission ahead of an older one on the same subject, and "none" forwards
+          whatever the bus takes as it takes it.
+        example: subject
+        type: string
+    type: object
+  config.RegistryConfig:
+    properties:
+      bucket:
+        description: Bucket names the registry bucket.
+        example: fluxrig_registry
+        type: string
+      livenessBucket:
+        description: LivenessBucket names the presence bucket.
+        example: fluxrig_liveness
+        type: string
+      livenessTTL:
+        description: |-
+          LivenessTTL is how long after its last heartbeat a Rack still counts
+          as online. Three heartbeat intervals by default.
+        example: 90s
+        type: string
+      maxValueSize:
+        description: |-
+          MaxValueSize is the largest record in bytes, headers included. In
+          practice it bounds a scenario file.
+        example: 1048576
+        type: integer
+      orphanMinAge:
+        description: |-
+          OrphanMinAge is how old a registry record must be before the sweep
+          treats it as left behind rather than in progress.
+        example: 5m
+        type: string
+      replicas:
+        description: |-
+          Replicas is the replica count of both buckets. A single Mixer holds one
+          replica, so a value above 1 needs as many JetStream servers.
+        example: 1
+        type: integer
+      sweepInterval:
+        description: |-
+          SweepInterval is how often the Mixer repairs what a crash between two
+          registry writes left behind. It also sweeps once at startup.
+        example: 10m
+        type: string
+      writeRetries:
+        description: |-
+          WriteRetries is how many times a registry write that met a concurrent
+          one is read again and retried before it fails.
+        example: 3
+        type: integer
+    type: object
+  config.RotationConfig:
+    properties:
+      checkInterval:
+        description: |-
+          CheckInterval is how often the retention sweep runs. The sweep
+          also runs once at Mixer startup.
+        example: 1h
+        type: string
+      maxAgeDays:
+        description: |-
+          MaxAgeDays deletes parquet files older than this many days when
+          RetentionDays is not set to a positive value.
+        example: 30
+        type: integer
     type: object
   config.SnakeConfig:
     properties:
@@ -437,11 +559,35 @@ definitions:
           configuring TLS actually requires it instead of just offering it.
         example: false
         type: boolean
+      clusterName:
+        description: |-
+          ClusterName is the JetStream domain the embedded server reports. It is
+          also what a client uses to reach a domain-scoped server.
+        example: flux
+        type: string
       connectTimeout:
         example: 10s
         type: string
       convergenceDelay:
         example: 100ms
+        type: string
+      dlqenabled:
+        description: |-
+          DLQEnabled routes unprocessable messages (decode failure, validation
+          failure, or a handler that failed on every redelivery) to the dead
+          letter stream instead of dropping them with only a log line. Off keeps
+          the previous behavior: log and discard.
+        example: true
+        type: boolean
+      dlqmaxAge:
+        description: |-
+          DLQMaxAge bounds how long a dead letter is kept. Empty keeps the
+          stream default (24h).
+        example: 720h
+        type: string
+      dlqsubject:
+        description: DLQSubject is the subject prefix the dead letter stream captures.
+        example: flux.dlq
         type: string
       domain:
         example: flux
@@ -489,6 +635,12 @@ definitions:
         type: string
       storeCipher:
         example: chacha
+        type: string
+      storeDir:
+        description: |-
+          StoreDir overrides where the embedded Snake keeps its JetStream store.
+          Empty keeps the default: a "snake" directory under store.dir.
+        example: ./data/snake
         type: string
       storeEncryption:
         example: true
@@ -1088,6 +1240,47 @@ paths:
           schema:
             type: string
       summary: List stored specs
+      tags:
+      - specs
+    post:
+      consumes:
+      - application/yaml
+      description: 'Validates the artefact for its kind and files it under name:tag.
+        A spec declares both; lookup data has no header and needs the name and tag
+        query parameters. A translation spec must name store references, and the protocol
+        specs and lookup records it names must already be in the store. A name:tag
+        that already names other content is refused: change the version.'
+      parameters:
+      - description: Name to file under. Required for lookup data; overrides a spec's
+          declared id.
+        in: query
+        name: name
+        type: string
+      - description: Version tag (e.g. v1). Required for lookup data; overrides a
+          spec's declared version.
+        in: query
+        name: tag
+        type: string
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/api.SpecUploaded'
+        "400":
+          description: the artefact does not validate
+          schema:
+            type: string
+        "409":
+          description: name:tag already names other content
+          schema:
+            type: string
+        "413":
+          description: larger than mixer.max_payload_size
+          schema:
+            type: string
+      summary: Upload a spec or lookup data
       tags:
       - specs
   /specs/{name}:

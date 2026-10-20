@@ -40,7 +40,8 @@ the code.`,
 		// --write scans a docs directory and refreshes every AUTOGEN:manifest
 		// block in place, keyed by the gear type in the marker.
 		if docsDir, _ := cmd.Flags().GetString("write"); docsDir != "" {
-			return injectDocs(f, docsDir, out)
+			skip, _ := cmd.Flags().GetStringSlice("skip-types")
+			return injectDocs(f, docsDir, out, skip...)
 		}
 
 		if all {
@@ -75,9 +76,18 @@ var autogenBlockRe = regexp.MustCompile(`(?s)<!-- AUTOGEN:manifest:([a-z0-9_]+) 
 // injectDocs walks docsDir, replaces every AUTOGEN:manifest block with a freshly
 // rendered section for its gear type, and reports what changed. It never writes
 // a file whose blocks are already current, so the target dir stays idempotent.
-func injectDocs(f *gears.Factory, docsDir string, out io.Writer) error {
+//
+// A block for a type this binary does not contain is an error, because it is
+// usually a typo in the marker. skipTypes names the exceptions: gears another
+// binary documents (the enterprise gears, refreshed by fluxrig-ent). Their
+// blocks are left as they are and listed.
+func injectDocs(f *gears.Factory, docsDir string, out io.Writer, skipTypes ...string) error {
 	var updated, unchanged int
-	var unknown []string
+	var unknown, skipped []string
+	skip := make(map[string]bool, len(skipTypes))
+	for _, t := range skipTypes {
+		skip[strings.TrimSpace(t)] = true
+	}
 	err := filepath.WalkDir(docsDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".md") {
 			return err
@@ -93,8 +103,13 @@ func injectDocs(f *gears.Factory, docsDir string, out io.Writer) error {
 			gtype := string(autogenBlockRe.FindSubmatch(block)[1])
 			m, ok := f.Manifest(gtype)
 			if !ok {
-				unknown = append(unknown, gtype+" ("+filepath.Base(path)+")")
-				return block // leave an unknown type untouched
+				where := gtype + " (" + filepath.Base(path) + ")"
+				if skip[gtype] {
+					skipped = append(skipped, where)
+				} else {
+					unknown = append(unknown, where)
+				}
+				return block // leave a type this binary does not contain untouched
 			}
 			return []byte(renderManifestMarkdown(m))
 		})
@@ -113,6 +128,9 @@ func injectDocs(f *gears.Factory, docsDir string, out io.Writer) error {
 		return err
 	}
 	_, _ = fmt.Fprintf(out, "gear docs: %d updated, %d already current\n", updated, unchanged)
+	if len(skipped) > 0 {
+		_, _ = fmt.Fprintf(out, "left for another binary: %s\n", strings.Join(skipped, ", "))
+	}
 	if len(unknown) > 0 {
 		return fmt.Errorf("unknown gear types in AUTOGEN markers: %s", strings.Join(unknown, ", "))
 	}
@@ -265,5 +283,6 @@ func cell(s string) string {
 func init() {
 	gearsDocCmd.Flags().Bool("all", false, "Render a section for every gear type")
 	gearsDocCmd.Flags().String("write", "", "Refresh every AUTOGEN:manifest block under this docs directory in place")
+	gearsDocCmd.Flags().StringSlice("skip-types", nil, "With --write: gear types another binary documents; their blocks are left as they are")
 	gearsCmd.AddCommand(gearsDocCmd)
 }

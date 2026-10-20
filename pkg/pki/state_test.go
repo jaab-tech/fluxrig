@@ -299,3 +299,15 @@ func TestPinMixerKey_RoundTrips(t *testing.T) {
 		t.Error("the loaded pin does not correspond to the pinned key")
 	}
 }
+
+// The first passport of a Rack is pinned before the state directory exists.
+func TestPinMixerKey_CreatesTheStateDirectory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data", "rack-switch", "rack.flux")
+	ck, _ := GenerateClusterKey()
+	if err := PinMixerKey(path, ck.Public); err != nil {
+		t.Fatalf("PinMixerKey into a state directory that does not exist yet: %v", err)
+	}
+	if got, err := LoadPinnedMixerKey(path); err != nil || len(got) != ed25519.PublicKeySize {
+		t.Fatalf("pin did not persist: key=%v err=%v", got, err)
+	}
+}

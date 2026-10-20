@@ -168,7 +168,7 @@ type MockScenarioProvider struct {
 	mu         sync.Mutex
 }
 
-func (m *MockScenarioProvider) PushActiveToRack(ctx context.Context, rackName string) error {
+func (m *MockScenarioProvider) PushActiveToRackSince(ctx context.Context, rackName string, _ time.Time) error {
 	m.mu.Lock()
 	m.PushCalled = true
 	m.mu.Unlock()

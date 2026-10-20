@@ -1,0 +1,85 @@
+# Copyright 2026 JAAB Tech SAS, Uruguay
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Nightly full regression. The merge gate runs the fast, hermetic subset
+# (see the integration job in ci.yml); this runs everything `make
+# regression` runs, on the integration trunk, once a day. It is the
+# backstop for the suites too slow or too environment-hungry to gate a
+# merge.
+name: Nightly regression
+
+on:
+  schedule:
+    # 03:00 UTC daily. A quiet hour for the self-hosted runner, and far from
+    # any merge activity that would contend for ports or memory.
+    - cron: '0 3 * * *'
+  # A red nightly is investigated by re-running it by hand against a branch.
+  workflow_dispatch:
+
+jobs:
+  regression:
+    runs-on: [self-hosted, oci-int]
+    steps:
+      # No ref: a scheduled run checks out the default branch, which is the
+      # integration trunk. Naming it would publish an internal branch name; the
+      # merge gate's own workflow uses globs for the same reason.
+      - uses: actions/checkout@v7
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.26"
+          cache: true
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      # The group, card-data and retention segments query Parquet through the
+      # duckdb CLI. It is a single static binary; install it rather than
+      # skipping those segments, or the nightly proves less than it claims.
+      # `latest` on purpose: a pinned version rots, and a nightly that cannot
+      # fetch fails loudly instead of silently proving less.
+      - name: Install duckdb CLI
+        run: |
+          case "$(uname -m)" in
+            x86_64)  DUCKDB_ARCH=amd64 ;;
+            aarch64|arm64) DUCKDB_ARCH=arm64 ;;   # the asset name since DuckDB v1.5.6
+            *) echo "unsupported arch: $(uname -m)"; exit 1 ;;
+          esac
+          curl -fSL "https://github.com/duckdb/duckdb/releases/latest/download/duckdb_cli-linux-${DUCKDB_ARCH}.zip" -o /tmp/duckdb.zip
+          unzip -o -q /tmp/duckdb.zip duckdb -d /tmp
+          install -m 0755 /tmp/duckdb /usr/local/bin/duckdb
+          duckdb --version
+      # make regression runs make build, and bin/fluxrig-mixer depends on
+      # `openapi`, which needs swag. See the note in ci.yml.
+      - name: Install swag
+        run: go install github.com/swaggo/swag/cmd/swag@v1.16.6
+      # The e2e harness waits for ports and clears them with lsof. See the
+      # note in ci.yml.
+      - name: Ensure lsof
+        run: command -v lsof || (apt-get update && apt-get install -y lsof)
+      - name: Full regression
+        run: make regression
+        env:
+          # The script default of 4 parallel segments was measured on a
+          # developer desktop. A smaller runner SIGKILLs segments under the
+          # combined memory pressure (documented in run_consolidated.sh), so
+          # nightly trades speed for actually finishing.
+          FLUXRIG_E2E_MAX_PARALLEL: 2
+      # The hermetic Robot subset (see `make test-robot-ci`). It left the merge
+      # gate because it is timing-sensitive under a busy runner; the quiet
+      # hour is where it belongs. It runs even when the regression fails: the
+      # two prove different things, and one red result must not hide the other.
+      - name: Robot hermetic subset
+        if: success() || failure()
+        run: make test-robot-ci

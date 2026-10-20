@@ -7,7 +7,6 @@ import (
 	"context"
 	"crypto/ed25519"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -19,9 +18,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/jaab-tech/fluxrig/pkg/config"
-	"github.com/jaab-tech/fluxrig/pkg/idgen"
 	"github.com/jaab-tech/fluxrig/pkg/pki"
-	"github.com/jaab-tech/fluxrig/pkg/store/duckdb"
 )
 
 func TestMixer_AppCertification(t *testing.T) {
@@ -49,6 +46,9 @@ func TestMixer_AppCertification(t *testing.T) {
 		},
 		API: config.ApiConfig{
 			Port: 0, // Auto-bind
+			// The Mixer refuses to start without an API token; a test runs
+			// with auth disabled, as the e2e and Robot harnesses do.
+			AuthDisabledDangerously: true,
 		},
 		Snake: config.SnakeConfig{
 			Port:       -1, // Random port
@@ -101,7 +101,16 @@ func TestMixer_AppCertification(t *testing.T) {
 			done <- app.Run(ctx)
 		}()
 
-		time.Sleep(2 * time.Second)
+		// Wait for startup to finish, not for a fixed time: cancelling
+		// mid-startup makes Run return the cancellation (for example from the
+		// store migration) and fails the test on a slow machine.
+		select {
+		case <-app.Ready():
+		case err := <-done:
+			t.Fatalf("Mixer exited during startup: %v", err)
+		case <-time.After(60 * time.Second):
+			t.Fatal("Timeout waiting for Mixer startup")
+		}
 
 		// Verification: Check if store dir exists
 		assert.DirExists(t, cfg.Store.Dir)
@@ -114,24 +123,5 @@ func TestMixer_AppCertification(t *testing.T) {
 		case <-time.After(30 * time.Second):
 			t.Fatal("Timeout waiting for Mixer shutdown")
 		}
-	})
-
-	t.Run("SnakeDiscovery_Logic", func(t *testing.T) {
-		logger := slog.Default()
-		store, err := duckdb.NewStore(logger, filepath.Join(tmpDir, "discovery.db"))
-		require.NoError(t, err)
-		defer func() { _ = store.Close() }()
-		require.NoError(t, store.Migrate(context.Background()))
-
-		idGen, _ := idgen.New(uuid.New())
-		mixerEID := idGen.NextEntityID(idgen.EntityMixer)
-
-		snakeName := "snake-rack-01"
-		eid := idGen.NextEntityID(idgen.EntitySnake)
-
-		require.NoError(t, store.RegisterSnake(context.Background(), snakeName, eid, "v0.4.3", uuid.New(), mixerEID, "127.0.0.1", 12345, "127.0.0.1", 4222, uuid.New()))
-
-		stats := map[string]any{"in_msgs": 10}
-		require.NoError(t, store.UpdateSnakeStats(context.Background(), eid, stats))
 	})
 }

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ThreeDotsLabs/watermill"
@@ -19,13 +20,12 @@ import (
 	"github.com/jaab-tech/fluxrig/pkg/pki"
 	"github.com/jaab-tech/fluxrig/pkg/registry"
 	"github.com/jaab-tech/fluxrig/pkg/router"
-	"github.com/jaab-tech/fluxrig/pkg/security"
 	"github.com/jaab-tech/fluxrig/pkg/version"
 )
 
 // ScenarioProvider defines the subset of ScenarioController used by Enrollment.
 type ScenarioProvider interface {
-	PushActiveToRack(ctx context.Context, rackName string) error
+	PushActiveToRackSince(ctx context.Context, rackName string, since time.Time) error
 }
 
 // EnrollmentController handles Rack registration and heartbeats.
@@ -36,9 +36,18 @@ type EnrollmentController struct {
 	scenario        ScenarioProvider
 	mixerID         uuid.UUID // Mixer's fluxEntityID
 	pushDelay       time.Duration
-	processedHellos sync.Map // Deduplication cache: Name -> time.Time
-	logger          *slog.Logger
+	processedHellos sync.Map // Deduplication cache: name|MachineID -> time.Time
+	// lastSweep is the unix-nano time of the last pass that removed expired
+	// dedup entries. The keys come from the Hello, so without the sweep a
+	// stream of distinct names grows the map for as long as the Mixer runs.
+	lastSweep atomic.Int64
+	now       func() time.Time
+	logger    *slog.Logger
 }
+
+// helloThrottle is how long a Hello from the same name and MachineID is
+// ignored after one is processed.
+const helloThrottle = 1 * time.Second
 
 func NewEnrollmentController(log *slog.Logger, reg registry.Registry, pub message.Publisher, signer *pki.ClusterKey, mixerID uuid.UUID, pushDelay time.Duration) *EnrollmentController {
 	return &EnrollmentController{
@@ -47,8 +56,34 @@ func NewEnrollmentController(log *slog.Logger, reg registry.Registry, pub messag
 		signer:    signer,
 		mixerID:   mixerID,
 		pushDelay: pushDelay,
+		now:       time.Now,
 		logger:    log,
 	}
+}
+
+// throttled reports whether a Hello with this key arrived within
+// helloThrottle of the last one processed, and records it when it did not.
+// At most once per helloThrottle it also removes the entries that have
+// expired, so the map holds only the keys seen in the last two windows.
+func (c *EnrollmentController) throttled(key string) bool {
+	now := c.now()
+	if val, loaded := c.processedHellos.Load(key); loaded {
+		if now.Sub(val.(time.Time)) < helloThrottle {
+			return true
+		}
+	}
+	c.processedHellos.Store(key, now)
+
+	last := c.lastSweep.Load()
+	if now.UnixNano()-last >= int64(helloThrottle) && c.lastSweep.CompareAndSwap(last, now.UnixNano()) {
+		c.processedHellos.Range(func(k, v any) bool {
+			if now.Sub(v.(time.Time)) >= helloThrottle {
+				c.processedHellos.Delete(k)
+			}
+			return true
+		})
+	}
+	return false
 }
 
 // SetScenario sets the scenario provider for pushing active scenarios on registration.
@@ -109,14 +144,10 @@ func (c *EnrollmentController) HandleHello(msg *message.Message) ([]*message.Mes
 	// because it shares a name; it is a different identity attempting a
 	// different (fresh-registration) code path.
 	dedupKey := hello.Name + "|" + hello.MachineID.String()
-	if val, loaded := c.processedHellos.Load(dedupKey); loaded {
-		lastSeen := val.(time.Time)
-		if time.Since(lastSeen) < 1*time.Second {
-			c.logger.Warn("Duplicate Hello ignored (throttled)", "name", hello.Name, "id", hello.MachineID)
-			return nil, nil
-		}
+	if c.throttled(dedupKey) {
+		c.logger.Warn("Duplicate Hello ignored (throttled)", "name", hello.Name, "id", hello.MachineID)
+		return nil, nil
 	}
-	c.processedHellos.Store(dedupKey, time.Now())
 
 	// 3. Register
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -147,7 +178,10 @@ func (c *EnrollmentController) HandleHello(msg *message.Message) ([]*message.Mes
 	c.logger.Info("Rack Registered", "id", rack.MachineID, "name", rack.Name, "status", rack.Status)
 
 	// 4. Issue Passport (StateEnvelope)
-	// Construct Rack State with lifecycle metadata
+	// Construct Rack State with lifecycle metadata. rack.Secret is set only
+	// on a fresh registration, the one time the registry holds the
+	// plaintext; every other passport carries no secret, and the Rack keeps
+	// the one it received first.
 	rackState := pki.RackState{
 		MixerID:     c.mixerID,
 		MachineID:   rack.MachineID,
@@ -208,12 +242,15 @@ func (c *EnrollmentController) HandleHello(msg *message.Message) ([]*message.Mes
 
 	// 5. If there is an active scenario, push it to the rack immediately
 	if c.scenario != nil {
+		// An activation between now and the push reaches the Rack already
+		// (it is active from here on), so the push skips it then.
+		enrolledAt := time.Now()
 		go func() {
 			// Delay to ensure Rack has subscribed to its scenario topic
 			if c.pushDelay > 0 {
 				time.Sleep(c.pushDelay)
 			}
-			if err := c.scenario.PushActiveToRack(context.Background(), rack.Name); err != nil {
+			if err := c.scenario.PushActiveToRackSince(context.Background(), rack.Name, enrolledAt); err != nil {
 				c.logger.Warn("Failed to push active scenario to new rack", "rack", rack.Name, "error", err)
 			}
 		}()
@@ -276,9 +313,10 @@ func (c *EnrollmentController) HandleHeartbeat(msg *message.Message) ([]*message
 	// config with none of its own.
 	rack, err := c.reg.Get(context.Background(), hb.MachineID)
 	if err != nil {
+		c.logger.Warn("Heartbeat dropped: the Rack is not readable in the registry", "id", hb.MachineID, "error", err)
 		return nil, nil
 	}
-	if !security.SecretsEqual(rack.Secret, hb.Secret) {
+	if !registry.SecretMatches(rack.SecretHash, hb.Secret) {
 		c.logger.Warn("Heartbeat rejected: secret mismatch", "id", hb.MachineID)
 		return nil, nil
 	}
@@ -286,6 +324,7 @@ func (c *EnrollmentController) HandleHeartbeat(msg *message.Message) ([]*message
 	// Update LastSeen
 	c.logger.Debug("Heartbeat", "id", hb.MachineID)
 	if errHB := c.reg.Heartbeat(context.Background(), hb.MachineID, hb.Stats, hb.Config); errHB != nil {
+		c.logger.Warn("Heartbeat dropped: presence was not recorded", "id", hb.MachineID, "error", errHB)
 		return nil, nil
 	}
 

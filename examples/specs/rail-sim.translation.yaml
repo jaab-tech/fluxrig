@@ -1,0 +1,21 @@
+spec:
+  kind: "translation"
+  id: "rail-sim"
+  version: "1.0.0"
+  specs:
+    rail: "iso20022-rtp:v1.0.0"
+  participant_id: "99000000201"   # the bank of the biller
+  translations:
+    acknowledge:
+      from: "rail:pacs.008.001.08"
+      to: "rail:pacs.002.001.10"
+      bindings:
+        - { to: "orig_msg_id", from: "msg_id" }
+        - { to: "orig_msg_name", value: "pacs.008.001.08" }
+        - { to: "orig_creation_time", from: "creation_time" }
+        - { to: "instr_id", from: "instr_id" }
+        - { to: "tx_status", value: "ACTC" }
+        - { to: "receiver_participant", from: "sender_participant" }
+        # The answer goes back: the two agents change places.
+        - { to: "instructing_agent", from: "instructed_agent" }
+        - { to: "instructed_agent", from: "instructing_agent" }

@@ -102,3 +102,45 @@ func TestClient_ProcessAppliesConfiguredFraming(t *testing.T) {
 		t.Fatal("server never received the message the client sent")
 	}
 }
+
+// A conductor whose port ends at this client follows the client's link state.
+// A client that never reports "up" leaves that port down forever, and every
+// request fails with no_destination.
+func TestClient_ReportsLinkStateUpAndDown(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer func() { _ = ln.Close() }()
+	peer := make(chan net.Conn, 1)
+	go func() {
+		conn, errA := ln.Accept()
+		if errA == nil {
+			peer <- conn
+		}
+	}()
+
+	cfg := DefaultConfig()
+	cfg.Mode = ModeClient
+	cfg.Connect = ln.Addr().String()
+	cfg.ReadResponses = true
+	cfg.ReconnectWait = Duration(time.Hour) // one connection is enough
+
+	var up, down atomic.Int32
+	c := NewClient(&cfg, slog.Default(), func(*fluxmsg.FluxMsg) {}, &MockIDGen{})
+	c.OnLinkState(func(isUp bool, connID string) {
+		assert.NotEmpty(t, connID)
+		if isUp {
+			up.Add(1)
+		} else {
+			down.Add(1)
+		}
+	})
+	require.NoError(t, c.Start(context.Background()))
+	defer func() { _ = c.Stop() }()
+
+	require.Eventually(t, func() bool { return up.Load() == 1 }, 2*time.Second, 10*time.Millisecond, "no conn.up after the client connected")
+	assert.Zero(t, down.Load())
+
+	conn := <-peer
+	_ = conn.Close()
+	require.Eventually(t, func() bool { return down.Load() == 1 }, 2*time.Second, 10*time.Millisecond, "no conn.down after the peer closed")
+}

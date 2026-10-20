@@ -46,8 +46,8 @@ gears:
       # The key must be unique for the lifetime of a ticket. STAN (DE11) wraps
       # at 999999 and is reused per-terminal, so it is never unique on its own:
       # the key also includes the terminal id (DE41) plus transmission date/time
-      # (DE7). All are echoed by the scheme on the reply. Numeric fields decode
-      # unpadded, but on both legs, so correlation holds. In production also add
+      # (DE7). All are echoed by the scheme on the reply. Fixed-width fields
+      # decode at their width on both legs, so correlation holds. In production also add
       # the acquirer id (DE32); see the conductor reference.
       correlation_key: ["iso8583.field.11", "iso8583.field.7", "iso8583.field.41"]
       valet: { store: "memory", default_ttl: "3s", retain_after_close: "5s" }

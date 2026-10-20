@@ -12,6 +12,23 @@ from robot.api.deco import keyword
 
 from binpaths import bin_dir
 
+_FALLBACK_ROOT = None
+
+
+def _fallback_work_root():
+    """One run root per process when run.sh did not provide one."""
+    global _FALLBACK_ROOT
+    if _FALLBACK_ROOT is None:
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        run_root = os.path.join("/tmp/fluxrig", f"robot_run_{stamp}_{os.getpid()}")
+        _FALLBACK_ROOT = os.path.join(run_root, "work")
+        os.makedirs(_FALLBACK_ROOT, exist_ok=True)
+        # The owner, so run.sh's pruning keeps this root while the run lives.
+        with open(os.path.join(run_root, ".owner"), "w") as fh:
+            fh.write(str(os.getpid()))
+    return _FALLBACK_ROOT
+
+
 class ProcessKeywords:
     """
     Keywords for managing fluxrig processes (Mixer, Rack) and workspace.
@@ -81,37 +98,47 @@ class ProcessKeywords:
     @keyword
     def setup_workspace(self, suite_path: str, output_dir: str = None):
         """
-        Creates a temporal workspace in /tmp and symlinks it to the suite directory.
-        Symlinks 'results' to the Robot Framework Output Directory (if provided).
+        Creates the suite's workspace under the run root and symlinks it to the
+        suite directory. Symlinks 'results' to the Robot Framework Output
+        Directory (if provided).
+
+        The run root is FLUXRIG_ROBOT_WORK_ROOT, which run.sh sets to the
+        `work` directory it prints. Without it (robot called directly), one
+        root per process is created under /tmp/fluxrig. The workspace is
+        <root>/<suite directory name>. Several .robot files share a suite
+        directory, so a second workspace for the same name gets a suffix
+        rather than replacing the first one's logs. The root is new for every
+        run, so every workspace starts empty.
         """
-        suite_name = os.path.basename(suite_path)
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
-        work_dir = f"/tmp/fluxrig/work_robot_{suite_name}_{timestamp}"
-        
-        if os.path.exists(work_dir):
-            shutil.rmtree(work_dir)
-            
-        os.makedirs(work_dir, exist_ok=True)
-              
-        # Link 'work' -> /tmp workspace
+        suite_name = os.path.basename(os.path.normpath(suite_path))
+        root = os.environ.get("FLUXRIG_ROBOT_WORK_ROOT") or _fallback_work_root()
+        work_dir = os.path.join(root, suite_name)
+        n = 1
+        while os.path.exists(work_dir):
+            n += 1
+            work_dir = os.path.join(root, f"{suite_name}-{n}")
+        os.makedirs(work_dir)
+
+        # Link 'work' -> the workspace
         link_path = os.path.join(suite_path, "work")
         if os.path.islink(link_path) or os.path.exists(link_path):
-             os.remove(link_path)
+            os.remove(link_path)
         os.symlink(work_dir, link_path)
-        
+
         # Link 'results' -> Robot Output Dir (where logs/reports are)
         if output_dir:
             results_link = os.path.join(suite_path, "results")
             if os.path.islink(results_link) or os.path.exists(results_link):
-                 os.remove(results_link)
+                os.remove(results_link)
             # Ensure output_dir is absolute
             abs_output = os.path.abspath(output_dir)
             os.symlink(abs_output, results_link)
             logger.info(f"Workspace created: {work_dir} -> {link_path}")
             logger.info(f"Results linked: {abs_output} -> {results_link}")
         else:
-             logger.info(f"Workspace created: {work_dir} -> {link_path} (No results link)")
-             
+            logger.info(f"Workspace created: {work_dir} -> {link_path} (No results link)")
+        logger.console(f"Workspace: {work_dir}")
+
         return work_dir
 
     @keyword

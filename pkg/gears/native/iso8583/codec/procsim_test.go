@@ -84,7 +84,7 @@ func TestProcessorSimAlignment(t *testing.T) {
 	assert.Equal(t, "0800", decoded.Metadata["iso8583.mti"], "MTI decoded")
 	stan, ok := decoded.Get("stan")
 	require.True(t, ok, "STAN alias present")
-	assert.Equal(t, "1", stan, "STAN decoded (moov unpads leading zeros; consistent on both legs)")
+	assert.Equal(t, "000001", stan, "STAN decoded at its fixed width")
 	net, _ := decoded.Get("network_code")
 	assert.Equal(t, "301", net, "DE70 decoded")
 
@@ -114,7 +114,7 @@ func TestProcessorSimAlignment(t *testing.T) {
 	require.True(t, ok, "DE39 present in the reply")
 	assert.Equal(t, "00", rc, "approved")
 	replyStan, _ := reply.Get("stan")
-	assert.Equal(t, "1", replyStan, "STAN preserved for correlation (same unpadded value on the reply)")
+	assert.Equal(t, "000001", replyStan, "STAN preserved for correlation, at its fixed width")
 	term, _ := reply.Get("terminal_id")
 	assert.Equal(t, "TERM0001", term, "DE41 authored by the simulator")
 }

@@ -18,6 +18,7 @@ func (g *Gear) Manifest() sdk.Manifest {
 		Ports: []sdk.Port{
 			{Name: "in", Dir: sdk.PortIn, Role: "message", Summary: "Message to encode or decode."},
 			{Name: "out", Dir: sdk.PortOut, Role: "message", Summary: "Encoded or decoded message. A decode also sets iso8583.mti and iso8583.mti_class, the latter being the leading digits a request and its reply share."},
+			{Name: "error", Dir: sdk.PortOut, Role: "error", Summary: "With on_error: reject, the message that the codec rejects, with error.reason (violation or codec_failed), error.gear and error.message."},
 		},
 		ConfigSchema: `{
   "$schema": "http://json-schema.org/draft-07/schema#",
@@ -26,7 +27,7 @@ func (g *Gear) Manifest() sdk.Manifest {
     "spec_path": { "type": "string", "description": "The ISO 8583 SDL spec: a path to a file, or a store reference as name:tag (e.g. acme-auth:v2.2.0) or a content hash." },
     "spec": { "type": "string", "description": "Legacy alias of spec_path." },
     "direction": { "type": "string", "enum": ["auto", "encode", "decode"], "default": "auto", "description": "encode, decode, or auto (infer from the message)." },
-    "on_error": { "type": "string", "enum": ["reject", "drop", "kill"], "default": "drop", "description": "on a decode/encode failure, or on a message a rule rejects: reject (emit on the error path), drop (discard), or kill (fail the gear)." },
+    "on_error": { "type": "string", "enum": ["reject", "drop", "kill"], "default": "drop", "description": "on a decode/encode failure, or on a message a rule rejects: reject (emit the message on the error port, with error.reason), drop (discard it), or kill (return the error to the runtime)." },
     "validation": { "type": "string", "enum": ["off", "warn", "enforce"], "default": "off", "description": "what the spec's semantic rules do to traffic: off (they document), warn (violations are recorded and the message goes on), or enforce (a rejecting rule fails the message, which then follows on_error)." }
   },
   "anyOf": [

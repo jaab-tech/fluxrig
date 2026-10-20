@@ -5,8 +5,13 @@ package manager
 
 import (
 	"context"
+	"errors"
 	"time"
 )
+
+// ErrVersionExists reports an import whose name:tag already names other
+// content. A version is immutable: change the content, change the tag.
+var ErrVersionExists = errors.New("version already exists with different content")
 
 // Manager handles the lifecycle of Specs and Scenarios
 type Manager interface {

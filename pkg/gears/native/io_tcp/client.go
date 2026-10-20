@@ -33,6 +33,10 @@ type Client struct {
 	done     chan struct{}
 	stopOnce sync.Once
 
+	// linkState, when set, observes the connection lifecycle: up when a
+	// connection opens, down when it closes.
+	linkState func(up bool, connID string)
+
 	// Telemetry
 	meter       metric.Meter
 	msgsIn      metric.Int64Counter
@@ -68,6 +72,10 @@ func NewClient(cfg *Config, log *slog.Logger, emit func(*fluxmsg.FluxMsg), idGen
 		connsTotal:  connsTotal,
 	}
 }
+
+// OnLinkState registers an observer for the client's connection lifecycle.
+// Call it before Start.
+func (c *Client) OnLinkState(fn func(up bool, connID string)) { c.linkState = fn }
 
 func (c *Client) Start(ctx context.Context) error {
 	c.log.Info("starting client", "target", c.config.Connect)
@@ -120,6 +128,10 @@ func (c *Client) handleConn(conn net.Conn) {
 		attribute.String("mode", "client"),
 	))
 
+	if c.linkState != nil {
+		c.linkState(true, connID)
+	}
+
 	defer func() {
 		c.connPtr.Store(nil)
 		c.connsActive.Add(context.Background(), -1, metric.WithAttributes(
@@ -127,6 +139,9 @@ func (c *Client) handleConn(conn net.Conn) {
 			attribute.String("mode", "client"),
 		))
 		_ = conn.Close()
+		if c.linkState != nil {
+			c.linkState(false, connID)
+		}
 	}()
 
 	c.log.Info("connected", "target", c.config.Connect, "read_responses", c.config.ReadResponses)

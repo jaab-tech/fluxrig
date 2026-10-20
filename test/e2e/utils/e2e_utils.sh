@@ -65,14 +65,19 @@ setup_python_env() {
         python3 -m venv "$venv_dir"
     fi
     
-    # Activate
-    source "$venv_dir/bin/activate"
-    log_info "Activated Python Venv: $(which python3)"
-    
+    # Put the venv first on PATH instead of sourcing bin/activate: activate
+    # carries the venv's absolute path from when it was created, so after the
+    # repository moves it points PATH at a directory that no longer exists, and
+    # python3 silently becomes the system interpreter without the packages.
+    venv_dir="$(cd "$venv_dir" && pwd)"
+    export VIRTUAL_ENV="$venv_dir"
+    export PATH="$venv_dir/bin:$PATH"
+    log_info "Using Python Venv: $(command -v python3)"
+
     # Install Requirements if provided
     if [ -n "$req_file" ] && [ -f "$req_file" ]; then
         log_info "Installing dependencies from $req_file..."
-        pip install -r "$req_file" > /dev/null 2>&1 || log_warn "pip install failed"
+        python3 -m pip install -r "$req_file" > /dev/null 2>&1 || log_warn "pip install failed"
     fi
 }
 
@@ -249,6 +254,22 @@ verify_file() {
 # against a build this repository does not produce.
 bin_dir() {
     echo "${FLUXRIG_BIN_DIR:-${ROOT_DIR}/bin}"
+}
+
+# Print the Mixer's registry records, one per line, tab-separated:
+# type_id, machine_id, name, status, version, attributes (JSON).
+# The registry lives in a JetStream key-value bucket, so the Mixer must be
+# running. Usage: registry_dump $SNAKE_URL [-tls-insecure]
+registry_dump() {
+    local url="$1"; shift
+    (cd "$ROOT_DIR" && go run ./test/e2e/utils/registry_dump -url "$url" "$@")
+}
+
+# Count registry records of one type (2 Mixer, 4 Rack, 9 Snake).
+# Usage: registry_count $SNAKE_URL $TYPE_ID [-tls-insecure]
+registry_count() {
+    local url="$1" type_id="$2"; shift 2
+    registry_dump "$url" "$@" | awk -F'\t' -v t="$type_id" '$1==t' | wc -l | tr -d ' '
 }
 
 # Start Mixer and wait for health

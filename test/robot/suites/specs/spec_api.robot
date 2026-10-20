@@ -24,7 +24,7 @@ Suite Teardown    Teardown Test Environment
 *** Variables ***
 ${MIXER_PORT}     8095
 ${API}            http://127.0.0.1:8095/api/v1
-${URN}            iso8583-v87-ascii/v2.2.0
+${URN}            iso8583-v87-ascii/v3.0.0
 
 *** Keywords ***
 Start A Mixer Holding One Spec
@@ -48,8 +48,8 @@ The Store Lists What It Holds
     [Tags]    api
     ${res}=    Http Get    ${API}/specs
     Should Contain    ${res}[body]    iso8583-v87-ascii
-    Should Contain    ${res}[body]    v2.2.0
-    Should Contain    ${res}[body]    "urn":"iso8583-v87-ascii:v2.2.0"
+    Should Contain    ${res}[body]    v3.0.0
+    Should Contain    ${res}[body]    "urn":"iso8583-v87-ascii:v3.0.0"
 
 A Stored Spec Comes Back Byte For Byte
     [Documentation]    Content-addressed means the bytes are the identity. If the
@@ -66,7 +66,7 @@ The Reference Is Served For A Stored Spec
     ${res}=    Http Get    ${API}/specs/${URN}/doc
     Should Contain    ${res}[content_type]    text/html
     Should Contain    ${res}[body]           ISO 8583:1987
-    Should Contain    ${res}[body]           Version 2.2.0
+    Should Contain    ${res}[body]           Version 3.0.0
 
 The Served Reference Is Public Unless Asked Otherwise
     [Documentation]    This endpoint carries no authentication of its own, and
@@ -87,7 +87,7 @@ The Served Reference Can Be Markdown
     ${res}=    Http Get    ${API}/specs/${URN}/doc?format=markdown
     Should Contain    ${res}[content_type]    text/markdown
     Should Contain    ${res}[body]           \# ISO 8583:1987
-    Should Contain    ${res}[body]           Version 2.2.0
+    Should Contain    ${res}[body]           Version 3.0.0
 
 The Served Page Is As Navigable As The Rendered One
     [Documentation]    Same renderer, so the same guarantee: what a reader clicks

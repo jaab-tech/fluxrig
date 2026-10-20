@@ -10,6 +10,11 @@ import (
 	"github.com/google/uuid"
 )
 
+// randRead is the entropy seam. It is crypto/rand.Read in production, and a
+// test can replace it to drive the failure path of RandomSuffix, the same way
+// uuid.SetRand drives the failure path of NewEntityID.
+var randRead = rand.Read
+
 // IDGenerator provides unique IDs for messages (`flux_id`) and components (`entity_id`).
 // v0.4.6 Migration: Now uses UUID v7 (RFC 9562) for 128-bit time-ordered sovereignty.
 type IDGenerator struct {
@@ -56,6 +61,16 @@ func (g *IDGenerator) NextEntityID(etype EntityType) uuid.UUID {
 // NewEntityID constructs a persistent Component ID using UUID v7 layout
 // but embeds EntityType and machine_id hint in the random/sequence bits.
 // Layout: [ Timestamp (48) ] [ Version (4) ] [ Variant (2) ] [ Type (8) ] [ machine_id Hint (32) ] [ Rand (34) ]
+//
+// The hint is the low 32 bits of the machine ID, a hint and not an identity.
+// A v7 UUID's last 32 bits are random, so the hint is a 32-bit random value,
+// and two different machine IDs can carry the same hint. The birthday bound
+// puts a 50% chance of any collision at about 65536 machines; a fleet of m
+// machines has a collision probability near m^2 / 2^33. The hint is for fast
+// filtering and human debugging, never for authentication or uniqueness: the
+// full 128-bit ID stays unique because the timestamp and the remaining random
+// bits differ, and at the fleet sizes this project targets the risk is far
+// below the v7 timestamp/random collision bound.
 func (g *IDGenerator) NewEntityID(etype EntityType) uuid.UUID {
 	id, err := uuid.NewV7()
 	if err != nil {
@@ -76,7 +91,7 @@ func (g *IDGenerator) NewEntityID(etype EntityType) uuid.UUID {
 	// We take the last 4 bytes of the machineID as the hint.
 	//
 	// A Nil machine ID is a real, expected state here, not a caller error:
-	// a Rack that has not enrolled yet (ADR 0002's Zero Config bootstrap)
+	// a Rack that has not enrolled yet (the Zero Config bootstrap)
 	// legitimately has no machine ID assigned. There is nothing meaningful
 	// to hint at in that case, so the random bytes uuid.NewV7 already put
 	// in this region are left alone instead of being overwritten with a
@@ -90,11 +105,18 @@ func (g *IDGenerator) NewEntityID(etype EntityType) uuid.UUID {
 	return uuid.UUID(bytes)
 }
 
-// RandomSuffix generates a random hex suffix of the specified length.
-func RandomSuffix(n int) string {
-	b := make([]byte, (n+1)/2)
-	if _, err := rand.Read(b); err != nil {
-		return "0000" // Fallback
+// RandomSuffix generates a random hex suffix of the specified length. It
+// returns the entropy error rather than a placeholder: a silent fallback would
+// hand the caller a plausible, wrong suffix with no signal. A caller that
+// needs a suffix must not use one that is not random, so an error it can act
+// on is the only safe contract.
+func RandomSuffix(n int) (string, error) {
+	if n <= 0 {
+		return "", nil
 	}
-	return fmt.Sprintf("%x", b)[:n]
+	b := make([]byte, (n+1)/2)
+	if _, err := randRead(b); err != nil {
+		return "", fmt.Errorf("idgen: random suffix: %w", err)
+	}
+	return fmt.Sprintf("%x", b)[:n], nil
 }

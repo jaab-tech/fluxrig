@@ -424,6 +424,59 @@ const docTemplate = `{
                         }
                     }
                 }
+            },
+            "post": {
+                "description": "Validates the artefact for its kind and files it under name:tag. A spec declares both; lookup data has no header and needs the name and tag query parameters. A translation spec must name store references, and the protocol specs and lookup records it names must already be in the store. A name:tag that already names other content is refused: change the version.",
+                "consumes": [
+                    "application/yaml"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "specs"
+                ],
+                "summary": "Upload a spec or lookup data",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Name to file under. Required for lookup data; overrides a spec's declared id.",
+                        "name": "name",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Version tag (e.g. v1). Required for lookup data; overrides a spec's declared version.",
+                        "name": "tag",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/api.SpecUploaded"
+                        }
+                    },
+                    "400": {
+                        "description": "the artefact does not validate",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "409": {
+                        "description": "name:tag already names other content",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "413": {
+                        "description": "larger than mixer.max_payload_size",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
             }
         },
         "/specs/{name}": {
@@ -917,7 +970,7 @@ const docTemplate = `{
                 "doc": {
                     "description": "Doc is where this version's protocol reference is served.",
                     "type": "string",
-                    "example": "/api/v1/specs/iso8583-v87-ascii/v2.2.0/doc"
+                    "example": "/api/v1/specs/iso8583-v87-ascii/v3.0.0/doc"
                 },
                 "hash": {
                     "type": "string",
@@ -949,7 +1002,7 @@ const docTemplate = `{
                 },
                 "tag": {
                     "type": "string",
-                    "example": "v2.2.0"
+                    "example": "v3.0.0"
                 },
                 "title": {
                     "description": "Title is the human name the document declares, which is not the reference\nit is filed under.",
@@ -958,7 +1011,33 @@ const docTemplate = `{
                 },
                 "urn": {
                     "type": "string",
-                    "example": "iso8583-v87-ascii:v2.2.0"
+                    "example": "iso8583-v87-ascii:v3.0.0"
+                }
+            }
+        },
+        "api.SpecUploaded": {
+            "type": "object",
+            "properties": {
+                "hash": {
+                    "type": "string",
+                    "example": "5dd8f432c33bc7a61f4cd49c8933e34a94f5586f60b878e99cdb51314ef6eacb"
+                },
+                "kind": {
+                    "description": "Kind is what the Mixer validated the artefact as: iso8583, iso20022,\ntranslation, or data (lookup records, which have no spec header).",
+                    "type": "string",
+                    "example": "translation"
+                },
+                "name": {
+                    "type": "string",
+                    "example": "billpay-rtp"
+                },
+                "tag": {
+                    "type": "string",
+                    "example": "v1.0.0"
+                },
+                "urn": {
+                    "type": "string",
+                    "example": "billpay-rtp:v1.0.0"
                 }
             }
         },
@@ -1053,9 +1132,17 @@ const docTemplate = `{
                     "example": "5s"
                 },
                 "retentionDays": {
-                    "description": "RetentionDays for local parquet files.",
+                    "description": "RetentionDays for local parquet files. Wins over\nRotation.MaxAgeDays when set to a positive value.",
                     "type": "integer",
                     "example": 30
+                },
+                "rotation": {
+                    "description": "Rotation controls the retention sweep over local parquet files.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/config.RotationConfig"
+                        }
+                    ]
                 }
             }
         },
@@ -1162,6 +1249,9 @@ const docTemplate = `{
                 },
                 "observability": {
                     "$ref": "#/definitions/config.ObservabilityConfig"
+                },
+                "registry": {
+                    "$ref": "#/definitions/config.RegistryConfig"
                 },
                 "snake": {
                     "$ref": "#/definitions/config.SnakeConfig"
@@ -1294,6 +1384,86 @@ const docTemplate = `{
                 },
                 "namePrefix": {
                     "type": "string"
+                },
+                "outboxBackpressureTimeout": {
+                    "description": "OutboxBackpressureTimeout is how long a live emission waits for older\nparked messages on its subject to drain while the bus is up, before it\nparks behind them. With \"subject\" order it cannot go first, and parking\nit under load fills the outbox until the cap drops messages. \"0s\" parks\nat once. With the bus down nothing waits.",
+                    "type": "string",
+                    "example": "1s"
+                },
+                "outboxDrainRetries": {
+                    "description": "OutboxDrainRetries is how many more times the drain tries a parked\nemission the bus refuses before it moves on and leaves it parked for\nthe next drain. A refused emission is never dropped: only one the bus\nmarks as invalid is.",
+                    "type": "integer",
+                    "example": 3
+                },
+                "outboxMaxMessages": {
+                    "description": "OutboxMaxMessages caps how many bus-bound emissions wait in memory\nwhile the bus is down. When full the oldest entry is dropped and\ncounted; the emitting gear is never blocked.",
+                    "type": "integer",
+                    "example": 10000
+                },
+                "outboxOrder": {
+                    "description": "OutboxOrder is the drain order: \"subject\" (default) never forwards an\nemission ahead of an older one on the same subject, and \"none\" forwards\nwhatever the bus takes as it takes it.",
+                    "type": "string",
+                    "example": "subject"
+                }
+            }
+        },
+        "config.RegistryConfig": {
+            "type": "object",
+            "properties": {
+                "bucket": {
+                    "description": "Bucket names the registry bucket.",
+                    "type": "string",
+                    "example": "fluxrig_registry"
+                },
+                "livenessBucket": {
+                    "description": "LivenessBucket names the presence bucket.",
+                    "type": "string",
+                    "example": "fluxrig_liveness"
+                },
+                "livenessTTL": {
+                    "description": "LivenessTTL is how long after its last heartbeat a Rack still counts\nas online. Three heartbeat intervals by default.",
+                    "type": "string",
+                    "example": "90s"
+                },
+                "maxValueSize": {
+                    "description": "MaxValueSize is the largest record in bytes, headers included. In\npractice it bounds a scenario file.",
+                    "type": "integer",
+                    "example": 1048576
+                },
+                "orphanMinAge": {
+                    "description": "OrphanMinAge is how old a registry record must be before the sweep\ntreats it as left behind rather than in progress.",
+                    "type": "string",
+                    "example": "5m"
+                },
+                "replicas": {
+                    "description": "Replicas is the replica count of both buckets. A single Mixer holds one\nreplica, so a value above 1 needs as many JetStream servers.",
+                    "type": "integer",
+                    "example": 1
+                },
+                "sweepInterval": {
+                    "description": "SweepInterval is how often the Mixer repairs what a crash between two\nregistry writes left behind. It also sweeps once at startup.",
+                    "type": "string",
+                    "example": "10m"
+                },
+                "writeRetries": {
+                    "description": "WriteRetries is how many times a registry write that met a concurrent\none is read again and retried before it fails.",
+                    "type": "integer",
+                    "example": 3
+                }
+            }
+        },
+        "config.RotationConfig": {
+            "type": "object",
+            "properties": {
+                "checkInterval": {
+                    "description": "CheckInterval is how often the retention sweep runs. The sweep\nalso runs once at Mixer startup.",
+                    "type": "string",
+                    "example": "1h"
+                },
+                "maxAgeDays": {
+                    "description": "MaxAgeDays deletes parquet files older than this many days when\nRetentionDays is not set to a positive value.",
+                    "type": "integer",
+                    "example": 30
                 }
             }
         },
@@ -1305,6 +1475,11 @@ const docTemplate = `{
                     "type": "boolean",
                     "example": false
                 },
+                "clusterName": {
+                    "description": "ClusterName is the JetStream domain the embedded server reports. It is\nalso what a client uses to reach a domain-scoped server.",
+                    "type": "string",
+                    "example": "flux"
+                },
                 "connectTimeout": {
                     "type": "string",
                     "example": "10s"
@@ -1312,6 +1487,21 @@ const docTemplate = `{
                 "convergenceDelay": {
                     "type": "string",
                     "example": "100ms"
+                },
+                "dlqenabled": {
+                    "description": "DLQEnabled routes unprocessable messages (decode failure, validation\nfailure, or a handler that failed on every redelivery) to the dead\nletter stream instead of dropping them with only a log line. Off keeps\nthe previous behavior: log and discard.",
+                    "type": "boolean",
+                    "example": true
+                },
+                "dlqmaxAge": {
+                    "description": "DLQMaxAge bounds how long a dead letter is kept. Empty keeps the\nstream default (24h).",
+                    "type": "string",
+                    "example": "720h"
+                },
+                "dlqsubject": {
+                    "description": "DLQSubject is the subject prefix the dead letter stream captures.",
+                    "type": "string",
+                    "example": "flux.dlq"
                 },
                 "domain": {
                     "type": "string",
@@ -1371,6 +1561,11 @@ const docTemplate = `{
                 "storeCipher": {
                     "type": "string",
                     "example": "chacha"
+                },
+                "storeDir": {
+                    "description": "StoreDir overrides where the embedded Snake keeps its JetStream store.\nEmpty keeps the default: a \"snake\" directory under store.dir.",
+                    "type": "string",
+                    "example": "./data/snake"
                 },
                 "storeEncryption": {
                     "type": "boolean",

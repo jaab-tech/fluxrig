@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/moov-io/iso8583"
+	"github.com/moov-io/iso8583/field"
 
 	"github.com/jaab-tech/fluxrig/pkg/gears/native/iso8583/codec/sdl"
 )
@@ -44,13 +45,18 @@ var (
 	// is normal in several dialects and is the reason the correlation key carries
 	// the message class. Sending both classes over one trace range is what proves
 	// the class is doing that work.
-	authMTI    = flag.String("auth-mti", "0200", "Request MTI (0200 financial, 0400 reversal)")
-	authDE43   = flag.String("auth-de43", "", "Acceptor location (DE 43); last two chars are the merchant country. Empty omits the field.")
-	authMix    = flag.String("auth-mix", "", "Multi-scheme terminal: comma list of BIN:expected-de39 (e.g. 4:00,5:05). Each txn picks one at random; the reply's DE39 must match that BIN's expectation.")
-	authAccept = flag.String("auth-accept-de39", "", "Chaos mode: comma list of ACCEPTABLE DE39 values (e.g. 00,91). A reply passes if its DE39 is any of these, instead of an exact match. STAN-echo (cross-wiring) is still enforced strictly.")
-	authReport = flag.String("auth-report", "", "Write a JSON summary report to this path")
-	authReconn = flag.Bool("auth-reconnect", false, "Terminal-side chaos: on a connection error, reconnect and continue (dropped txns are counted, not failed). Models a POS that survives an ingress blip.")
-	authTermID = flag.String("auth-terminal-id", "", "DE41 terminal id. Empty = TERM0001 in single mode, or a per-terminal unique id in concurrent mode so the correlation key is globally unique across terminals (not just per-terminal STAN).")
+	authMTI        = flag.String("auth-mti", "0200", "Request MTI (0200 financial, 0400 reversal)")
+	authDE43       = flag.String("auth-de43", "", "Acceptor location (DE 43); last two chars are the merchant country. Empty omits the field.")
+	authMix        = flag.String("auth-mix", "", "Multi-scheme terminal: comma list of BIN:expected-de39 (e.g. 4:00,5:05). Each txn picks one at random; the reply's DE39 must match that BIN's expectation.")
+	authAccept     = flag.String("auth-accept-de39", "", "Chaos mode: comma list of ACCEPTABLE DE39 values (e.g. 00,91). A reply passes if its DE39 is any of these, instead of an exact match. STAN-echo (cross-wiring) is still enforced strictly.")
+	authReport     = flag.String("auth-report", "", "Write a JSON summary report to this path")
+	authReconn     = flag.Bool("auth-reconnect", false, "Terminal-side chaos: on a connection error, reconnect and continue (dropped txns are counted, not failed). Models a POS that survives an ingress blip.")
+	authTermID     = flag.String("auth-terminal-id", "", "DE41 terminal id. Empty = TERM0001 in single mode, or a per-terminal unique id in concurrent mode so the correlation key is globally unique across terminals (not just per-terminal STAN).")
+	authProcCode   = flag.String("auth-proc-code", "000000", "DE3 processing code (e.g. 500000 for a bill payment)")
+	authAmount     = flag.String("auth-amount", "", "DE4 amount in minor units, 12 digits. Empty: 000000010000 in single mode, a random amount per txn in concurrent mode.")
+	authCurrency   = flag.String("auth-currency", "858", "DE49 numeric ISO 4217 currency code")
+	authMerchantID = flag.String("auth-merchant-id", "", "DE42 card acceptor identification code. Empty omits the field.")
+	authRRN        = flag.String("auth-rrn", "", "DE37 retrieval reference number. Empty omits the field; auto derives it from the date and the STAN (YDDDhh + STAN).")
 )
 
 // binExpect is one scheme a mixed-source terminal drives: a BIN prefix and the
@@ -118,6 +124,8 @@ func runAuthMode() {
 	if err != nil {
 		log.Fatalf("auth: load spec: %v", err)
 	}
+	// The compiled spec packs only once it is nil-safe, as the codec makes it.
+	sdl.MakeNilSafe(spec)
 
 	if *authConns <= 1 && *authCount <= 1 {
 		runAuthSingle(spec)
@@ -132,7 +140,29 @@ func runAuthSingle(spec *iso8583.MessageSpec) {
 	if termID == "" {
 		termID = "TERM0001"
 	}
+	start := time.Now()
 	r, err := sendAuthNewConn(spec, *authTarget, *authPAN, *authSTAN, termID, *authTimeout)
+	// A single transaction writes the same report as a fleet, so a suite
+	// asserts on the response code it got rather than on an exit code alone.
+	if *authReport != "" {
+		rep := authRep{Terminals: 1, Count: 1, Total: 1, ByDE39: map[string]int{}, ByDE42: map[string]int{}}
+		switch {
+		case err != nil:
+			rep.Failed = 1
+		case r.mti == *authExpMTI && (*authExpDE39 == "" || r.de39 == *authExpDE39):
+			rep.OK = 1
+		default:
+			rep.Failed = 1
+		}
+		if err == nil {
+			rep.ByDE39[r.de39] = 1
+			if r.de42 != "" {
+				rep.ByDE42[r.de42] = 1
+			}
+		}
+		rep.ElapsedSec = time.Since(start).Seconds()
+		saveAuthReport(rep)
+	}
 	if err != nil {
 		log.Fatalf("auth: %v", err)
 	}
@@ -340,6 +370,11 @@ func writeAuthReport(agg *aggregator, elapsed float64, total, ok, crossed, faile
 		LatencyP50Ms: percentile(lat, 50),
 		LatencyP99Ms: percentile(lat, 99),
 	}
+	saveAuthReport(rep)
+}
+
+// saveAuthReport writes rep to -auth-report.
+func saveAuthReport(rep authRep) {
 	data, err := json.MarshalIndent(rep, "", "  ")
 	if err != nil {
 		log.Printf("auth: report marshal: %v", err)
@@ -398,15 +433,29 @@ func sendAuthOnConn(conn net.Conn, spec *iso8583.MessageSpec, pan, stan, amount,
 	req := iso8583.NewMessage(spec)
 	set(req, 0, *authMTI)
 	set(req, 2, pan)
-	set(req, 3, "000000")
+	if *authAmount != "" {
+		amount = *authAmount
+	}
+	now := time.Now().UTC()
+	set(req, 3, *authProcCode)
 	set(req, 4, amount)
-	set(req, 7, time.Now().UTC().Format("0102150405"))
+	set(req, 7, now.Format("0102150405"))
 	set(req, 11, stan)
+	switch *authRRN {
+	case "":
+	case "auto":
+		set(req, 37, rrnFor(now, stan))
+	default:
+		set(req, 37, *authRRN)
+	}
 	set(req, 41, termID)
+	if *authMerchantID != "" {
+		set(req, 42, *authMerchantID)
+	}
 	if *authDE43 != "" {
 		set(req, 43, fitField(spec, 43, *authDE43))
 	}
-	set(req, 49, "858") // ISO 4217 UYU, matching the load generator and the UY scenario
+	set(req, 49, *authCurrency)
 	packed, err := req.Pack()
 	if err != nil {
 		return authResult{}, fmt.Errorf("pack: %w", err)
@@ -426,6 +475,12 @@ func sendAuthOnConn(conn net.Conn, spec *iso8583.MessageSpec, pan, stan, amount,
 	return authResult{mti: fieldStr(resp, 0), de39: fieldStr(resp, 39), stan: fieldStr(resp, 11), de42: fieldStr(resp, 42)}, nil
 }
 
+// rrnFor derives a 12-digit retrieval reference number: the last digit of the
+// year, the day of the year, the hour, and the 6-digit STAN.
+func rrnFor(now time.Time, stan string) string {
+	return fmt.Sprintf("%d%03d%02d%s", now.Year()%10, now.YearDay(), now.Hour(), stan)
+}
+
 func set(m *iso8583.Message, id int, v string) {
 	if err := m.Field(id, v); err != nil {
 		log.Fatalf("auth: set field %d: %v", id, err)
@@ -438,5 +493,26 @@ func fieldStr(m *iso8583.Message, id int) string {
 		return ""
 	}
 	s, _ := f.String()
+	// Unpacking removes a fixed field's padding, so with left zero padding the
+	// MTI "0210" reads back as "210" and STAN "000017" as "17". Put the padding
+	// back, so the value is what the wire carried and compares with what was
+	// sent. A Numeric with no padder reads back as an integer the same way.
+	sp := f.Spec()
+	if sp == nil || len(s) >= sp.Length || !isFixedPrefix(sp.Pref) {
+		return s
+	}
+	if sp.Pad != nil {
+		return string(sp.Pad.Pad([]byte(s), sp.Length))
+	}
+	if _, isNumeric := f.(*field.Numeric); isNumeric {
+		return strings.Repeat("0", sp.Length-len(s)) + s
+	}
 	return s
+}
+
+// isFixedPrefix reports whether a field has a fixed length. Moov names its
+// fixed-length prefixers *Fixed*; the variable ones carry the length on the
+// wire, so their value has no width to restore.
+func isFixedPrefix(p any) bool {
+	return p != nil && strings.Contains(fmt.Sprintf("%T", p), "Fixed")
 }

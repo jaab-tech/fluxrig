@@ -15,25 +15,36 @@ import (
 
 const (
 	defaultRetentionDays = 30
-	janitorInterval      = 1 * time.Hour
+	defaultInterval      = 1 * time.Hour
 )
+
+// minPlausibleTimestamp is the earliest a file-name timestamp is accepted as
+// real. A name suffix that parses as a number but lands before this is treated
+// as absent, and the modification time governs instead.
+var minPlausibleTimestamp = time.Date(2001, 1, 1, 0, 0, 0, 0, time.UTC)
 
 // Janitor manages telemetry data retention by cleaning up old files.
 type Janitor struct {
 	logger        *slog.Logger
 	dataDir       string
 	retentionDays int
+	interval      time.Duration
 }
 
-// NewJanitor creates a new retention manager.
-func NewJanitor(logger *slog.Logger, dataDir string, retentionDays int) *Janitor {
+// NewJanitor creates a new retention manager. A non-positive retentionDays
+// falls back to the default. A non-positive interval falls back to one hour.
+func NewJanitor(logger *slog.Logger, dataDir string, retentionDays int, interval time.Duration) *Janitor {
 	if retentionDays <= 0 {
 		retentionDays = defaultRetentionDays
+	}
+	if interval <= 0 {
+		interval = defaultInterval
 	}
 	return &Janitor{
 		logger:        logger,
 		dataDir:       dataDir,
 		retentionDays: retentionDays,
+		interval:      interval,
 	}
 }
 
@@ -44,7 +55,7 @@ func (j *Janitor) Start(ctx context.Context) {
 		j.logger.Error("janitor failed on startup", "error", err)
 	}
 
-	ticker := time.NewTicker(janitorInterval)
+	ticker := time.NewTicker(j.interval)
 	go func() {
 		defer ticker.Stop()
 		for {
@@ -76,7 +87,12 @@ func (j *Janitor) clean() error {
 	}
 
 	err := filepath.Walk(j.dataDir, func(path string, info os.FileInfo, err error) error {
-		if info.IsDir() {
+		if err != nil {
+			// An unreadable entry must not abort the whole sweep.
+			j.logger.Warn("failed to inspect path during retention sweep", "path", path, "error", err)
+			return nil
+		}
+		if info == nil || info.IsDir() {
 			return nil
 		}
 		// Only target .parquet files in telemetry directories
@@ -84,14 +100,22 @@ func (j *Janitor) clean() error {
 			return nil
 		}
 
-		// Parse timestamp from filename to be accurate, fallback to ModTime
+		// Prefer the timestamp in the file name, because it is the flush time
+		// and does not move if the file is later touched. Fall back to the
+		// modification time. A name timestamp is trusted only when it is a
+		// plausible epoch-nanosecond value: a truncated or malformed suffix
+		// would otherwise read as 1970 and delete a file that is still inside
+		// the retention window.
 		// Format: type_TIMESTAMP.parquet
 		// e.g. metrics_1767735924810.parquet
 		ts := info.ModTime()
 		parts := strings.Split(strings.TrimSuffix(info.Name(), ".parquet"), "_")
 		if len(parts) >= 2 {
 			if nanos, err := strconv.ParseInt(parts[len(parts)-1], 10, 64); err == nil {
-				ts = time.Unix(0, nanos)
+				fromName := time.Unix(0, nanos)
+				if !fromName.Before(minPlausibleTimestamp) {
+					ts = fromName
+				}
 			}
 		}
 

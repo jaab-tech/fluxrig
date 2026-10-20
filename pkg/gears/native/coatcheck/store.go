@@ -77,16 +77,14 @@ func (s *StoreLogic) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxms
 	// fluxmsg.MetaCoatCheckTTL
 
 	// KV Put.
-	// Note: NATS KV TTL is usually bucket-wide. Per-key TTL is not supported in basic KV logic
-	// UNLESS using 'Purge' or external cleaner (which is our Daemon!).
-	// So we just Put. The Daemon will read the expiration from the value or default.
-	// Wait, we need to KNOW when it expires.
-	// Strategy: We can't rely on NATS to auto-expire individual keys if bucket has MAX_AGE.
-	// But if bucket has TTL, ALL keys expire.
-	// The specification says: "Daemon... Schedules timers...".
-	// So the Daemon needs to know the specific expiry time.
-	// We should probably check if we need to store "ExpireAt" in metadata?
-	// Or Daemon calculates it from "TSInit + TTL"? Yes.
+	// NATS KV carries a per-message TTL only on Create (jetstream.KeyTTL), and
+	// the bucket opts into it in EnsureBucket. The entry is written with the
+	// TTL its own message asked for, capped at max_ttl, so it expires on its
+	// own even while the Daemon is not running. Before this the entry lived
+	// for the bucket-wide TTL (max_ttl), so a short-lived key outlived its
+	// ticket by the whole cap, and a crashed Daemon extended that to the cap
+	// after the crash.
+	storeTTL := s.gear.resolveTTL(msg, s.gear.config.DefaultTTL, s.gear.config.MaxTTL)
 
 	bucket := s.gear.config.Bucket
 
@@ -120,7 +118,7 @@ func (s *StoreLogic) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxms
 			// the message moves on; inheriting it would cancel nearly every write.
 			putCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.gear.config.StoreTimeout)
 			defer cancel()
-			if _, putErr := s.gear.ctx.Bus().KV().Put(putCtx, bucket, key, valBytes); putErr != nil {
+			if _, putErr := s.gear.ctx.Bus().KV().PutWithTTL(putCtx, bucket, key, valBytes, storeTTL); putErr != nil {
 				s.gear.ctx.Logger().Warn("coat store failed, message already forwarded",
 					"key", key, "bucket", bucket, "error", putErr)
 			}
@@ -132,7 +130,11 @@ func (s *StoreLogic) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxms
 		return nil, nil
 	}
 
-	if _, err = s.gear.ctx.Bus().KV().Put(ctx, bucket, key, valBytes); err != nil {
+	// Bounded like the detached write: a control plane that does not answer
+	// must not hold the message without limit.
+	putCtx, cancel := context.WithTimeout(ctx, s.gear.config.StoreTimeout)
+	defer cancel()
+	if _, err = s.gear.ctx.Bus().KV().PutWithTTL(putCtx, bucket, key, valBytes, storeTTL); err != nil {
 		return nil, fmt.Errorf("coatcheck store: kv put failed: %w", err)
 	}
 	strip()

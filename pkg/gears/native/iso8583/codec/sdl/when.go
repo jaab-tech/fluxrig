@@ -17,7 +17,7 @@ import (
 // traffic is served — an expression is a claim about the catalog, and a claim
 // nothing checks is how a spec loads clean and does nothing.
 //
-// Grammar (ADR 0047):
+// Grammar:
 //
 //	expr       = or_expr
 //	or_expr    = and_expr { "||" and_expr }

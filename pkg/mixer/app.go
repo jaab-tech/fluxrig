@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -30,6 +31,7 @@ import (
 	"github.com/jaab-tech/fluxrig/pkg/mixer/api"
 	"github.com/jaab-tech/fluxrig/pkg/netutil"
 	"github.com/jaab-tech/fluxrig/pkg/pki"
+	"github.com/jaab-tech/fluxrig/pkg/registry/kvstore"
 	"github.com/jaab-tech/fluxrig/pkg/router"
 	"github.com/jaab-tech/fluxrig/pkg/snake"
 	"github.com/jaab-tech/fluxrig/pkg/store/duckdb"
@@ -45,6 +47,10 @@ type App struct {
 	log           *slog.Logger
 	bufHandler    *telemetry.BufferHandler
 	switchHandler *telemetry.SwitchableHandler
+	// ready is closed once Run has finished startup: store migrated, bus and
+	// controllers up, API server started.
+	ready     chan struct{}
+	readyOnce sync.Once
 }
 
 // NewApp creates a new Mixer application instance.
@@ -54,7 +60,14 @@ func NewApp(cfg *config.MixerConfig, scenarioRef string, bufHandler *telemetry.B
 		scenarioRef: scenarioRef,
 		log:         slog.Default().With("component", "MIXER"),
 		bufHandler:  bufHandler,
+		ready:       make(chan struct{}),
 	}
+}
+
+// Ready is closed when Run has finished startup. A caller that must not
+// interrupt startup (a test, a supervisor) waits on it instead of on a timer.
+func (a *App) Ready() <-chan struct{} {
+	return a.ready
 }
 
 // Run initializes and starts the Mixer service.
@@ -119,9 +132,6 @@ func (a *App) Run(ctx context.Context) error {
 	if errMig := store.Migrate(ctx); errMig != nil {
 		return fmt.Errorf("failed to migrate store: %w", errMig)
 	}
-	a.log.Info("Setting auto_adopt", "enabled", a.cfg.Enrollment.AutoAdopt)
-	store.SetAutoAdopt(a.cfg.Enrollment.AutoAdopt)
-	store.SetBootstrapSecret(a.cfg.Enrollment.BootstrapSecret)
 
 	// 2. Identity Management (Sovereign Passport)
 	keyPath := filepath.Join(a.cfg.Store.Dir, a.cfg.Store.ClusterKeyFile)
@@ -164,24 +174,7 @@ func (a *App) Run(ctx context.Context) error {
 	a.log = slog.New(a.bufHandler)
 
 	// 3b. Snake Initialization (Embedded NATS/JetStream)
-	subjects := a.cfg.Snake.StreamSubjects
-	if len(subjects) == 0 {
-		subjects = []string{
-			"flux.msg.>",
-			"flux.agent.>",
-			"flux.rack.>",
-			"flux.ctrl.>",
-		}
-		// If domain is not 'flux', add domain-prefixed subjects too for backward compatibility/isolation
-		if a.cfg.Snake.Domain != "flux" && a.cfg.Snake.Domain != "" {
-			subjects = append(subjects,
-				fmt.Sprintf("%s.msg.>", a.cfg.Snake.Domain),
-				fmt.Sprintf("%s.agent.>", a.cfg.Snake.Domain),
-				fmt.Sprintf("%s.rack.>", a.cfg.Snake.Domain),
-				fmt.Sprintf("%s.ctrl.>", a.cfg.Snake.Domain),
-			)
-		}
-	}
+	subjects := messageSubjects(&a.cfg.Snake)
 
 	storeKey, storeOldKey, storeKeySource, errStoreKey := resolveStoreKeys(&a.cfg.Snake, clusterKey)
 	if errStoreKey != nil {
@@ -204,9 +197,14 @@ func (a *App) Run(ctx context.Context) error {
 		a.log.Warn("Snake accepts plaintext clients alongside TLS ones", "setting", "snake.allow_non_tls")
 	}
 
+	snakeStoreDir := a.cfg.Snake.StoreDir
+	if snakeStoreDir == "" {
+		snakeStoreDir = filepath.Join(a.cfg.Store.Dir, "snake")
+	}
 	snakeSrv, err := snake.NewServer(ctx, snake.Config{
 		Port:           a.cfg.Snake.Port,
-		StoreDir:       filepath.Join(a.cfg.Store.Dir, "snake"),
+		ClusterName:    a.cfg.Snake.ClusterName,
+		StoreDir:       snakeStoreDir,
 		StreamName:     a.cfg.Snake.StreamName,
 		StreamSubjects: subjects,
 		TLSCert:        a.cfg.Snake.TLSCertFile,
@@ -236,6 +234,21 @@ func (a *App) Run(ctx context.Context) error {
 		}
 		if errTel := snakeSrv.ProvisionStream(ctx, a.cfg.Telemetry.StreamName, telSubjects); errTel != nil {
 			a.log.Warn("Failed to provision telemetry stream", "error", errTel)
+		}
+	}
+
+	// 3c. Provision the Dead Letter Stream. A message no consumer could process
+	// is republished here instead of disappearing, so it must exist before any
+	// consumer can need it. Its own max age keeps a poison message from living
+	// forever and filling the disk.
+	if a.cfg.Snake.DLQEnabled {
+		dlqPrefix := a.cfg.Snake.DLQSubject
+		if dlqPrefix == "" {
+			dlqPrefix = "flux.dlq"
+		}
+		dlqSubjects := []string{dlqPrefix + ".>"}
+		if errDLQ := snakeSrv.ProvisionStreamWithAge(ctx, "flux-dlq", dlqSubjects, a.cfg.Snake.DLQMaxAge); errDLQ != nil {
+			a.log.Warn("Failed to provision dead letter stream", "error", errDLQ)
 		}
 	}
 
@@ -276,6 +289,8 @@ func (a *App) Run(ctx context.Context) error {
 		RootCA:             a.cfg.Snake.RootCAFile,
 		InsecureSkipVerify: a.cfg.Snake.InsecureSkipVerify,
 		InProcessServer:    snakeSrv, // Optimized internal link
+		DLQEnabled:         a.cfg.Snake.DLQEnabled,
+		DLQSubject:         a.cfg.Snake.DLQSubject,
 	}); errConn != nil {
 		return fmt.Errorf("failed to connect to bus: %w", errConn)
 	}
@@ -283,6 +298,40 @@ func (a *App) Run(ctx context.Context) error {
 
 	// Instrumented Bus for metrics
 	managedBus := telemetry.NewInstrumentedBus(natsBus, nil)
+
+	// 5b. Registry: Racks, names, scenario files and the active pointer in a
+	// JetStream key-value bucket, presence in a second one that expires it.
+	regCfg := a.cfg.Registry.WithDefaults()
+	livenessTTL, errTTL := time.ParseDuration(regCfg.LivenessTTL)
+	if errTTL != nil || livenessTTL <= 0 {
+		return fmt.Errorf("registry.liveness_ttl must be a positive duration, got %q", regCfg.LivenessTTL)
+	}
+	regBucket, liveBucket, errBuckets := kvstore.EnsureBuckets(ctx, natsBus.JetStream(), kvstore.BucketConfig{
+		Registry:     regCfg.Bucket,
+		Liveness:     regCfg.LivenessBucket,
+		Replicas:     regCfg.Replicas,
+		MaxValueSize: regCfg.MaxValueSize,
+		LivenessTTL:  livenessTTL,
+	})
+	if errBuckets != nil {
+		return fmt.Errorf("failed to open the registry: %w", errBuckets)
+	}
+	reg := kvstore.New(a.log, regBucket, liveBucket, store, mixerState.MachineID, kvstore.Config{
+		MaxValueSize: regCfg.MaxValueSize,
+		WriteRetries: regCfg.WriteRetries,
+	})
+	a.log.Info("Setting auto_adopt", "enabled", a.cfg.Enrollment.AutoAdopt)
+	reg.SetAutoAdopt(a.cfg.Enrollment.AutoAdopt)
+	reg.SetBootstrapSecret(a.cfg.Enrollment.BootstrapSecret)
+
+	// Repair what a crash between two registry writes left behind: once now,
+	// then on an interval. Validated at load; WithDefaults covers a config
+	// built in code.
+	sweepInterval, _ := time.ParseDuration(regCfg.SweepInterval)
+	orphanGrace, _ := time.ParseDuration(regCfg.OrphanMinAge)
+	if sweepInterval > 0 && orphanGrace > 0 {
+		go a.sweepRegistry(ctx, reg, sweepInterval, orphanGrace)
+	}
 
 	// 6. Router Initialization (Control Signaling)
 	wmLogger := loggerPkg.NewWatermillAdapter(a.log)
@@ -293,23 +342,7 @@ func (a *App) Run(ctx context.Context) error {
 
 	// Configure JS Streams
 	// Use configured subjects if available, otherwise use defaults
-	msgSubjects := a.cfg.Snake.StreamSubjects
-	if len(msgSubjects) == 0 {
-		msgSubjects = []string{
-			"flux.msg.>",
-			"flux.agent.>",
-			"flux.rack.>",
-			"flux.ctrl.>",
-		}
-		if a.cfg.Snake.Domain != "flux" && a.cfg.Snake.Domain != "" {
-			msgSubjects = append(msgSubjects,
-				fmt.Sprintf("%s.msg.>", a.cfg.Snake.Domain),
-				fmt.Sprintf("%s.agent.>", a.cfg.Snake.Domain),
-				fmt.Sprintf("%s.rack.>", a.cfg.Snake.Domain),
-				fmt.Sprintf("%s.ctrl.>", a.cfg.Snake.Domain),
-			)
-		}
-	}
+	msgSubjects := messageSubjects(&a.cfg.Snake)
 
 	telemetrySubjects := a.cfg.Telemetry.StreamSubjects
 	if len(telemetrySubjects) == 0 {
@@ -335,7 +368,7 @@ func (a *App) Run(ctx context.Context) error {
 
 	// 7. Controller Initialization
 	pushDelay, _ := time.ParseDuration(a.cfg.Enrollment.PushDelay)
-	enrollCtrl := controller.NewEnrollmentController(a.log, store, r.Pub, clusterKey, mixerState.MachineID, pushDelay)
+	enrollCtrl := controller.NewEnrollmentController(a.log, reg, r.Pub, clusterKey, mixerState.MachineID, pushDelay)
 	enrollCtrl.RegisterRoutes(r)
 
 	// Scenario Controller
@@ -343,12 +376,15 @@ func (a *App) Run(ctx context.Context) error {
 	if scenarioWait == 0 {
 		scenarioWait = 15 * time.Second
 	}
-	scenarioCtrl := controller.NewScenarioController(a.log, a.cfg.Store.Dir, store, idGen, mixerState.MachineID, scenarioWait)
+	scenarioCtrl := controller.NewScenarioController(a.log, store, reg, reg, idGen, mixerState.MachineID, scenarioWait)
 	scenarioCtrl.SetBus(managedBus)
 
 	// The store the Mixer resolves a scenario's spec references against, so the
-	// artefacts travel to the racks with the scenario that names them.
-	if specMgr, errSpec := manager.NewManager(filepath.Join(a.cfg.Store.Dir, "store")); errSpec != nil {
+	// artefacts travel to the racks with the scenario that names them. The API
+	// files uploads into the same instance: a manager keeps its index in
+	// memory, so a second one would not see what the first one stored.
+	specMgr, errSpec := manager.NewManager(filepath.Join(a.cfg.Store.Dir, "store"))
+	if errSpec != nil {
 		a.log.Warn("spec store unavailable; scenarios will ship without the specs they name", "error", errSpec)
 	} else {
 		scenarioCtrl.WithSpecStore(specMgr)
@@ -383,6 +419,16 @@ func (a *App) Run(ctx context.Context) error {
 		}
 		defer func() { _ = sink.Stop() }()
 
+		// Retention sweep over the parquet files the sink writes. Started
+		// here, beside the sink, because it cleans up what the sink
+		// produces and shares its data directory.
+		retentionDays, checkInterval := a.retentionPolicy()
+		janitor := telemetry.NewJanitor(a.log, a.cfg.Store.Dir, retentionDays, checkInterval)
+		janitor.Start(ctx)
+		a.log.Info("Telemetry retention janitor started",
+			"retention_days", retentionDays,
+			"check_interval", checkInterval)
+
 		// Flush early logs to NATS now that the sink is active
 		if a.bufHandler != nil {
 			nw := telemetry.NewNatsWriter(telBusIngest, mixerEntityID, mixerState.Name, a.cfg.Telemetry.BaseSubject, idGen, 5*time.Second)
@@ -404,7 +450,7 @@ func (a *App) Run(ctx context.Context) error {
 	// 8. Register Mixer & Snake in local Registry
 	a.log.Info("Registering Mixer and Snake identities...", "id", mixerState.MachineID)
 	mixerIP := netutil.LocalIPv4()
-	_, errReg := store.RegisterEntity(ctx, uint8(idgen.EntityMixer), mixerState.MachineID, mixerState.Name, a.cfg.Enrollment.BootstrapSecret, mixerIP, a.cfg.API.Port, version.Version, nil, nil, mixerState.MachineID)
+	errReg := reg.UpsertSelf(ctx, uint8(idgen.EntityMixer), mixerState.MachineID, mixerState.Name, mixerIP, a.cfg.API.Port, version.Version, nil)
 	if errReg != nil {
 		a.log.Error("Failed to register Mixer in local registry", "error", errReg)
 	}
@@ -418,7 +464,7 @@ func (a *App) Run(ctx context.Context) error {
 		"mixer_ip":   mixerIP,
 		"mixer_port": a.cfg.API.Port,
 	}
-	_, errSnk := store.RegisterEntity(ctx, uint8(idgen.EntitySnake), mixerState.MachineID, "embedded-snake", a.cfg.Enrollment.BootstrapSecret, mixerIP, a.cfg.Snake.Port, version.Version, nil, snakeAttrs, mixerState.MachineID)
+	errSnk := reg.UpsertSelf(ctx, uint8(idgen.EntitySnake), mixerState.MachineID, "embedded-snake", mixerIP, a.cfg.Snake.Port, version.Version, snakeAttrs)
 	if errSnk != nil {
 		a.log.Error("Failed to register Snake in local registry", "error", errSnk)
 	}
@@ -428,7 +474,7 @@ func (a *App) Run(ctx context.Context) error {
 		"goroutines": runtime.NumGoroutine(),
 		"uptime":     "0s",
 	}
-	if errHb := store.HeartbeatEntity(ctx, uint8(idgen.EntityMixer), mixerState.MachineID, initialStats, nil); errHb != nil {
+	if errHb := reg.HeartbeatEntity(ctx, uint8(idgen.EntityMixer), mixerState.MachineID, initialStats, nil); errHb != nil {
 		a.log.Warn("Failed to send initial heartbeat for Mixer", "error", errHb)
 	}
 
@@ -437,7 +483,7 @@ func (a *App) Run(ctx context.Context) error {
 		"in_msgs":  0,
 		"out_msgs": 0,
 	}
-	if errHbSnk := store.HeartbeatEntity(ctx, uint8(idgen.EntitySnake), mixerState.MachineID, snakeStats, nil); errHbSnk != nil {
+	if errHbSnk := reg.HeartbeatEntity(ctx, uint8(idgen.EntitySnake), mixerState.MachineID, snakeStats, nil); errHbSnk != nil {
 		a.log.Warn("Failed to send initial heartbeat for Snake", "error", errHbSnk)
 	}
 
@@ -453,20 +499,39 @@ func (a *App) Run(ctx context.Context) error {
 	}
 
 	// 9. API Server
-	apiSrv := api.NewServer(store, r.Pub, clusterKey, scenarioCtrl, mCache, mixerState.MachineID, mixerEntityID, a.cfg, wasmCat, r.NC)
-	if specMgr, errSpec := manager.NewManager(filepath.Join(a.cfg.Store.Dir, "store")); errSpec == nil {
+	apiSrv := api.NewServer(reg, r.Pub, clusterKey, scenarioCtrl, mCache, mixerState.MachineID, mixerEntityID, a.cfg, wasmCat, r.NC)
+	if errSpec == nil {
 		apiSrv.WithSpecStore(specMgr)
 	}
+	// The API is how the Mixer is managed and how artefacts reach its store.
+	// A Mixer without it looks healthy and cannot be operated, so a missing
+	// token or a port that cannot be bound stops the start, and an API that
+	// fails later stops the Mixer.
+	apiListener, errListen := apiSrv.Listen(fmt.Sprintf(":%d", a.cfg.API.Port))
+	if errListen != nil {
+		return errListen
+	}
+	runCtx, stopRun := context.WithCancel(ctx)
+	defer stopRun()
+	apiErr := make(chan error, 1)
 	go func() {
-		addr := fmt.Sprintf(":%d", a.cfg.API.Port)
-		if errSrv := apiSrv.Start(addr); errSrv != nil {
-			a.log.Error("API server failed", "error", errSrv)
-		}
+		errSrv := apiSrv.Serve(apiListener)
+		a.log.Error("API server failed", "error", errSrv)
+		apiErr <- errSrv
+		stopRun()
 	}()
 
 	a.log.Info("Mixer is ready", "name", mixerState.Name, "id", mixerState.MachineID, "entity_id", mixerEntityID)
+	a.readyOnce.Do(func() { close(a.ready) })
 
-	// 10. Startup Scenario Execution
+	// 10. Startup Scenario Execution. --scenario names the scenario to run;
+	// without it, the one the registry last recorded as active is restored,
+	// without pushing it again to Racks that already run it.
+	if a.scenarioRef == "" {
+		if errLoad := scenarioCtrl.LoadActive(ctx); errLoad != nil {
+			a.log.Warn("Failed to restore the active scenario", "error", errLoad)
+		}
+	}
 	if a.scenarioRef != "" {
 		a.log.Info("Executing startup scenario", "ref", a.scenarioRef)
 		// 1. Resolve Scenario (File path or Name)
@@ -500,11 +565,30 @@ func (a *App) Run(ctx context.Context) error {
 	}
 
 	// 9. Start Router
-	if errRun := r.Router.Run(ctx); errRun != nil {
+	if errRun := r.Router.Run(runCtx); errRun != nil {
 		return fmt.Errorf("router failed: %w", errRun)
 	}
-
+	select {
+	case errSrv := <-apiErr:
+		return fmt.Errorf("mixer API stopped: %w", errSrv)
+	default:
+	}
 	return nil
+}
+
+// retentionPolicy resolves the retention sweep settings. RetentionDays wins
+// over Rotation.MaxAgeDays when it is positive, so the two keys never disagree
+// silently about the same value. The interval is the rotation check interval.
+func (a *App) retentionPolicy() (int, time.Duration) {
+	days := a.cfg.Observability.Embedded.RetentionDays
+	if days <= 0 {
+		days = a.cfg.Observability.Embedded.Rotation.MaxAgeDays
+	}
+	interval, err := time.ParseDuration(a.cfg.Observability.Embedded.Rotation.CheckInterval)
+	if err != nil || interval <= 0 {
+		interval = time.Hour
+	}
+	return days, interval
 }
 
 // logStartupActivateResult reports how Activate failed for a startup scenario.
@@ -519,4 +603,24 @@ func logStartupActivateResult(log *slog.Logger, name string, err error) {
 		return
 	}
 	log.Warn("Failed to activate startup scenario", "name", name, "error", err)
+}
+
+// sweepRegistry runs the registry sweep at startup and then every interval,
+// until ctx ends.
+func (a *App) sweepRegistry(ctx context.Context, reg *kvstore.Store, interval, grace time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		if res, err := reg.SweepOrphans(ctx, grace); err != nil {
+			a.log.Warn("registry sweep failed", "error", err)
+		} else if res != (kvstore.SweepResult{}) {
+			a.log.Info("registry sweep repaired entries",
+				"removed", res.Removed, "repaired", res.Repaired, "name_keys_removed", res.NameKeysRemoved)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }

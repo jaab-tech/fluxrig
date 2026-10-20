@@ -112,6 +112,9 @@ func (ib *InstrumentedBus) PublishRaw(ctx context.Context, subject string, data 
 
 	m.BusPublishCount.Add(ctx, 1)
 	m.NatsMessagesPublished.Add(ctx, 1, attrs)
+	// The raw path has the bytes in hand, so it records the size; the FluxMsg
+	// path would need a second marshal to know it and does not.
+	m.NatsBytesPublished.Add(ctx, int64(len(data)), attrs)
 	m.NatsPublishLatency.Record(ctx, float64(duration), attrs)
 
 	if err != nil {
@@ -160,9 +163,21 @@ func (ib *InstrumentedBus) Subscribe(subject string, handler bus.Handler) (bus.S
 }
 
 func (ib *InstrumentedBus) SubscribeRaw(subject string, streamName string, handler bus.RawHandler) (bus.Subscription, error) {
-	// For Raw, we just delegate for now (tracing requires unmarshal)
-	// TODO: Add metrics for raw subscription
-	return ib.next.SubscribeRaw(subject, streamName, handler)
+	// Raw messages carry their own subject and bytes, so this path records the
+	// receive count and the byte total. It does not start a span: raw data is
+	// not a FluxMsg, so there is no metadata to extract a traceparent from.
+	// The Coat Check daemon is the consumer here; before this it was invisible
+	// to the receive counters.
+	wrappedHandler := func(ctx context.Context, subj string, data []byte) {
+		m := GetMetrics()
+		if m != nil {
+			attrs := metric.WithAttributes(attribute.String("subject", subj))
+			m.NatsMessagesReceived.Add(ctx, 1, attrs)
+			m.NatsBytesReceived.Add(ctx, int64(len(data)), attrs)
+		}
+		handler(ctx, subj, data)
+	}
+	return ib.next.SubscribeRaw(subject, streamName, wrappedHandler)
 }
 
 func (ib *InstrumentedBus) SubscribeDurable(subject, durableName string, handler bus.Handler) (bus.Subscription, error) {

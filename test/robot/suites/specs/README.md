@@ -9,7 +9,7 @@ A spec is a deployed artefact, and the rules that make one referable were
 unenforced for most of the project's life. The schema asked for a version,
 nothing read it, and a spec with no version at all loaded clean. The
 content-addressed store read neither the declared name nor the declared version,
-so the reference spec — which says `2.2.0` — was filed as `v0.1.0`, the same file
+so the reference spec, which declares its own version, was filed as `v0.1.0`, the same file
 imported twice became two versions of itself with identical hashes, and the
 immutability check that already existed could never fire.
 

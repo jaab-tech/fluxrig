@@ -12,7 +12,7 @@ import (
 )
 
 // ValidateConfig checks a gear instance's configuration against its manifest's
-// JSON Schema (ADR 0045). It is the author-time guard the runtime applies at
+// JSON Schema. It is the author-time guard the runtime applies at
 // ApplyScenario so a mistyped value, a bad enum, or a missing required field
 // fails loudly at activation instead of silently misbehaving at runtime.
 //

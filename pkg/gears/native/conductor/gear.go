@@ -18,7 +18,7 @@
 //	             any decline.
 //
 // Port names use underscores, never dots: a dot in a wire endpoint separates
-// rack / gear / port levels (ADR 0043), so a port name must not contain one.
+// rack / gear / port levels, so a port name must not contain one.
 package conductor
 
 import (
@@ -45,6 +45,7 @@ const (
 	reasonTimeout        = "timeout"
 	reasonUnmatchedReply = "unmatched_reply"
 	reasonInvalidOrigin  = "invalid_origin"
+	reasonOverloaded     = "overloaded"
 )
 
 const (
@@ -201,6 +202,13 @@ func (g *Gear) Init(ctx sdk.GearContext) error {
 		if retain != 0 {
 			vcfg.RetainAfterClose = retain
 		}
+		if raw, ok := vm["max_in_flight"]; ok {
+			mif, ok := asInt(raw)
+			if !ok || mif < 0 {
+				return fmt.Errorf("conductor: valet.max_in_flight must be a non-negative integer")
+			}
+			vcfg.MaxInFlight = mif
+		}
 	}
 	engine, err := valet.New(vcfg)
 	if err != nil {
@@ -340,6 +348,15 @@ func (g *Gear) handleRequest(ctx context.Context, msg *fluxmsg.FluxMsg) error {
 		ReturnCtx:   returnContext(msg.Metadata),
 	})
 	if err != nil {
+		// Overload is an expected, handled condition, not a fault: shed the
+		// request deterministically instead of routing it to the runtime's
+		// error path a second time. The message is the original, unchanged; it
+		// never got a ticket, so there is nothing to release.
+		if errors.Is(err, valet.ErrOverloaded) {
+			g.logger.Warn("in-flight limit reached, shedding request", "route", rt.name, "key", key)
+			g.emitError(msg, reasonOverloaded)
+			return nil
+		}
 		return fmt.Errorf("conductor: park: %w", err)
 	}
 
@@ -742,4 +759,24 @@ func returnContext(m map[string]string) map[string]string {
 		return nil
 	}
 	return out
+}
+
+// asInt reads a scenario config number, which the YAML loader may hand over as
+// an int or a float64. A non-integral float or any other type reports false,
+// so a typo in max_in_flight fails at Init instead of silently disabling the
+// bound.
+func asInt(v any) (int, bool) {
+	switch n := v.(type) {
+	case int:
+		return n, true
+	case int64:
+		return int(n), true
+	case float64:
+		if n != float64(int(n)) {
+			return 0, false
+		}
+		return int(n), true
+	default:
+		return 0, false
+	}
 }

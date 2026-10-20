@@ -29,6 +29,22 @@ var migrations = []Migration{
 		Name:    "init_fluxrig_schema",
 		Up:      migrateV1,
 	},
+	{
+		Version: 2,
+		Name:    "registry_moved_to_kv",
+		Up:      migrateV2,
+	},
+}
+
+// migrateV2 deletes the Mixer, Rack and Snake rows. The registry of those
+// entities, secrets included, lives in the JetStream key-value registry from
+// this version on; a row left here would keep a plaintext secret on disk
+// that nothing reads. The table stays for the local topology rows.
+func migrateV2(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, "DELETE FROM registry WHERE type_id IN (2, 4, 9)"); err != nil {
+		return fmt.Errorf("drop registry identity rows: %w", err)
+	}
+	return nil
 }
 
 // Migrate runs pending migrations.

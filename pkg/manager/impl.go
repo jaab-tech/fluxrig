@@ -18,6 +18,7 @@ import (
 	"golang.org/x/mod/semver"
 	"gopkg.in/yaml.v3"
 
+	"github.com/jaab-tech/fluxrig/pkg/lockfile"
 	"github.com/jaab-tech/fluxrig/pkg/manager/cas"
 )
 
@@ -77,7 +78,6 @@ func NewManager(rootDir string) (*DefaultManager, error) {
 }
 
 // loadIndex reads the persisted index from disk.
-// TODO(multi-process): Add flock() or atomic-swap for safe concurrent CLI + Mixer access.
 func (m *DefaultManager) loadIndex() error {
 	path := filepath.Join(m.rootDir, "index.json")
 	data, err := os.ReadFile(filepath.Clean(path))
@@ -93,13 +93,128 @@ func (m *DefaultManager) loadIndex() error {
 	return nil
 }
 
-func (m *DefaultManager) saveIndex() error {
+// indexLockPath is the lock file that serializes index.json writers across
+// processes. It is separate from index.json so the lock can be held while the
+// index is read and replaced.
+func (m *DefaultManager) indexLockPath() string {
+	return filepath.Join(m.rootDir, "index.lock")
+}
+
+// updateIndex runs one change to the index as a read-modify-write under the
+// index lock. Two processes (a CLI and a Mixer), or two managers in one
+// process, share one index.json. The change sees the index as it is on disk
+// now, not this manager's copy from when it last loaded: the version it
+// allocates, the immutability check and "latest" are all computed from the
+// current index, and nothing between the read and the write can change it.
+// The caller holds m.mu.
+func (m *DefaultManager) updateIndex(change func(idx *Index) error) error {
+	lock, err := lockfile.AcquireWithTimeout(m.indexLockPath(), indexLockTimeout)
+	if err != nil {
+		return fmt.Errorf("manager: lock the spec index: %w", err)
+	}
+	defer func() { _ = lock.Release() }()
+
+	disk := &Index{
+		Specs:     make(map[string]map[string]string),
+		Scenarios: make(map[string]map[string]string),
+	}
 	path := filepath.Join(m.rootDir, "index.json")
-	data, err := json.MarshalIndent(m.index, "", "  ")
+	if data, readErr := os.ReadFile(filepath.Clean(path)); readErr == nil {
+		if unmarshalErr := json.Unmarshal(data, disk); unmarshalErr != nil {
+			return fmt.Errorf("manager: corrupt index.json: %w", unmarshalErr)
+		}
+	} else if !os.IsNotExist(readErr) {
+		return fmt.Errorf("manager: read the spec index: %w", readErr)
+	}
+	// The disk copy wins on a collision: it is the newer of the two.
+	current := mergeIndex(m.index, disk)
+	// Adopt it whatever the change decides, so later reads in this process
+	// see what other writers added.
+	m.index = current
+
+	if errChange := change(current); errChange != nil {
+		return errChange
+	}
+	data, err := json.MarshalIndent(current, "", "  ")
+	if err != nil {
+		return fmt.Errorf("manager: encode the spec index: %w", err)
+	}
+	if err := writeFileAtomic(path, data, 0600); err != nil {
+		return fmt.Errorf("manager: write the spec index: %w", err)
+	}
+	return nil
+}
+
+// indexLockTimeout bounds how long a writer waits for the index lock. A second
+// import queues behind the first for this long before giving up.
+const indexLockTimeout = 10 * time.Second
+
+// mergeIndex returns the union of two indexes. Entries in b win on a key
+// collision; entries only in a are preserved.
+func mergeIndex(a, b *Index) *Index {
+	out := &Index{
+		Specs:     make(map[string]map[string]string),
+		Scenarios: make(map[string]map[string]string),
+	}
+	mergeArtifacts(out.Specs, a.Specs)
+	mergeArtifacts(out.Specs, b.Specs)
+	mergeArtifacts(out.Scenarios, a.Scenarios)
+	mergeArtifacts(out.Scenarios, b.Scenarios)
+
+	if len(a.Attrs) > 0 || len(b.Attrs) > 0 {
+		out.Attrs = make(map[string]ArtifactAttrs, len(a.Attrs)+len(b.Attrs))
+		for k, v := range a.Attrs {
+			out.Attrs[k] = v
+		}
+		for k, v := range b.Attrs {
+			out.Attrs[k] = v
+		}
+	}
+	return out
+}
+
+func mergeArtifacts(dst, src map[string]map[string]string) {
+	for name, tags := range src {
+		if dst[name] == nil {
+			dst[name] = make(map[string]string, len(tags))
+		}
+		for tag, hash := range tags {
+			dst[name][tag] = hash
+		}
+	}
+}
+
+// writeFileAtomic writes data to path by writing a sibling temp file, syncing
+// it, then renaming it over path. rename is atomic on one filesystem, so a
+// concurrent reader sees either the previous file or the new one, never a
+// half-written one.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".index-*.tmp")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0600)
+	tmpName := tmp.Name()
+	defer func() {
+		// If the rename below fails, the temp file must not be left behind.
+		_ = os.Remove(tmpName)
+	}()
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpName, perm); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 // SpecHeader is the name and version a document declares about itself.
@@ -180,13 +295,13 @@ func (m *DefaultManager) Import(ctx context.Context, filePath, nameOverride, tag
 	if err != nil {
 		return "", "", "", fmt.Errorf("failed to read file: %w", err)
 	}
-	return m.importArtifact(content, fallbackName(filePath), nameOverride, tagOverride, m.index.Specs, "spec")
+	return m.importArtifact(content, fallbackName(filePath), nameOverride, tagOverride, "spec")
 }
 
 // ImportContent stores a spec that arrived as bytes. A document pushed to a Rack
 // has no filename to fall back on, so it must name itself.
 func (m *DefaultManager) ImportContent(ctx context.Context, content []byte, nameOverride, tagOverride string) (string, string, string, error) {
-	return m.importArtifact(content, "", nameOverride, tagOverride, m.index.Specs, "spec")
+	return m.importArtifact(content, "", nameOverride, tagOverride, "spec")
 }
 
 // fallbackName is the last resort for a document that declares no name: what the
@@ -202,11 +317,11 @@ func (m *DefaultManager) ImportScenario(ctx context.Context, filePath, nameOverr
 	if err != nil {
 		return "", "", "", fmt.Errorf("failed to read file: %w", err)
 	}
-	return m.importArtifact(content, fallbackName(filePath), nameOverride, tagOverride, m.index.Scenarios, "scenario")
+	return m.importArtifact(content, fallbackName(filePath), nameOverride, tagOverride, "scenario")
 }
 
 // importArtifact is the shared import logic for specs and scenarios.
-func (m *DefaultManager) importArtifact(content []byte, nameFallback, nameOverride, tagOverride string, index map[string]map[string]string, kind string) (string, string, string, error) {
+func (m *DefaultManager) importArtifact(content []byte, nameFallback, nameOverride, tagOverride, kind string) (string, string, string, error) {
 	// 1. What the document says it is
 	header := parseHeader(content)
 
@@ -222,65 +337,65 @@ func (m *DefaultManager) importArtifact(content []byte, nameFallback, nameOverri
 		return "", "", "", fmt.Errorf("%s declares no name and none was given", kind)
 	}
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// 3. Determine Tag (Version)
-	finalTag := semverTag(tagOverride)
-	if finalTag == "" {
-		finalTag = semverTag(header.Version)
-	}
-	if finalTag == "" {
-		nextVer := m.calcNextMinorFrom(index, finalName)
-		finalTag = nextVer
-	}
-
-	// 4. Validate Tag (Semantic Versioning)
-	if !semver.IsValid(finalTag) {
-		return "", "", "", fmt.Errorf("invalid semantic version: %s (must start with 'v' and follow semver)", finalTag)
-	}
-
-	// 5. Store in CAS
+	// 3. Store in CAS. The store is content-addressed, so this is safe
+	// before the index is locked: the same bytes always land in one place.
 	hash, err := m.store.Put(content)
 	if err != nil {
 		return "", "", "", fmt.Errorf("failed to store content: %w", err)
 	}
 
-	// 6. Update Index (with Conflict Check)
-	if index[finalName] == nil {
-		index[finalName] = make(map[string]string)
-	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
-	existingHash, exists := index[finalName][finalTag]
-	if exists {
-		if existingHash != hash {
-			return "", "", "", fmt.Errorf("version %s:%s already exists with different content (immutable). Please increment version", finalName, finalTag)
+	// 4. Version, conflict check and index entry, all against the current
+	// index under its lock.
+	var finalTag string
+	errIdx := m.updateIndex(func(idx *Index) error {
+		index := idx.Specs
+		if kind == "scenario" {
+			index = idx.Scenarios
 		}
-	}
 
-	index[finalName][finalTag] = hash
-	// Recompute "latest" as the highest semver — not "last imported"
-	index[finalName]["latest"] = m.resolveLatestHash(index[finalName])
-
-	// What the store knows about this version, recorded once at import. A
-	// re-import of identical bytes keeps the original date: the artefact was
-	// filed then, and the second import created nothing.
-	if m.index.Attrs == nil {
-		m.index.Attrs = make(map[string]ArtifactAttrs)
-	}
-	key := attrKey(Kind(kind), finalName, finalTag)
-	if _, already := m.index.Attrs[key]; !already {
-		m.index.Attrs[key] = ArtifactAttrs{
-			ImportedAt: time.Now().UTC(),
-			Size:       int64(len(content)),
-			Title:      header.Title,
-			Protocol:   header.Protocol,
+		finalTag = semverTag(tagOverride)
+		if finalTag == "" {
+			finalTag = semverTag(header.Version)
 		}
-	}
+		if finalTag == "" {
+			finalTag = m.calcNextMinorFrom(index, finalName)
+		}
+		if !semver.IsValid(finalTag) {
+			return fmt.Errorf("invalid semantic version: %s (must start with 'v' and follow semver)", finalTag)
+		}
 
-	// 7. Persist Index
-	if err := m.saveIndex(); err != nil {
-		return "", "", "", fmt.Errorf("failed to save index: %w", err)
+		if index[finalName] == nil {
+			index[finalName] = make(map[string]string)
+		}
+		if existingHash, exists := index[finalName][finalTag]; exists && existingHash != hash {
+			return fmt.Errorf("%w: %s:%s (immutable). Please increment version", ErrVersionExists, finalName, finalTag)
+		}
+		index[finalName][finalTag] = hash
+		// Recompute "latest" as the highest semver, not "last imported".
+		index[finalName]["latest"] = m.resolveLatestHash(index[finalName])
+
+		// What the store knows about this version, recorded once at import.
+		// A re-import of identical bytes keeps the original date: the
+		// artefact was filed then, and the second import created nothing.
+		if idx.Attrs == nil {
+			idx.Attrs = make(map[string]ArtifactAttrs)
+		}
+		key := attrKey(Kind(kind), finalName, finalTag)
+		if _, already := idx.Attrs[key]; !already {
+			idx.Attrs[key] = ArtifactAttrs{
+				ImportedAt: time.Now().UTC(),
+				Size:       int64(len(content)),
+				Title:      header.Title,
+				Protocol:   header.Protocol,
+			}
+		}
+		return nil
+	})
+	if errIdx != nil {
+		return "", "", "", errIdx
 	}
 
 	ref := cas.Ref(finalName, finalTag, hash)
@@ -345,21 +460,12 @@ func (m *DefaultManager) Load(ctx context.Context, urn string) ([]byte, error) {
 		return m.store.Get(urn)
 	}
 
-	// 2. Parse URN (Format: "name:tag")
-	// For now, strict "name:tag" format. Future: "urn:flux:spec:name:tag"
-	// TODO: Use a proper URN parser
-	var name, tag string
-	// Simple split by last colon
-	for i := len(urn) - 1; i >= 0; i-- {
-		if urn[i] == ':' {
-			name = urn[:i]
-			tag = urn[i+1:]
-			break
-		}
-	}
-
-	if name == "" || tag == "" {
-		return nil, fmt.Errorf("invalid URN format: %s (expected name:tag or hash)", urn)
+	// 2. Parse the reference: name:tag, or the reserved
+	// urn:flux:<kind>:<name>:<tag> scheme. A single parser owns both forms so a
+	// future urn: reference is not misread by a hand-rolled split.
+	name, tag, err := parseURN(urn)
+	if err != nil {
+		return nil, err
 	}
 
 	// 3. Resolve Name/Tag to Hash

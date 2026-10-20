@@ -1,0 +1,199 @@
+# fluxrig ISO 20022 spec: the RTP profile (pacs.008 and pacs.002) - reference example
+#
+# The wire layer is not restated here. `spec.wire.source` names the library
+# that knows the XSD of each message and the rules of the profile
+# (moov-rtp20022, the RTP profile). This file holds the semantics only: what a
+# field means, its alias, which messages require it, the values it may carry,
+# and how sensitive it is.
+#
+# Field keys are element paths below the document's root element, with the
+# XSD element names joined by dots. An attribute is `<element>@<attribute>`.
+# The business application header of the envelope is under `AppHdr.`.
+
+spec:
+  id: "iso20022-rtp"
+  name: "ISO 20022, RTP profile"
+  version: "1.0.0"
+  overview: >-
+    The credit transfer and the payment status report of the RTP profile:
+    one transaction for each message, in US dollars, between participants
+    that a 9-digit routing number identifies.
+  wire:
+    source: "moov-rtp20022"
+
+  messages:
+    catalog:
+      "pacs.008.001.08":
+        name: "FI to FI customer credit transfer"
+        flow: request
+        pairs_with: "pacs.002.001.10"
+        meaning: "Moves funds from a debtor account to a creditor account."
+      "pacs.002.001.10":
+        name: "FI to FI payment status report"
+        flow: response
+        pairs_with: "pacs.008.001.08"
+        meaning: "The status of a credit transfer that a participant received."
+
+  enums:
+    tx_status:
+      closed: true
+      values:
+        "ACTC": {name: "Accepted technical validation", category: approved}
+        "ACWP": {name: "Accepted without posting", category: approved}
+        "RCVD": {name: "Received", category: in_progress}
+        "RJCT": {name: "Rejected", category: decline_hard}
+    status_reason:
+      closed: false
+      values:
+        "AM02": {name: "Amount exceeds the allowed maximum", category: decline_hard}
+        "AM04": {name: "Insufficient funds", category: decline_soft}
+        "AC03": {name: "Invalid creditor account", category: decline_hard}
+        "AC04": {name: "Closed account", category: decline_hard}
+        "AC06": {name: "Blocked account", category: decline_hard}
+
+  validation_policy:
+    unlisted: optional
+
+  fields:
+    # ----- envelope header (both messages) -----
+    "AppHdr.Fr.FIId.FinInstnId.ClrSysMmbId.MmbId":
+      alias: "sender_participant"
+      meaning: "The 11-character participant identifier of the sender. The codec writes it from the participant identifier."
+    "AppHdr.To.FIId.FinInstnId.ClrSysMmbId.MmbId":
+      alias: "receiver_participant"
+      meaning: "The 11-character participant identifier of the receiver."
+
+    # ----- group header (both messages) -----
+    "GrpHdr.MsgId":
+      alias: "msg_id"
+      meaning: "Identifies the message. The codec generates it in the format of the profile."
+    "GrpHdr.CreDtTm":
+      alias: "creation_time"
+      meaning: "When the sender created the message."
+
+    # ----- pacs.008: credit transfer -----
+    "CdtTrfTxInf.PmtId.InstrId":
+      messages:
+        - message: "pacs.008.001.08"
+          usage: mandatory
+      alias: "instr_id"
+      meaning: "Identifies the instruction between the instructing and the instructed participant."
+    "CdtTrfTxInf.PmtId.EndToEndId":
+      messages:
+        - message: "pacs.008.001.08"
+          usage: mandatory
+      alias: "end_to_end_id"
+      meaning: "The reference the initiating party gives the payment, carried unchanged to the creditor."
+    "CdtTrfTxInf.PmtId.TxId":
+      messages:
+        - message: "pacs.008.001.08"
+          usage: mandatory
+      alias: "tx_id"
+      meaning: "Identifies the transaction on the interbank level."
+    "CdtTrfTxInf.PmtTpInf.LclInstrm.Prtry":
+      alias: "local_instrument"
+      meaning: "The local instrument of the payment, for example STANDARD."
+    "CdtTrfTxInf.PmtTpInf.CtgyPurp.Prtry":
+      alias: "category_purpose"
+      meaning: "The category of the payment: CONSUMER or BUSINESS."
+    "CdtTrfTxInf.IntrBkSttlmAmt":
+      messages:
+        - message: "pacs.008.001.08"
+          usage: mandatory
+      alias: "settlement_amount"
+      meaning: "The amount settled between the participants."
+      format:
+        kind: amount
+        currency_field: "CdtTrfTxInf.IntrBkSttlmAmt@Ccy"
+    "CdtTrfTxInf.IntrBkSttlmAmt@Ccy":
+      alias: "settlement_currency"
+      meaning: "The currency of the settlement amount. The profile accepts USD only."
+    "CdtTrfTxInf.Dbtr.Nm":
+      messages:
+        - message: "pacs.008.001.08"
+          usage: mandatory
+      alias: "debtor_name"
+      meaning: "The name of the party whose account is debited."
+      sensitivity: pii
+    "CdtTrfTxInf.DbtrAcct.Id.Othr.Id":
+      messages:
+        - message: "pacs.008.001.08"
+          usage: mandatory
+      alias: "debtor_account"
+      meaning: "The account that is debited."
+      sensitivity: pii
+    "CdtTrfTxInf.DbtrAgt.FinInstnId.ClrSysMmbId.MmbId":
+      messages:
+        - message: "pacs.008.001.08"
+          usage: mandatory
+      alias: "debtor_agent"
+      meaning: "The routing number of the debtor's bank."
+    "CdtTrfTxInf.Cdtr.Nm":
+      messages:
+        - message: "pacs.008.001.08"
+          usage: mandatory
+      alias: "creditor_name"
+      meaning: "The name of the party whose account is credited."
+      sensitivity: pii
+    "CdtTrfTxInf.CdtrAcct.Id.Othr.Id":
+      messages:
+        - message: "pacs.008.001.08"
+          usage: mandatory
+      alias: "creditor_account"
+      meaning: "The account that is credited."
+      sensitivity: pii
+    "CdtTrfTxInf.CdtrAgt.FinInstnId.ClrSysMmbId.MmbId":
+      messages:
+        - message: "pacs.008.001.08"
+          usage: mandatory
+      alias: "creditor_agent"
+      meaning: "The routing number of the creditor's bank."
+    "CdtTrfTxInf.RmtInf.Ustrd":
+      alias: "remittance_info"
+      meaning: "Free text that the creditor receives with the payment."
+    "CdtTrfTxInf.InstgAgt.FinInstnId.ClrSysMmbId.MmbId":
+      alias: "instructing_agent"
+      meaning: "The routing number of the participant that sends the instruction."
+    "CdtTrfTxInf.InstdAgt.FinInstnId.ClrSysMmbId.MmbId":
+      alias: "instructed_agent"
+      meaning: "The routing number of the participant that receives the instruction."
+
+    # ----- pacs.002: status report -----
+    "OrgnlGrpInfAndSts.OrgnlMsgId":
+      messages:
+        - message: "pacs.002.001.10"
+          usage: mandatory
+      alias: "orig_msg_id"
+      meaning: "The message identifier of the credit transfer that this report answers."
+    "OrgnlGrpInfAndSts.OrgnlMsgNmId":
+      messages:
+        - message: "pacs.002.001.10"
+          usage: mandatory
+      alias: "orig_msg_name"
+      meaning: "The message definition of the credit transfer that this report answers."
+    "OrgnlGrpInfAndSts.OrgnlCreDtTm":
+      alias: "orig_creation_time"
+      meaning: "When the sender created the credit transfer that this report answers."
+    "TxInfAndSts.OrgnlInstrId":
+      messages:
+        - message: "pacs.002.001.10"
+          usage: mandatory
+      alias: "instr_id"
+      meaning: "The instruction identifier of the credit transfer that this report answers."
+    "TxInfAndSts.TxSts":
+      messages:
+        - message: "pacs.002.001.10"
+          usage: mandatory
+      alias: "tx_status"
+      meaning: "The status of the credit transfer."
+      values_ref: "tx_status"
+    "TxInfAndSts.StsRsnInf.Rsn.Cd":
+      alias: "status_reason"
+      meaning: "Why the credit transfer has its status. Present on a rejection."
+      values_ref: "status_reason"
+    "TxInfAndSts.InstgAgt.FinInstnId.ClrSysMmbId.MmbId":
+      alias: "instructing_agent"
+      meaning: "The routing number of the participant that sends the report."
+    "TxInfAndSts.InstdAgt.FinInstnId.ClrSysMmbId.MmbId":
+      alias: "instructed_agent"
+      meaning: "The routing number of the participant that receives the report."

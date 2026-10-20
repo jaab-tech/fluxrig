@@ -98,6 +98,8 @@ wait_for_mixer "$API_URL"
 # Read the registry table via a snapshot copy, never by stopping the Mixer:
 # DuckDB's single-writer lock is what the original avoided by killing the
 # Mixer, and a snapshot avoids it just as well without losing the process.
+REG_URL="nats://localhost:${SNAKE_PORT}"
+
 snapshot_query() {
     local query="$1" tag="$2"
     cp "$MIXER_DB" "$WORK_DIR/mixer/data/snapshot_${tag}.duckdb"
@@ -144,9 +146,9 @@ log_info "$RACKS_OUT"
 log_success "CLI Racks Verified."
 
 log_info "Verifying Registry Content..."
-MIXER_COUNT=$(snapshot_query "SELECT count(*) FROM registry WHERE type_id=2" "p03a")
-SNAKE_COUNT=$(snapshot_query "SELECT count(*) FROM registry WHERE type_id=9" "p03b")
-RACK_COUNT=$(snapshot_query "SELECT count(*) FROM registry WHERE type_id=4" "p03c")
+MIXER_COUNT=$(registry_count "$REG_URL" 2)
+SNAKE_COUNT=$(registry_count "$REG_URL" 9)
+RACK_COUNT=$(registry_count "$REG_URL" 4)
 log_info "Found $MIXER_COUNT Mixers, $SNAKE_COUNT Snakes, $RACK_COUNT Racks"
 [ "$MIXER_COUNT" -eq 1 ] || fail "Expected 1 Mixer, got $MIXER_COUNT"
 [ "$SNAKE_COUNT" -eq 1 ] || fail "Expected 1 Snake, got $SNAKE_COUNT"
@@ -154,7 +156,7 @@ log_info "Found $MIXER_COUNT Mixers, $SNAKE_COUNT Snakes, $RACK_COUNT Racks"
 log_success "Registry Counts Verified."
 
 log_info "Verifying Attributes for Rack..."
-RACK_ROW=$(snapshot_query "SELECT stats, attributes, version FROM registry WHERE type_id=4 LIMIT 1" "p03d")
+RACK_ROW=$(registry_dump "$REG_URL" | awk -F'\t' '$1==4 {print; exit}')
 log_info "Rack Row: $RACK_ROW"
 EXPECTED_VERSION="$(cat "${ROOT_DIR}/VERSION")"
 if [[ "$RACK_ROW" == *"$EXPECTED_VERSION"* ]]; then
@@ -164,11 +166,11 @@ else
 fi
 
 log_info "Verifying Snake Topology..."
-SNAKE_ROW=$(snapshot_query "SELECT attributes FROM registry WHERE type_id=9 LIMIT 1" "p03e")
+SNAKE_ROW=$(registry_dump "$REG_URL" | awk -F'\t' '$1==9 {print $6; exit}')
 for needle in mixer rack rack_ip rack_port mixer_ip mixer_port; do
     [[ "$SNAKE_ROW" == *"$needle"* ]] || fail "Snake Attributes missing '$needle'!"
 done
-SNAKE_MID=$(snapshot_query "SELECT machine_id FROM registry WHERE type_id=9 LIMIT 1" "p03f")
+SNAKE_MID=$(registry_dump "$REG_URL" | awk -F'\t' '$1==9 {print $2; exit}')
 [[ "$SNAKE_MID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || fail "Snake MachineID is not a valid UUID: $SNAKE_MID"
 log_success "Registry E2E checks passed."
 
@@ -197,8 +199,8 @@ cd "${BASE_DIR}"
 log_info "Waiting for Rack to reconnect..."
 sleep 5
 
-log_info "Registry Table Content (after Phase 03):"
-snapshot_query "SELECT * FROM registry ORDER BY type_id" "p03g"
+log_info "Registry Content (after Phase 03):"
+registry_dump "$REG_URL"
 
 log_success "Phase 03 OK"
 

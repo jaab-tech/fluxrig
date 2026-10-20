@@ -7,24 +7,19 @@ import (
 	"context"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/jaab-tech/fluxrig/pkg/registry"
-	"github.com/jaab-tech/fluxrig/pkg/store/duckdb"
+	"github.com/jaab-tech/fluxrig/pkg/registry/kvstore"
 )
 
 func TestRegistry_Comprehensive(t *testing.T) {
-	s, err := duckdb.NewStore(slog.Default(), "")
-	if err != nil {
-		t.Fatalf("NewStore failed: %v", err)
-	}
-	defer func() { _ = s.Close() }()
-
-	if errMig := s.Migrate(context.Background()); errMig != nil {
-		t.Fatalf("Migrate failed: %v", errMig)
-	}
+	s := kvstore.New(slog.Default(), kvstore.NewMemoryBucket(0), kvstore.NewMemoryBucket(time.Minute), nil, uuid.New(),
+		kvstore.Config{MaxValueSize: 1 << 20, WriteRetries: 3})
 	s.SetBootstrapSecret("rack")
+	var err error
 
 	var reg registry.Registry = s
 
@@ -86,6 +81,10 @@ func TestRegistry_Comprehensive(t *testing.T) {
 		t.Error("Approve rename to existing name should fail")
 	}
 
-	_, _ = reg.QueryLogs(ctx, registry.LogQuery{Limit: 1})
-	_, _ = reg.QueryMetrics(ctx, registry.MetricQuery{Limit: 1})
+	// Telemetry queries go to the local store; with none attached they
+	// report it rather than return nothing silently.
+	_, err = reg.QueryLogs(ctx, registry.LogQuery{Limit: 1})
+	if err == nil {
+		t.Error("QueryLogs without a telemetry store should report it")
+	}
 }

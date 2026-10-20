@@ -16,7 +16,7 @@ import (
 )
 
 // ManifestLookup returns a gear type's manifest, when this build knows it. The
-// generator prefers the manifest (ADR 0045) for classification, doc links, and
+// generator prefers the manifest for classification, doc links, and
 // I/O detection; when a type is unknown (a cross-version or future gear), it
 // falls back to name-prefix heuristics, so the visualizer stays lenient.
 type ManifestLookup func(gearType string) (sdk.Manifest, bool)
@@ -265,7 +265,7 @@ func buildModel(sc *Scenario, manifestFor ManifestLookup) *model {
 			doc:   g.Doc,
 			raw:   g.Raw,
 		}
-		// Prefer the gear's manifest (ADR 0045) for classification, doc link,
+		// Prefer the gear's manifest for classification, doc link,
 		// and I/O detection; fall back to name-prefix heuristics for a type
 		// this build does not know (a cross-version or future gear).
 		if man, ok := manifestFor(g.Type); ok {
@@ -563,7 +563,7 @@ func kindForType(gtype string) string {
 }
 
 // splitPortRef extracts (gear, port) from a wire endpoint. Endpoints are
-// "gear.port" or "rack.gear.port" with dot-free segments (ADR 0043), so the last
+// "gear.port" or "rack.gear.port" with dot-free segments, so the last
 // two segments are always the gear and its port. The optional leading rack is
 // not needed to locate a gear node here because gear names are globally unique
 // in a scenario today; revisit when replicated racks reuse gear names.

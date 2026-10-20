@@ -5,10 +5,9 @@
 # skipped at ApplyScenario without saying so.
 [rack]
 name = "rack-fluxrig"
-machine_id = 120
 enrollment_timeout = "10s"
 
-[bus]
+[snake]
 url = "nats://localhost:4222"
 domain = "flux"
 stream_name = "flux-msg"
@@ -20,6 +19,3 @@ max_size_mb = 100
 max_backups = 3
 compress = false
 
-[enrollment]
-timeout = "10s"
-push_delay = "100ms"
