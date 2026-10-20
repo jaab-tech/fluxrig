@@ -378,6 +378,11 @@ func (s *Server) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.Fl
 	if s.config.PreserveHeaders {
 		if raw, ok := msg.Metadata["iso8583.raw_header"]; ok {
 			header = decodeRawHeader(raw)
+			// Everything a server writes answers a client: swap the TPDU
+			// addresses so the reply is routed back to the terminal.
+			if s.config.TPDUEnabled && s.config.TPDUSwap {
+				header = swapTPDU(header, s.config.TPDULength)
+			}
 		}
 	}
 

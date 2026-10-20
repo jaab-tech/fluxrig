@@ -427,3 +427,20 @@ func hexToBytesFixed(s string, n int) []byte {
 	}
 	return res
 }
+
+// tpduSize is the length of a standard TPDU: 1 byte of ID, 2 bytes of
+// destination address, 2 bytes of source address.
+const tpduSize = 5
+
+// swapTPDU returns h with the destination and source addresses of its leading
+// TPDU exchanged, as a reply to a terminal requires (60 DDDD SSSS becomes
+// 60 SSSS DDDD). A header that is not a standard 5 byte TPDU is returned as is.
+func swapTPDU(h []byte, tpduLen int) []byte {
+	if tpduLen != tpduSize || len(h) < tpduSize {
+		return h
+	}
+	out := append([]byte(nil), h...)
+	copy(out[1:3], h[3:5])
+	copy(out[3:5], h[1:3])
+	return out
+}

@@ -191,16 +191,18 @@ func (c *Client) handleConn(conn net.Conn) {
 		offset := GetHeaderOffset(payload, c.config)
 		innerPayload := payload[offset:]
 
-		// Preserve Raw Header if requested (Stateless Loopback)
-		if c.config.PreserveHeaders && offset > 0 {
-			headerMeta["iso8583.raw_header"] = string(payload[:offset])
-		}
-
 		// Build FluxMsg
 		msg := fluxmsg.New()
 		msg.FluxID, _ = c.idGen.NextFluxID()
 		msg.TSInit = time.Now().UnixNano()
 		msg.RawPayload = innerPayload
+
+		// Preserve Raw Header if requested (Stateless Loopback). The header is
+		// binary, so it is stored hex-encoded: a raw string with bytes >= 0x80
+		// is not valid UTF-8 and the message would fail Validate.
+		if c.config.PreserveHeaders && offset > 0 {
+			msg.SetMetadataBytes("iso8583.raw_header", payload[:offset])
+		}
 
 		for k, v := range headerMeta {
 			msg.Metadata[k] = v

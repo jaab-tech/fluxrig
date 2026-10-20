@@ -87,7 +87,9 @@ type Config struct {
 	TPDUEnabled bool `json:"tpdu_enabled" mapstructure:"tpdu_enabled"`
 	// TPDULength: TPDU header length (typically 5 bytes). Default: 5.
 	TPDULength int `json:"tpdu_length" mapstructure:"tpdu_length"`
-	// TPDUSwap: Swap source/destination in response. Default: true.
+	// TPDUSwap: Swap the destination and source addresses of the TPDU in the
+	// header written back by server mode (needs tpdu_enabled, preserve_headers and
+	// a 5 byte TPDU). Default: true.
 	TPDUSwap bool `json:"tpdu_swap" mapstructure:"tpdu_swap"`
 
 	// Heuristic Validation (Layer 1.5)
