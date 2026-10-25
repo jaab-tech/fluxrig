@@ -1,0 +1,27 @@
+# Dependabot updates the Go modules of this repository. It opens its pull
+# requests against `dev`, where a maintainer reviews and merges them. The
+# maintainers update the GitHub Actions themselves.
+
+version: 2
+updates:
+  - package-ecosystem: "gomod"
+    directory: "/"
+    target-branch: "dev"
+    schedule:
+      interval: "weekly"
+    groups:
+      go-dependencies:
+        patterns:
+          - "*"
+    ignore:
+      # Bento stays on v1.18.x on purpose. Version 1.19.0 added SPNEGO
+      # authentication to its HTTP components. That links a Kerberos, NTLM and
+      # SSPI stack (about 50 packages, 1 MB more) into the binary, for connectors
+      # that the standard build does not expose. Patch updates still arrive, so
+      # security fixes do too.
+      - dependency-name: "github.com/warpstreamlabs/bento"
+        update-types:
+          - "version-update:semver-minor"
+          - "version-update:semver-major"
+    labels:
+      - "dependencies"
