@@ -24,11 +24,20 @@ A pull request with no linked issue is closed and redirected to an issue. The is
 
 fluxrig follows a strict **PR-First** workflow to maintain history integrity:
 
-1.  **Target the `dev` Branch**: Community pull requests target `dev`. Public `main` is rebuilt from the internal release tag at each release, so a change merged into `main` is replaced by the next release snapshot. Maintainers port each accepted change from `dev` into the release line.
+1.  **Target the `dev` Branch**: Community pull requests target `dev`. A maintainer reviews your pull request and squash-merges it on `dev`. The next release then carries your commit, under your name, into the history of `main`. Public `main` is the release line: only a release changes it, so do not target it.
 2.  **History Hardening**: On **2026-04-29**, the project underwent a significant history synchronization event to ensure a unified, complete lineage.
     - If your fork was created before this date, you MUST **re-clone** or **reset** your local `main` and `dev` branches to the current upstream state.
 3.  **DCO Sign-off**: Every commit must be signed off (`git commit -s`) to certify compliance with the Developer Certificate of Origin.
-4.  **No changes under `.github/` or `.claude/`**: The workflows and the repository configuration are kept by the maintainers, and a check fails a community pull request that changes them. If a workflow needs a change, describe it in an issue.
+4.  **Do not edit `CHANGELOG.md`**: The maintainers write the entry when they merge your change, and they credit you in it. See [The changelog](#the-changelog).
+5.  **No changes under `.github/` or `.claude/`**: The maintainers keep the workflows and the repository configuration. A check fails a community pull request that changes them. If a workflow needs a change, describe it in an issue.
+
+### The changelog
+
+Leave `CHANGELOG.md` out of your pull request. The maintainers write the entry when they merge your change, and they credit you in it by name.
+
+The reason is practical. Every change adds a line to the same section, `[Unreleased]`. Two pull requests that both edit it conflict with each other, and the conflict has nothing to do with the code. One author for the entries also keeps their wording and their order the same.
+
+If your pull request already changes `CHANGELOG.md`, remove that change before a maintainer merges it.
 
 ### Quick Summary
 
