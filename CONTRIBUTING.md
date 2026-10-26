@@ -30,6 +30,7 @@ fluxrig follows a strict **PR-First** workflow to maintain history integrity:
 3.  **DCO Sign-off**: Every commit must be signed off (`git commit -s`) to certify compliance with the Developer Certificate of Origin.
 4.  **Do not edit `CHANGELOG.md`**: The maintainers write the entry when they prepare the release that carries your change, and they credit you in it. See [The changelog](#the-changelog).
 5.  **No changes under `.github/` or `.claude/`**: The maintainers keep the workflows and the repository configuration. A check fails a community pull request that changes them. If a workflow needs a change, describe it in an issue.
+6.  **Describe formats, do not name products**: Source comments, help text, schema descriptions and file names do not name another commercial product. See [Naming other products](#naming-other-products).
 
 ### The changelog
 
@@ -38,6 +39,16 @@ Leave `CHANGELOG.md` out of your pull request. The maintainers write the entry w
 The reason is practical. Every change adds a line to the same section, `[Unreleased]`. Two pull requests that both edit it conflict with each other, and the conflict has nothing to do with the code. One author for the entries also keeps their wording and their order the same.
 
 If your pull request already changes `CHANGELOG.md`, remove that change before a maintainer merges it.
+
+### Naming other products
+
+Describe a format by its layout, not by the product that uses it. In source comments, flag help text, schema descriptions, file names and test names, write what the thing is, for example "zero-padded ASCII decimal digits, e.g. `0123`". Do not name another company's or project's commercial product. The products that the project itself uses, such as NATS and DuckDB, are fine.
+
+A protocol, standard or scheme name is fine when it names a thing the code handles, such as ISO 8583 or `variant: "visa"`.
+
+The reason is practical. A product name in the code compares or implies a relationship that nobody can check, and it stays in the history after the pull request merges. A description of the format stays true when the other product changes.
+
+If your pull request names another product, a maintainer asks you to replace the name with a description before the merge.
 
 ### Quick Summary
 
