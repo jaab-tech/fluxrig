@@ -28,12 +28,12 @@ fluxrig follows a strict **PR-First** workflow to maintain history integrity:
 2.  **History Hardening**: On **2026-04-29**, the project underwent a significant history synchronization event to ensure a unified, complete lineage.
     - If your fork was created before this date, you MUST **re-clone** or **reset** your local `main` and `dev` branches to the current upstream state.
 3.  **DCO Sign-off**: Every commit must be signed off (`git commit -s`) to certify compliance with the Developer Certificate of Origin.
-4.  **Do not edit `CHANGELOG.md`**: The maintainers write the entry when they merge your change, and they credit you in it. See [The changelog](#the-changelog).
+4.  **Do not edit `CHANGELOG.md`**: The maintainers write the entry when they prepare the release that carries your change, and they credit you in it. See [The changelog](#the-changelog).
 5.  **No changes under `.github/` or `.claude/`**: The maintainers keep the workflows and the repository configuration. A check fails a community pull request that changes them. If a workflow needs a change, describe it in an issue.
 
 ### The changelog
 
-Leave `CHANGELOG.md` out of your pull request. The maintainers write the entry when they merge your change, and they credit you in it by name.
+Leave `CHANGELOG.md` out of your pull request. The maintainers write the entry when they prepare the release that carries your change, and they credit you in it by name. You see your entry when that release is published.
 
 The reason is practical. Every change adds a line to the same section, `[Unreleased]`. Two pull requests that both edit it conflict with each other, and the conflict has nothing to do with the code. One author for the entries also keeps their wording and their order the same.
 
