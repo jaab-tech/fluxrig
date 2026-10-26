@@ -50,6 +50,12 @@ type Config struct {
 	// MaxConnections: Limit concurrent connections. Default: 4096.
 	MaxConnections int `json:"max_connections" mapstructure:"max_connections"`
 
+	// EmitConnEvents makes server mode emit one small event FluxMsg on the
+	// "out_conn" port when a connection is accepted and one when it closes, so a
+	// scenario can learn the conn.id of a new connection (for example to send a
+	// logon 0800 to it). Server mode only. Default: false.
+	EmitConnEvents bool `json:"emit_conn_events" mapstructure:"emit_conn_events"`
+
 	// TLS secures the external socket (dial in client mode, listener in
 	// server mode). Off by default.
 	TLS TLSConfig `json:"tls" mapstructure:"tls"`
@@ -283,6 +289,7 @@ func SchemaJSON() string {
     "preserve_headers": { "type": "boolean", "description": "carry the raw protocol header through so the reply can mirror it." },
     "strict_connection_routing": { "type": "boolean", "default": true, "description": "return each reply on the exact connection (conn.id) its request arrived on." },
     "max_connections": { "type": "integer", "default": 4096, "description": "server mode: maximum concurrent connections (0 = unlimited)." },
+    "emit_conn_events": { "type": "boolean", "default": false, "description": "server mode: emit an event message on the out_conn port when a connection is accepted and when it closes (metadata conn.id, conn.event = up|down). Off by default." },
     "visa_src_id": { "type": "string", "description": "visa variant: source station id in the VAP header." },
     "visa_dst_id": { "type": "string", "description": "visa variant: destination station id in the VAP header." },
     "unsafe_raw_frame_log": { "type": "boolean", "default": false, "description": "log raw frame bytes (hex) at TRACE. Off by default; raw frames carry PAN/SAD, so never enable inside a CDE." },
