@@ -374,6 +374,11 @@ func frameOutbound(framing string, payload []byte) ([]byte, error) {
 		length := uint32(len(payload))
 		outbound := []byte{byte(length >> 24), byte(length >> 16), byte(length >> 8), byte(length & 0xFF)}
 		return append(outbound, payload...), nil
+	case FramingLengthASCII4:
+		if len(payload) > 9999 {
+			return nil, fmt.Errorf("message too large for 4-digit ASCII length prefix: %d bytes", len(payload))
+		}
+		return append([]byte(fmt.Sprintf("%04d", len(payload))), payload...), nil
 	default:
 		// Delimiter framing or no framing: send raw.
 		return payload, nil

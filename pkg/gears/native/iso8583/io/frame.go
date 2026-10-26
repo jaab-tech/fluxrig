@@ -4,8 +4,10 @@
 package io
 
 import (
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"net"
 	"strings"
 	"time"
@@ -443,4 +445,75 @@ func swapTPDU(h []byte, tpduLen int) []byte {
 	copy(out[1:3], h[3:5])
 	copy(out[3:5], h[1:3])
 	return out
+}
+
+// parseFrameLength decodes the length prefix in header and returns the body
+// length in bytes (the prefix itself is excluded). It rejects non-digit ASCII
+// prefixes and lengths outside 1..MaxFrameLength.
+func (c *Config) parseFrameLength(header []byte) (int, error) {
+	var length int
+	if c.FrameLengthEncoding == FrameEncodingASCIIDecimal {
+		for _, b := range header {
+			if b < '0' || b > '9' {
+				return 0, fmt.Errorf("invalid ASCII length prefix %q: non-digit byte", header)
+			}
+			length = length*10 + int(b-'0')
+		}
+	} else {
+		var order binary.ByteOrder = binary.BigEndian
+		if c.FrameLengthEndian == EndianLittle {
+			order = binary.LittleEndian
+		}
+		if c.FrameLengthSize == 2 {
+			length = int(order.Uint16(header))
+		} else {
+			length = int(order.Uint32(header))
+		}
+	}
+
+	if c.FrameIncludesHeader {
+		length -= c.FrameLengthSize
+	}
+	if length <= 0 || length > MaxFrameLength {
+		return 0, fmt.Errorf("invalid frame length: %d", length)
+	}
+	return length, nil
+}
+
+// encodeFrame prepends the length prefix to payload.
+func (c *Config) encodeFrame(payload []byte) ([]byte, error) {
+	totalLen := len(payload)
+	if c.FrameIncludesHeader {
+		totalLen += c.FrameLengthSize
+	}
+
+	frame := make([]byte, c.FrameLengthSize+len(payload))
+	if c.FrameLengthEncoding == FrameEncodingASCIIDecimal {
+		limit := 1
+		for i := 0; i < c.FrameLengthSize; i++ {
+			limit *= 10
+		}
+		if totalLen >= limit {
+			return nil, fmt.Errorf("payload too large for %d-digit ASCII length prefix: %d", c.FrameLengthSize, totalLen)
+		}
+		for i := c.FrameLengthSize - 1; i >= 0; i-- {
+			frame[i] = byte('0' + totalLen%10)
+			totalLen /= 10
+		}
+	} else {
+		if c.FrameLengthSize == 2 && totalLen > math.MaxUint16 {
+			return nil, fmt.Errorf("payload too large for 2-byte header: %d", totalLen)
+		}
+		var order binary.ByteOrder = binary.BigEndian
+		if c.FrameLengthEndian == EndianLittle {
+			order = binary.LittleEndian
+		}
+		if c.FrameLengthSize == 2 {
+			order.PutUint16(frame[0:], uint16(totalLen)) //nolint:gosec // validated above
+		} else {
+			order.PutUint32(frame[0:], uint32(totalLen)) //nolint:gosec // validated above
+		}
+	}
+	copy(frame[c.FrameLengthSize:], payload)
+	return frame, nil
 }

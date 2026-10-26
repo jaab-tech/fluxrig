@@ -6,11 +6,9 @@ package io
 import (
 	"context"
 	"crypto/tls"
-	"encoding/binary"
 	"fmt"
 	"io"
 	"log/slog"
-	"math"
 	"net"
 	"sync/atomic"
 	"time"
@@ -271,24 +269,9 @@ func (c *Client) readFrame(conn net.Conn) ([]byte, error) {
 		return nil, err
 	}
 
-	var length int
-	var order binary.ByteOrder = binary.BigEndian
-	if c.config.FrameLengthEndian == EndianLittle {
-		order = binary.LittleEndian
-	}
-
-	if c.config.FrameLengthSize == 2 {
-		length = int(order.Uint16(header))
-	} else {
-		length = int(order.Uint32(header))
-	}
-
-	if c.config.FrameIncludesHeader {
-		length -= c.config.FrameLengthSize
-	}
-
-	if length <= 0 || length > 65535 {
-		return nil, fmt.Errorf("invalid frame length: %d", length)
+	length, err := c.config.parseFrameLength(header)
+	if err != nil {
+		return nil, err
 	}
 
 	// Frame in progress: bound the body read by ReadTimeout (not the longer
@@ -401,30 +384,7 @@ func (c *Client) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.Fl
 }
 
 func (c *Client) buildFrame(payload []byte) ([]byte, error) {
-	payloadLen := len(payload)
-	totalLen := payloadLen
-	if c.config.FrameIncludesHeader {
-		totalLen += c.config.FrameLengthSize
-	}
-
-	if c.config.FrameLengthSize == 2 && totalLen > math.MaxUint16 {
-		return nil, fmt.Errorf("payload too large for 2-byte header: %d", totalLen)
-	}
-
-	var order binary.ByteOrder = binary.BigEndian
-	if c.config.FrameLengthEndian == EndianLittle {
-		order = binary.LittleEndian
-	}
-
-	frame := make([]byte, c.config.FrameLengthSize+payloadLen)
-	if c.config.FrameLengthSize == 2 {
-		order.PutUint16(frame[0:], uint16(totalLen)) //nolint:gosec // validated above
-	} else {
-		order.PutUint32(frame[0:], uint32(totalLen)) //nolint:gosec // validated above
-	}
-	copy(frame[c.config.FrameLengthSize:], payload)
-
-	return frame, nil
+	return c.config.encodeFrame(payload)
 }
 
 // Disconnect forcefully closes the current connection.

@@ -21,12 +21,15 @@ const maxScanTokenSize = 4 + 1024*1024 // largest header (length_prefix4) + larg
 // MakeSplitter returns a bufio.SplitFunc based on configuration.
 func MakeSplitter(cfg *Config) bufio.SplitFunc {
 	// Length-prefixed framing
+	if cfg.Framing == FramingLengthASCII4 {
+		return makeLengthPrefixSplitter(4, true)
+	}
 	if cfg.Framing == FramingLengthPrefix2 || cfg.Framing == FramingLengthPrefix4 {
 		headerLen := 2
 		if cfg.Framing == FramingLengthPrefix4 {
 			headerLen = 4
 		}
-		return makeLengthPrefixSplitter(headerLen)
+		return makeLengthPrefixSplitter(headerLen, false)
 	}
 
 	// Delimiter-based framing (default)
@@ -103,8 +106,9 @@ func MakeSplitter(cfg *Config) bufio.SplitFunc {
 }
 
 // makeLengthPrefixSplitter returns a SplitFunc for length-prefixed framing.
-// Expects messages in format: [2 or 4 byte BE length][payload]
-func makeLengthPrefixSplitter(headerLen int) bufio.SplitFunc {
+// Expects messages in format: [2 or 4 byte BE length][payload], or, when
+// asciiDecimal is set, [headerLen ASCII decimal digits][payload].
+func makeLengthPrefixSplitter(headerLen int, asciiDecimal bool) bufio.SplitFunc {
 	return func(data []byte, atEOF bool) (advance int, token []byte, err error) {
 		if atEOF && len(data) == 0 {
 			return 0, nil, nil
@@ -120,7 +124,14 @@ func makeLengthPrefixSplitter(headerLen int) bufio.SplitFunc {
 
 		// Read length from header
 		var length int
-		if headerLen == 2 {
+		if asciiDecimal {
+			for _, b := range data[:headerLen] {
+				if b < '0' || b > '9' {
+					return 0, nil, fmt.Errorf("invalid ASCII length prefix %q: non-digit byte", data[:headerLen])
+				}
+				length = length*10 + int(b-'0')
+			}
+		} else if headerLen == 2 {
 			length = int(data[0])<<8 | int(data[1])
 		} else {
 			length = int(data[0])<<24 | int(data[1])<<16 | int(data[2])<<8 | int(data[3])

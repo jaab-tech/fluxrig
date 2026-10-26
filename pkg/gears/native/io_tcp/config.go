@@ -44,6 +44,7 @@ const (
 	FramingDelimiter     = "delimiter"      // Delimiter-based framing (default)
 	FramingLengthPrefix2 = "length_prefix2" // 2-byte big-endian length prefix
 	FramingLengthPrefix4 = "length_prefix4" // 4-byte big-endian length prefix
+	FramingLengthASCII4  = "length_ascii4"  // 4 ASCII decimal digits (jPOS ASCIIChannel), e.g. "0123"
 )
 
 // Config holds the configuration for the Simple TCP Gear.
@@ -61,7 +62,7 @@ type Config struct {
 	ReadResponses bool     `json:"read_responses" mapstructure:"read_responses"` // Client: read responses from server (default true)
 
 	// Framing Settings
-	Framing           string `json:"framing" mapstructure:"framing"`                       // "delimiter" (default), "length_prefix2", "length_prefix4"
+	Framing           string `json:"framing" mapstructure:"framing"`                       // "delimiter" (default), "length_prefix2", "length_prefix4", "length_ascii4"
 	Delimiter         string `json:"delimiter" mapstructure:"delimiter"`                   // Delimiter string (e.g. "\n", "<log")
 	DelimiterPosition string `json:"delimiter_position" mapstructure:"delimiter_position"` // "suffix" (default) or "prefix"
 	DelimiterInclude  bool   `json:"delimiter_include" mapstructure:"delimiter_include"`   // Ingress: Keep delimiter in payload
@@ -143,7 +144,7 @@ func SchemaJSON() string {
     "reconnect_wait": { "type": "string", "pattern": "^[0-9]+(s|ms|m|h)$", "default": "5s", "description": "client mode: delay before redialing a dropped connection, e.g. '1s'." },
     "read_responses": { "type": "boolean", "default": true, "description": "client mode: whether to read responses from the server. Set to false for one-way send (e.g. to an echo server that doesn't send proper ISO8583 responses)." },
     "max_connections": { "type": "integer", "default": 4096, "description": "server mode: maximum concurrent connections (0 = unlimited)." },
-    "framing": { "type": "string", "enum": ["delimiter", "length_prefix2", "length_prefix4"], "default": "delimiter", "description": "message framing mode: delimiter (newline, etc), length_prefix2 (2-byte BE), length_prefix4 (4-byte BE)." },
+    "framing": { "type": "string", "enum": ["delimiter", "length_prefix2", "length_prefix4", "length_ascii4"], "default": "delimiter", "description": "message framing mode: delimiter (newline, etc), length_prefix2 (2-byte BE), length_prefix4 (4-byte BE), length_ascii4 (4 ASCII decimal digits, as in jPOS ASCIIChannel)." },
     "delimiter": { "type": "string", "description": "message delimiter for framing (e.g. a newline, 0x03); if empty, frames on newline (ScanLines)." },
     "delimiter_position": { "type": "string", "enum": ["suffix", "prefix"], "default": "suffix", "description": "where the delimiter sits relative to the message: suffix or prefix." },
     "delimiter_include": { "type": "boolean", "default": false, "description": "ingress: keep the delimiter in the emitted payload." },
