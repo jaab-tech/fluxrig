@@ -22,5 +22,5 @@ Closes #
 - [ ] Every commit has a DCO sign-off (`git commit -s`).
 - [ ] Tests cover the change, and they fail without it.
 - [ ] `make lint` and `make test` pass.
-- [ ] If this changes configuration, the wire format, or a public behaviour, the documentation is updated.
+- [ ] If this changes configuration, the wire format, or a public behaviour, the description says what changes. The maintainers write the documentation ([why](https://github.com/jaab-tech/fluxrig/blob/dev/CONTRIBUTING.md#documentation)).
 - [ ] If this change needs an enterprise gear (`sim_source`, `sim_responder`), the issue says so.
