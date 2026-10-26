@@ -18,6 +18,7 @@ Closes #
 - [ ] This pull request targets the `dev` branch.
 - [ ] `CHANGELOG.md` is not changed. The maintainers write the entry ([why](https://github.com/jaab-tech/fluxrig/blob/dev/CONTRIBUTING.md#the-changelog)).
 - [ ] One issue, one change. Unrelated work is in a separate pull request.
+- [ ] Comments, help text, schema descriptions and file names do not name another commercial product ([why](https://github.com/jaab-tech/fluxrig/blob/dev/CONTRIBUTING.md#naming-other-products)).
 - [ ] Every commit has a DCO sign-off (`git commit -s`).
 - [ ] Tests cover the change, and they fail without it.
 - [ ] `make lint` and `make test` pass.
