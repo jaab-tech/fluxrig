@@ -78,6 +78,8 @@ Documentation for setting up your local environment can be found here:
 
 This repository holds the open-source engine and the gears the project publishes. The commercial gears (`sim_source`, `sim_responder`) live in the **[enterprise repository](https://github.com/jaab-tech/fluxrig-ent)** under the Business Source License. A pull request here must not depend on them. If your change needs one of them, say so on the issue first.
 
+The command-line tool `iso8583-tool` is a wire-level instrument for the project's own test suites. It takes fixes, and options for the wire formats that the gears support, such as a length-prefix style. It does not gain new modes or behaviour, such as a responder. Build those as a scenario. If a scenario cannot express what you need, open an issue and describe it.
+
 ## Code of Conduct
 
 By participating in this project, you agree to abide by our **[Code of Conduct](CODE_OF_CONDUCT.md)**.
