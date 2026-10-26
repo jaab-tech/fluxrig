@@ -33,7 +33,7 @@ fluxrig follows a strict **PR-First** workflow to maintain history integrity:
 
 ### The changelog
 
-Leave `CHANGELOG.md` out of your pull request. The maintainers write the entry when they prepare the release that carries your change, and they credit you in it by name. You see your entry when that release is published.
+Leave `CHANGELOG.md` out of your pull request. The maintainers write the entry when they prepare the release that carries your change, and they credit you in it by name. You see your entry when the maintainers publish that release.
 
 The reason is practical. Every change adds a line to the same section, `[Unreleased]`. Two pull requests that both edit it conflict with each other, and the conflict has nothing to do with the code. One author for the entries also keeps their wording and their order the same.
 
