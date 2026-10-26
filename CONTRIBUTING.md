@@ -31,7 +31,7 @@ fluxrig follows a strict **PR-First** workflow to maintain history integrity:
 4.  **Do not edit `CHANGELOG.md`**: The maintainers write the entry when they prepare the release that carries your change, and they credit you in it. See [The changelog](#the-changelog).
 5.  **No changes under `.github/` or `.claude/`**: The maintainers keep the workflows and the repository configuration. A check fails a community pull request that changes them. If a workflow needs a change, describe it in an issue.
 6.  **Describe formats, do not name products**: Source comments, help text, schema descriptions and file names do not name another commercial product. See [Naming other products](#naming-other-products).
-7.  **Describe user-visible changes in the pull request**: The maintainers write the documentation pages. See [Documentation](#documentation).
+7.  **Documentation**: Describe user-visible changes in your pull request, and the maintainers write the pages. To change a page yourself, open an issue here and send a pull request to [fluxrig/docs](https://github.com/fluxrig/docs). See [Documentation](#documentation).
 
 ### The changelog
 
@@ -53,11 +53,11 @@ If your pull request names another product, a maintainer asks you to replace the
 
 ### Documentation
 
-You do not need to write the documentation for your change. The pages on fluxrig.org come from a separate repository that the maintainers build, and each release replaces the public copy of it, so an edit sent there would not last.
+You do not need to write the documentation for a code change. Describe what a user sees in the body of your pull request: new or changed configuration keys with their defaults, flags, and any change in behaviour. The maintainers write the pages and publish them with the release that carries your change.
 
-Instead, describe what a user sees in the body of your pull request: new or changed configuration keys with their defaults, flags, and any change in behaviour. The maintainers write the pages and publish them with the release that carries your change.
+To fix or improve a page yourself, send a pull request to [fluxrig/docs](https://github.com/fluxrig/docs). Open the issue first, in this repository, and name the page: issues are off in the documentation repository. Reference it in your pull request with `Closes jaab-tech/fluxrig#<number>`.
 
-If you find an error on a page, or want to suggest an improvement, open an issue and name the page.
+A maintainer does not merge a pull request in the documentation repository, because each release replaces its content. The maintainer reviews your change, checks it against the documentation rules, applies it to the source of the site and closes your pull request with a note that names the release. The changelog credits you by name.
 
 ### Quick Summary
 
