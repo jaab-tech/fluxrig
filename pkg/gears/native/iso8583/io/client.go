@@ -140,6 +140,9 @@ func (c *Client) handleConn(conn net.Conn) {
 	id := c.idGen.NextEntityID(idgen.EntitySession)
 	connID := fmt.Sprintf("%x", id)
 	connection := &Connection{id: connID, conn: conn}
+	if err := c.config.applyKeepAlive(conn); err != nil {
+		c.log.Warn("failed to set TCP keep-alive", "conn_id", connID, "error", err)
+	}
 
 	c.connPtr.Store(connection)
 

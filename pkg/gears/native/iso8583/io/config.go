@@ -4,8 +4,10 @@
 package io
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"net"
 	"time"
 )
 
@@ -114,8 +116,22 @@ type Config struct {
 	WriteTimeout Duration `json:"write_timeout" mapstructure:"write_timeout"`
 	// ConnectTimeout: Max time for TCP dial. Default: 5s.
 	ConnectTimeout Duration `json:"connect_timeout" mapstructure:"connect_timeout"`
-	// IdleTimeout: Max time for idle connection before closing. Default: 15s.
+	// IdleTimeout: Max time a connection may go without receiving a frame
+	// before it is closed. Default: 15s. Every inbound frame restarts the
+	// timer; frames this gear writes do not, so a link that only sends (for
+	// example a generated echo) but never hears back is closed after this
+	// time. Keep any periodic echo interval well below it.
 	IdleTimeout Duration `json:"idle_timeout" mapstructure:"idle_timeout"`
+
+	// TCPKeepAlive enables TCP keep-alive probes on the socket (server
+	// connections it accepts and the client connection it dials). The probes
+	// are answered by the peer's kernel, so they keep NAT/firewall state alive
+	// and detect a dead peer, but they are not seen by IdleTimeout: only a
+	// received ISO8583 frame resets that. Default: true.
+	TCPKeepAlive bool `json:"tcp_keepalive" mapstructure:"tcp_keepalive"`
+	// TCPKeepAlivePeriod: interval between keep-alive probes. 0 selects the
+	// default. Default: 15s.
+	TCPKeepAlivePeriod Duration `json:"tcp_keepalive_period" mapstructure:"tcp_keepalive_period"`
 }
 
 const (
@@ -143,6 +159,8 @@ const (
 	DefaultConnectTimeout = 5 * time.Second
 	DefaultIdleTimeout    = 15 * time.Second
 
+	DefaultTCPKeepAlivePeriod = 15 * time.Second
+
 	DefaultEncoding = EncodingASCII
 	DefaultVariant  = VariantGeneric
 	DefaultEndian   = EndianBig
@@ -167,6 +185,8 @@ func DefaultConfig() Config {
 		WriteTimeout:            Duration(DefaultWriteTimeout),
 		ConnectTimeout:          Duration(DefaultConnectTimeout),
 		IdleTimeout:             Duration(DefaultIdleTimeout),
+		TCPKeepAlive:            true,
+		TCPKeepAlivePeriod:      Duration(DefaultTCPKeepAlivePeriod),
 	}
 }
 
@@ -226,6 +246,9 @@ func (c *Config) ApplyDefaults() {
 	if c.FrameLengthEndian == "" {
 		c.FrameLengthEndian = DefaultEndian
 	}
+	if c.TCPKeepAlivePeriod == 0 {
+		c.TCPKeepAlivePeriod = Duration(DefaultTCPKeepAlivePeriod)
+	}
 	// The documented default (2) applies to every variant, not only Visa.
 	if c.FrameLengthSize == 0 {
 		c.FrameLengthSize = DefaultFrameLengthSize
@@ -257,7 +280,31 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("invalid frame_length_endian: %s (must be 'big' or 'little')", c.FrameLengthEndian)
 	}
 
+	if c.TCPKeepAlivePeriod < 0 {
+		return fmt.Errorf("tcp_keepalive_period must not be negative, got %s", time.Duration(c.TCPKeepAlivePeriod))
+	}
+
 	return nil
+}
+
+// applyKeepAlive applies the TCP keep-alive settings to conn. A TLS conn is
+// unwrapped to the TCP socket underneath. Failure is returned for the caller
+// to log; a connection without keep-alive is still usable.
+func (c *Config) applyKeepAlive(conn net.Conn) error {
+	if tc, ok := conn.(*tls.Conn); ok {
+		conn = tc.NetConn()
+	}
+	tcp, ok := conn.(*net.TCPConn)
+	if !ok {
+		return nil
+	}
+	if !c.TCPKeepAlive {
+		return tcp.SetKeepAlive(false)
+	}
+	if err := tcp.SetKeepAlive(true); err != nil {
+		return err
+	}
+	return tcp.SetKeepAlivePeriod(time.Duration(c.TCPKeepAlivePeriod))
 }
 
 // SchemaJSON returns the JSON Schema for validation.
@@ -301,7 +348,9 @@ func SchemaJSON() string {
     "read_timeout": { "type": "string", "pattern": "^[0-9]+(s|ms|m|h)$", "default": "5s", "description": "max time to read the body of a frame already in progress, e.g. '5s'." },
     "write_timeout": { "type": "string", "pattern": "^[0-9]+(s|ms|m|h)$", "default": "2s", "description": "max time for a single socket write." },
     "connect_timeout": { "type": "string", "pattern": "^[0-9]+(s|ms|m|h)$", "default": "5s", "description": "client mode: max time for the TCP dial." },
-    "idle_timeout": { "type": "string", "pattern": "^[0-9]+(s|ms|m|h)$", "default": "15s", "description": "max time a connection may sit idle between frames before it is closed." }
+    "idle_timeout": { "type": "string", "pattern": "^[0-9]+(s|ms|m|h)$", "default": "15s", "description": "max time a connection may go without receiving a frame before it is closed. Every inbound frame restarts the timer; frames this gear writes do not, so a generated echo needs a reply (or an interval well below this value) to hold the link open." },
+    "tcp_keepalive": { "type": "boolean", "default": true, "description": "enable TCP keep-alive probes on accepted (server) and dialed (client) sockets. Probes keep NAT/firewall state alive and detect a dead peer; they do not reset idle_timeout." },
+    "tcp_keepalive_period": { "type": "string", "pattern": "^[0-9]+(s|ms|m|h)$", "default": "15s", "description": "interval between TCP keep-alive probes, e.g. '15s'. 0 selects the default." }
   },
   "required": ["mode"]
 }`
