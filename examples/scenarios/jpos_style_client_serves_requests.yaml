@@ -1,0 +1,165 @@
+# jPOS-style ISO 8583 client that also serves requests sent by the server.
+#
+# This is the fluxrig counterpart of the `jpos-client-as-server` jPOS example.
+# The client dials the server on localhost:8888 and sends its own 0800 echo
+# requests, and it also answers any 0800 the server sends it on that same
+# connection with a 0810 and DE39 = 00 (in jPOS, the IsoListener registered on
+# the client's mux). Only the TCP direction is "client"; once the socket is up,
+# both ends are free to send requests.
+#
+#   generate_echo --> encode_request --> client_io --> server        (client's own requests)
+#   server --> client_io --> decode_inbound --+--> serve --> encode_reply --> client_io
+#                                             +--> show_traffic       (everything, for the console)
+#
+# What io_iso8583 does in client mode (read from pkg/gears/native/iso8583/io/client.go):
+#   - `out` carries EVERY frame read from the socket, tagged with `conn.id`,
+#     not only responses. That is: the 0810 answers to the client's own 0800
+#     AND any 0800 request the server initiates arrive on the same port. The
+#     manifest summary says "responses"; the code does not filter. A scenario
+#     that serves requests has to tell them apart itself, which `serve` does
+#     below by looking at the MTI.
+#   - `in` writes to the single connection the client owns. It does not look at
+#     `conn.id`, so replies to server-initiated requests and the client's own
+#     requests share the same input, and wires from several gears may end on it.
+#   - The gear exposes no "request" and "response" ports, so there is no
+#     correlation here: the client's own echoes are fire and forget, and the
+#     0810 they provoke is only logged by show_traffic. Put a conductor in
+#     front of `in` (see jpos_style_forwarding.yaml) if you need to match them.
+#
+# Keeping the link up:
+#   The client closes and redials a connection that stays silent for longer than
+#   idle_timeout (default 15s). Echoes every 30s, and an idle_timeout above
+#   that, hold the link open. With the default idle_timeout the link would
+#   drop between echoes.
+#
+# Differences from jpos-client-as-server:
+#   - jPOS frames each message with a 4-digit ASCII decimal length
+#     (ASCIIChannel). This scenario uses the binary length prefix available
+#     today (frame_length_size: 2). To interoperate with a jPOS peer on the
+#     wire, switch to the ASCII-decimal framing option once it is available;
+#     nothing else in this file changes.
+#   - The jPOS simulator sends two test echoes and shuts down. This scenario
+#     sends one echo every 30 seconds, which is closer to a real client.
+#   - The jPOS IsoListener answers every request it is handed. This one answers
+#     0800 only and drops other request types without a reply.
+#
+# The counterpart that sends requests to a connected client is the
+# jpos-server-as-client example. Run this scenario from the repository root
+# (the spec path below is relative to it).
+
+meta:
+  name: "jpos_style_client_serves_requests"
+  version: "1.0.0"
+
+gears:
+  # The one socket. Dials out, reads server-initiated requests and responses,
+  # and writes both the client's own requests and its replies.
+  - name: "client_io"
+    type: "io_iso8583"
+    config:
+      mode: "client"
+      connect: "localhost:8888"
+      frame_length_size: 2          # binary prefix; jPOS wire compatibility needs ASCII-decimal framing
+      frame_length_endian: "big"
+      encoding: "ascii"
+      reconnect_wait: "1s"          # jPOS: <reconnect-delay>1000</reconnect-delay>
+      idle_timeout: "2m"            # longer than the 30s echo interval below
+
+  # ───────────────────────── The client's own requests ─────────────────────────
+  # A 0800 echo every 30 seconds with DE3, DE7 (UTC date and time) and DE11
+  # (trace number). The MTI goes in metadata, which is where the encoder reads
+  # it; the fields go in the data.
+  - name: "generate_echo"
+    type: "bento"
+    config:
+      ports:
+        outputs: ["out"]
+      bento:
+        input:
+          generate:
+            interval: 30s
+            mapping: |
+              meta "iso8583.mti" = "0800"
+              root.iso8583.field."3" = "180000"
+              root.iso8583.field."7" = now().ts_tz("UTC").ts_format("0102150405")
+              root.iso8583.field."11" = "%06d".format(random_int(min: 1, max: 999999))
+
+  - name: "encode_request"
+    type: "codec_iso8583"
+    config:
+      spec_path: "examples/specs/iso8583-v87-ascii.yaml"
+      direction: "encode"
+      on_error: "reject"
+
+  # ───────────────────────── Everything that comes in ─────────────────────────
+  - name: "decode_inbound"
+    type: "codec_iso8583"
+    config:
+      spec_path: "examples/specs/iso8583-v87-ascii.yaml"
+      direction: "decode"
+      on_error: "reject"
+
+  # Serve the server's requests: keep the 0800, drop anything else (the 0810
+  # answers to our own echoes end up here too and are discarded), then answer.
+  # The decoded message still carries the `conn.id` of the connection. The
+  # client has only one, so nothing depends on it.
+  - name: "serve"
+    type: "bento"
+    config:
+      ports:
+        inputs: ["in"]
+        outputs: ["out"]
+      bento:
+        pipeline:
+          processors:
+            - mapping: |
+                root = if meta("iso8583.mti") == "0800" { this } else { deleted() }
+            - mapping: |
+                root = this
+                meta "iso8583.mti" = "0810"
+                root.iso8583.field."39" = "00"
+
+  - name: "encode_reply"
+    type: "codec_iso8583"
+    config:
+      spec_path: "examples/specs/iso8583-v87-ascii.yaml"
+      direction: "encode"
+      on_error: "reject"
+
+  # Prints every decoded frame (requests and responses alike) with its MTI, so
+  # you can watch the 0810 answers to the client's own echoes.
+  - name: "show_traffic"
+    type: "bento"
+    config:
+      ports:
+        inputs: ["in"]
+      bento:
+        pipeline:
+          processors:
+            - mapping: |
+                root = this
+                root.mti = meta("iso8583.mti")
+        output:
+          stdout: {}
+
+wires:
+  # ── The client's own requests ──
+  - from: "generate_echo.out"
+    to: "encode_request.in"
+  - from: "encode_request.out"
+    to: "client_io.in"
+
+  # ── Everything the socket delivers ──
+  - from: "client_io.out"
+    to: "decode_inbound.in"
+  # decode_inbound.out feeds two gears (a broadcast).
+  - from: "decode_inbound.out"
+    to: "serve.in"
+  - from: "decode_inbound.out"
+    to: "show_traffic.in"
+
+  # ── Replies to the server's requests go back on the same connection ──
+  - from: "serve.out"
+    to: "encode_reply.in"
+  - from: "encode_reply.out"
+    to: "client_io.in"
