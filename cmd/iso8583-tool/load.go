@@ -39,7 +39,8 @@ var (
 	duration         = flag.Duration("duration", 30*time.Second, "Test duration")
 	encodingFlag     = flag.String("encoding", "bcd", "Encoding: ascii or bcd")
 	endian           = flag.String("endian", "big", "Endianness: big or little")
-	framingBytes     = flag.Int("framing-bytes", 2, "Length prefix size in bytes (2 or 4)")
+	framingBytes     = flag.Int("framing-bytes", 2, "Length prefix size: bytes (2 or 4), or digits (1-9, default 4) with -framing-ascii")
+	framingASCII     = flag.Bool("framing-ascii", false, "Use an ASCII decimal length prefix (e.g. \"0123\", jPOS ASCIIChannel) instead of binary; -endian is ignored")
 	correlationBytes = flag.Int("header-len", 12, "Correlation header length in bytes (min 8 for timestamp, 0 to disable)")
 	staticHeaderVal  = flag.String("header-val", "", "Static header hex value (overrides -header-len, disables RTT)")
 	warmupDuration   = flag.Duration("warmup", 0, "Warmup duration before measurement (e.g. 2s)")
@@ -173,9 +174,13 @@ func runLoadMode() {
 	// Log to stdout (not stderr) so Robot Framework doesn't show as ERROR
 	log.SetOutput(os.Stdout)
 
+	if err := applyFramingFlags(); err != nil {
+		log.Fatalf("Invalid framing flags: %v", err)
+	}
+
 	log.Printf("Starting ISO8583 Load Generator (Stateless)")
 	log.Printf("Target: %s, Concurrency: %d, Rate: %d TPS, Duration: %s", *targetAddr, *concurrency, *tps, *duration)
-	log.Printf("Configuration: Encoding=%s, Header=%d bytes (Timestamp), Framing=%d bytes", *encodingFlag, *correlationBytes, *framingBytes)
+	log.Printf("Configuration: Encoding=%s, Header=%d bytes (Timestamp), Framing=%d bytes (ascii=%t)", *encodingFlag, *correlationBytes, *framingBytes, *framingASCII)
 
 	// Configuration Logic
 	var rttEnabled bool
@@ -627,23 +632,10 @@ func (w *Worker) readLoop(ctx context.Context) {
 			return
 		}
 
-		var length int
-		if *framingBytes == 2 {
-			if *endian == "little" {
-				//nolint:gosec // payload len fits
-				length = int(binary.LittleEndian.Uint16(headerBuf))
-			} else {
-				//nolint:gosec // payload len fits
-				length = int(binary.BigEndian.Uint16(headerBuf))
-			}
-		} else {
-			if *endian == "little" {
-				//nolint:gosec // payload len fits
-				length = int(binary.LittleEndian.Uint32(headerBuf))
-			} else {
-				//nolint:gosec // payload len fits
-				length = int(binary.BigEndian.Uint32(headerBuf))
-			}
+		length, err := parseLengthPrefix(headerBuf, *framingASCII, *endian)
+		if err != nil {
+			w.localRespFailed.Add(1)
+			return
 		}
 
 		// 2. Read All Body
@@ -726,25 +718,77 @@ func getEchoSpec() *iso8583.MessageSpec {
 	}
 }
 
-func buildFrame(payload []byte) []byte {
-	buf := make([]byte, *framingBytes+len(payload))
-	if *framingBytes == 2 {
-		if *endian == "little" {
-			//nolint:gosec // payload len fits
-			binary.LittleEndian.PutUint16(buf[0:], uint16(len(payload)))
-		} else {
-			//nolint:gosec // payload len fits
-			binary.BigEndian.PutUint16(buf[0:], uint16(len(payload)))
+// applyFramingFlags validates the framing flags and applies the ASCII default
+// of 4 digits when -framing-bytes was not given explicitly.
+func applyFramingFlags() error {
+	if !*framingASCII {
+		if *framingBytes != 2 && *framingBytes != 4 {
+			return fmt.Errorf("-framing-bytes must be 2 or 4, got %d", *framingBytes)
+		}
+		return nil
+	}
+	explicit := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "framing-bytes" {
+			explicit = true
+		}
+	})
+	if !explicit {
+		*framingBytes = 4
+	}
+	if *framingBytes < 1 || *framingBytes > 9 {
+		return fmt.Errorf("-framing-bytes must be 1-9 digits with -framing-ascii, got %d", *framingBytes)
+	}
+	return nil
+}
+
+// parseLengthPrefix decodes a length prefix (len(hdr) bytes, or digits when
+// ascii is set) into the body length.
+func parseLengthPrefix(hdr []byte, ascii bool, endian string) (int, error) {
+	if ascii {
+		length := 0
+		for _, b := range hdr {
+			if b < '0' || b > '9' {
+				return 0, fmt.Errorf("invalid ASCII length prefix %q", hdr)
+			}
+			length = length*10 + int(b-'0')
+		}
+		return length, nil
+	}
+	var order binary.ByteOrder = binary.BigEndian
+	if endian == "little" {
+		order = binary.LittleEndian
+	}
+	if len(hdr) == 2 {
+		return int(order.Uint16(hdr)), nil
+	}
+	return int(order.Uint32(hdr)), nil //nolint:gosec // 32-bit length fits int
+}
+
+// encodeFrame prefixes payload with a size-sized length prefix.
+func encodeFrame(payload []byte, size int, ascii bool, endian string) []byte {
+	buf := make([]byte, size+len(payload))
+	if ascii {
+		n := len(payload)
+		for i := size - 1; i >= 0; i-- {
+			buf[i] = byte('0' + n%10)
+			n /= 10
 		}
 	} else {
-		if *endian == "little" {
-			//nolint:gosec // payload len fits
-			binary.LittleEndian.PutUint32(buf[0:], uint32(len(payload)))
+		var order binary.ByteOrder = binary.BigEndian
+		if endian == "little" {
+			order = binary.LittleEndian
+		}
+		if size == 2 {
+			order.PutUint16(buf[0:], uint16(len(payload))) //nolint:gosec // payload len fits
 		} else {
-			//nolint:gosec // payload len fits
-			binary.BigEndian.PutUint32(buf[0:], uint32(len(payload)))
+			order.PutUint32(buf[0:], uint32(len(payload))) //nolint:gosec // payload len fits
 		}
 	}
-	copy(buf[*framingBytes:], payload)
+	copy(buf[size:], payload)
 	return buf
+}
+
+func buildFrame(payload []byte) []byte {
+	return encodeFrame(payload, *framingBytes, *framingASCII, *endian)
 }

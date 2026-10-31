@@ -61,11 +61,16 @@ type Config struct {
 	ReconnectWait Duration `json:"reconnect_wait" mapstructure:"reconnect_wait"`
 
 	// Framing Settings (ISO8583 Length-Prefix)
-	// FrameLengthSize: Number of bytes for length prefix (2 or 4). Default: 2.
+	// FrameLengthEncoding: How the length prefix is encoded: "binary" (integer in
+	// FrameLengthEndian byte order) or "ascii_decimal" (zero-padded ASCII digits,
+	// e.g. "0123" as in jPOS ASCIIChannel). Default: "binary".
+	FrameLengthEncoding string `json:"frame_length_encoding" mapstructure:"frame_length_encoding"`
+	// FrameLengthSize: Size of the length prefix: bytes for "binary" (2 or 4,
+	// default 2), digits for "ascii_decimal" (1 to 9, default 4).
 	FrameLengthSize int `json:"frame_length_size" mapstructure:"frame_length_size"`
 	// FrameIncludesHeader: Whether the length prefix includes its own size. Default: false.
 	FrameIncludesHeader bool `json:"frame_includes_header" mapstructure:"frame_includes_header"`
-	// FrameLengthEndian: Endianness of the length prefix ("big" or "little"). Default: "big".
+	// FrameLengthEndian: Endianness of the length prefix ("big" or "little"). Default: "big". Ignored for "ascii_decimal".
 	FrameLengthEndian string `json:"frame_length_endian" mapstructure:"frame_length_endian"`
 
 	// Advanced Framing (Variant Support)
@@ -127,15 +132,25 @@ const (
 	EncodingEBCDIC = "ebcdic"
 	EncodingBCD    = "bcd"
 
+	FrameEncodingBinary       = "binary"
+	FrameEncodingASCIIDecimal = "ascii_decimal"
+
 	EndianBig    = "big"
 	EndianLittle = "little"
 
 	// Default values for ISO8583 Framing and Lifecycle
 	DefaultMaxConnections  = 4096
 	DefaultFrameLengthSize = 2
-	DefaultTPDULength      = 5
-	DefaultProtocolHeader  = 0
-	DefaultVisaHeaderSize  = 22
+	// DefaultASCIIFrameLengthSize is the digit count used when
+	// frame_length_encoding is ascii_decimal and no size is given.
+	DefaultASCIIFrameLengthSize = 4
+	// MaxASCIIFrameLengthSize bounds the digit count so the value fits an int.
+	MaxASCIIFrameLengthSize = 9
+	// MaxFrameLength is the largest accepted frame body, in bytes.
+	MaxFrameLength        = 65535
+	DefaultTPDULength     = 5
+	DefaultProtocolHeader = 0
+	DefaultVisaHeaderSize = 22
 
 	DefaultReconnectWait  = 5 * time.Second
 	DefaultReadTimeout    = 5 * time.Second
@@ -153,6 +168,7 @@ func DefaultConfig() Config {
 	return Config{
 		Mode:                    ModeServer,
 		Bind:                    "",
+		FrameLengthEncoding:     FrameEncodingBinary,
 		FrameLengthSize:         DefaultFrameLengthSize,
 		FrameIncludesHeader:     false,
 		FrameLengthEndian:       DefaultEndian,
@@ -181,6 +197,10 @@ func ParseConfig(raw map[string]any) (*Config, error) {
 	if err := json.Unmarshal(b, &cfg); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
+	// The default size differs per encoding: 4 digits for ascii_decimal.
+	if _, set := raw["frame_length_size"]; !set && cfg.FrameLengthEncoding == FrameEncodingASCIIDecimal {
+		cfg.FrameLengthSize = DefaultASCIIFrameLengthSize
+	}
 
 	return &cfg, nil
 }
@@ -201,9 +221,6 @@ func (c *Config) ApplyDefaults() {
 		if c.ProtocolHeaderSize == 0 {
 			c.ProtocolHeaderSize = DefaultVisaHeaderSize // Standard V.I.P Header
 		}
-		if c.FrameLengthSize == 0 {
-			c.FrameLengthSize = DefaultFrameLengthSize
-		}
 		if c.FrameLengthEndian == "" {
 			c.FrameLengthEndian = DefaultEndian
 		}
@@ -220,15 +237,22 @@ func (c *Config) ApplyDefaults() {
 	}
 
 	// Final Fallback
+	if c.FrameLengthEncoding == "" {
+		c.FrameLengthEncoding = FrameEncodingBinary
+	}
 	if c.Encoding == "" {
 		c.Encoding = DefaultEncoding
 	}
 	if c.FrameLengthEndian == "" {
 		c.FrameLengthEndian = DefaultEndian
 	}
-	// The documented default (2) applies to every variant, not only Visa.
+	// The documented default applies to every variant, not only Visa.
 	if c.FrameLengthSize == 0 {
-		c.FrameLengthSize = DefaultFrameLengthSize
+		if c.FrameLengthEncoding == FrameEncodingASCIIDecimal {
+			c.FrameLengthSize = DefaultASCIIFrameLengthSize
+		} else {
+			c.FrameLengthSize = DefaultFrameLengthSize
+		}
 	}
 }
 
@@ -249,12 +273,20 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("invalid mode: %s", c.Mode)
 	}
 
-	if c.FrameLengthSize != 2 && c.FrameLengthSize != 4 {
-		return fmt.Errorf("frame_length_size must be 2 or 4, got %d", c.FrameLengthSize)
-	}
-
-	if c.FrameLengthEndian != EndianBig && c.FrameLengthEndian != EndianLittle {
-		return fmt.Errorf("invalid frame_length_endian: %s (must be 'big' or 'little')", c.FrameLengthEndian)
+	switch c.FrameLengthEncoding {
+	case FrameEncodingBinary:
+		if c.FrameLengthSize != 2 && c.FrameLengthSize != 4 {
+			return fmt.Errorf("frame_length_size must be 2 or 4 for binary encoding, got %d", c.FrameLengthSize)
+		}
+		if c.FrameLengthEndian != EndianBig && c.FrameLengthEndian != EndianLittle {
+			return fmt.Errorf("invalid frame_length_endian: %s (must be 'big' or 'little')", c.FrameLengthEndian)
+		}
+	case FrameEncodingASCIIDecimal:
+		if c.FrameLengthSize < 1 || c.FrameLengthSize > MaxASCIIFrameLengthSize {
+			return fmt.Errorf("frame_length_size must be between 1 and %d digits for ascii_decimal encoding, got %d", MaxASCIIFrameLengthSize, c.FrameLengthSize)
+		}
+	default:
+		return fmt.Errorf("invalid frame_length_encoding: %s (must be 'binary' or 'ascii_decimal')", c.FrameLengthEncoding)
 	}
 
 	return nil
@@ -270,9 +302,10 @@ func SchemaJSON() string {
     "bind": { "type": "string", "description": "server mode: address to listen on, e.g. ':8583'." },
     "connect": { "type": "string", "description": "client mode: upstream address to dial, host:port." },
     "reconnect_wait": { "type": "string", "pattern": "^[0-9]+(s|ms|m|h)$", "default": "5s", "description": "client mode: delay before redialing a dropped connection, e.g. '5s'." },
-    "frame_length_size": { "type": "integer", "enum": [2, 4], "default": 2, "description": "bytes in the length prefix that frames each message (2 or 4)." },
+    "frame_length_encoding": { "type": "string", "enum": ["binary", "ascii_decimal"], "default": "binary", "description": "how the length prefix is encoded: binary integer, or zero-padded ASCII decimal digits (jPOS ASCIIChannel, e.g. '0123')." },
+    "frame_length_size": { "type": "integer", "minimum": 1, "maximum": 9, "default": 2, "description": "size of the length prefix: bytes for binary (2 or 4, default 2), digits for ascii_decimal (1 to 9, default 4)." },
     "frame_includes_header": { "type": "boolean", "default": false, "description": "whether the length prefix counts its own bytes." },
-    "frame_length_endian": { "type": "string", "enum": ["big", "little"], "default": "big", "description": "byte order of the length prefix." },
+    "frame_length_endian": { "type": "string", "enum": ["big", "little"], "default": "big", "description": "byte order of the binary length prefix; ignored for ascii_decimal." },
     "variant": { "type": "string", "enum": ["generic", "visa", "mastercard"], "default": "generic", "description": "framing profile: generic, visa (VAP header) or mastercard." },
     "encoding": { "type": "string", "enum": ["ascii", "ebcdic", "bcd"], "default": "ascii", "description": "field encoding used for heuristic inspection: ascii, ebcdic or bcd." },
     "protocol_header_size": { "type": "integer", "description": "fixed protocol-header length (bytes) carried before the ISO message; 0 = none." },
