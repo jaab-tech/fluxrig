@@ -49,6 +49,10 @@ type Server struct {
 
 	activeConns atomic.Int64
 	draining    atomic.Bool
+
+	// connEvent, when set, observes accepted and closed connections (true on
+	// accept, false on close). Set before Start.
+	connEvent func(up bool, connID string, remote net.Addr)
 }
 
 // Connection represents an active ISO8583 connection.
@@ -88,6 +92,12 @@ func NewServer(cfg *Config, log *slog.Logger, emit func(*fluxmsg.FluxMsg), idGen
 		connsTotal:  connsTotal,
 	}
 }
+
+// OnConnEvent registers an observer for accepted and closed connections. It is
+// called synchronously from the connection goroutine: on accept, after the
+// connection is registered for egress and before its first frame is read; on
+// close, after it has been removed. Must be called before Start.
+func (s *Server) OnConnEvent(fn func(up bool, connID string, remote net.Addr)) { s.connEvent = fn }
 
 // Start begins listening for connections.
 func (s *Server) Start(ctx context.Context) error {
@@ -189,9 +199,15 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 		s.connsActive.Add(ctx, -1)
 		s.conns.Delete(connID)
 		_ = conn.Close()
+		if s.connEvent != nil {
+			s.connEvent(false, connID, conn.RemoteAddr())
+		}
 	}()
 
 	s.log.Info("connection accepted", "conn_id", connID, "remote", conn.RemoteAddr())
+	if s.connEvent != nil {
+		s.connEvent(true, connID, conn.RemoteAddr())
+	}
 
 	for {
 		if !isActive(s.done) {

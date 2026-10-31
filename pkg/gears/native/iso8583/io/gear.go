@@ -7,6 +7,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
+	"time"
 
 	"github.com/jaab-tech/fluxrig/pkg/ctrl"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
@@ -64,6 +66,9 @@ func (g *Gear) Start(ctx context.Context, emit func(*fluxmsg.FluxMsg)) error {
 	switch g.config.Mode {
 	case ModeServer:
 		g.server = NewServer(g.config, g.log, emit, g.ctx.IDGen())
+		if g.config.EmitConnEvents {
+			g.server.OnConnEvent(g.emitConnEvent)
+		}
 		if err := g.server.Start(ctx); err != nil {
 			return err
 		}
@@ -110,6 +115,35 @@ func (g *Gear) Start(ctx context.Context, emit func(*fluxmsg.FluxMsg)) error {
 	}
 
 	return nil
+}
+
+// PortConn is the output port that carries server-mode connection events when
+// emit_conn_events is enabled.
+const PortConn = "out_conn"
+
+// emitConnEvent publishes a connection event on PortConn. The message has no
+// payload; conn.id is what a downstream gear needs to address the connection.
+func (g *Gear) emitConnEvent(up bool, connID string, remote net.Addr) {
+	msg := fluxmsg.New()
+	msg.FluxID, _ = g.ctx.IDGen().NextFluxID()
+	msg.TSInit = time.Now().UnixNano()
+	event := "down"
+	if up {
+		event = "up"
+	}
+	msg.Metadata["flux.source"] = "iso8583"
+	msg.Metadata["conn.id"] = connID
+	msg.Metadata["conn.event"] = event
+	msg.Metadata["conn.gear"] = g.ctx.GearName()
+	if remote != nil {
+		if host, port, err := net.SplitHostPort(remote.String()); err == nil {
+			msg.Metadata["peer.ip"] = host
+			msg.Metadata["peer.port"] = port
+		}
+	}
+	if err := g.ctx.Emitter().Emit(PortConn, msg); err != nil {
+		g.log.Warn("connection event emit failed", "event", event, "conn_id", connID, "error", err)
+	}
 }
 
 func (g *Gear) handleControlPlane(cmds <-chan ctrl.Command) {
