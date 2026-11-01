@@ -7,8 +7,11 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
+	"time"
 
 	"github.com/jaab-tech/fluxrig/pkg/ctrl"
+	"github.com/jaab-tech/fluxrig/pkg/events"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/jaab-tech/fluxrig/pkg/sdk"
 )
@@ -22,6 +25,9 @@ type Gear struct {
 	// Mode implementations
 	server *Server
 	client *Client
+
+	// events publishes the connection events, when publish_events is on.
+	events *events.Publisher
 }
 
 // Ensure interface compliance
@@ -61,14 +67,18 @@ func (g *Gear) Init(ctx sdk.GearContext) error {
 func (g *Gear) Start(ctx context.Context, emit func(*fluxmsg.FluxMsg)) error {
 	g.log.Info("starting gear")
 
+	connEvent := g.connEventSink()
+
 	switch g.config.Mode {
 	case ModeServer:
 		g.server = NewServer(g.config, g.log, emit, g.ctx.IDGen())
+		g.server.OnConnEvent(connEvent)
 		if err := g.server.Start(ctx); err != nil {
 			return err
 		}
 	case ModeClient:
 		g.client = NewClient(g.config, g.log, emit, g.ctx.IDGen())
+		g.client.OnConnEvent(connEvent)
 		// Publish link-state transitions on the control plane so routing gears
 		// bound to this uplink can sense its availability. A client owns
 		// exactly one connection, so gear-level state IS connection state.
@@ -110,6 +120,38 @@ func (g *Gear) Start(ctx context.Context, emit func(*fluxmsg.FluxMsg)) error {
 	}
 
 	return nil
+}
+
+// connEventSink starts the event publisher and returns the observer that feeds
+// it, or nil when this gear publishes no events. A context that is not on a Rack
+// has nowhere to publish them.
+func (g *Gear) connEventSink() connEventFunc {
+	if !g.config.PublishEvents {
+		return nil
+	}
+	provider, ok := g.ctx.(sdk.EventProvider)
+	if !ok {
+		return nil
+	}
+	g.events = events.NewPublisher(provider, g.ctx.GearName(), g.config.EventQueueSize, g.log)
+	return func(event, connID string, remote net.Addr, reason string) {
+		host, port, err := net.SplitHostPort(remote.String())
+		if err != nil {
+			host = remote.String()
+		}
+		g.events.Publish(events.ConnEvent{Event: event, ConnID: connID, PeerIP: host, PeerPort: port, Reason: reason})
+	}
+}
+
+// stopEvents sends the events that are queued, bounded by stop_timeout. The
+// handlers have finished, so the closed events are in the queue.
+func (g *Gear) stopEvents() error {
+	if g.events == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(g.config.StopTimeout))
+	defer cancel()
+	return g.events.Close(ctx)
 }
 
 func (g *Gear) handleControlPlane(cmds <-chan ctrl.Command) {
@@ -157,6 +199,9 @@ func (g *Gear) Stop() error {
 		if e := g.client.Stop(); e != nil {
 			err = e
 		}
+	}
+	if e := g.stopEvents(); e != nil {
+		err = e
 	}
 	return err
 }

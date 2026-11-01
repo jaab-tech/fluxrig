@@ -606,6 +606,16 @@ definitions:
       domain:
         example: flux
         type: string
+      eventsMaxAge:
+        description: |-
+          EventsMaxAge and EventsMaxBytes bound the stream of durable events. A
+          reader that was down longer than the age has lost what it missed.
+          Mixer-side only.
+        example: 1h
+        type: string
+      eventsMaxBytes:
+        example: 268435456
+        type: integer
       inactiveThreshold:
         example: 30s
         type: string

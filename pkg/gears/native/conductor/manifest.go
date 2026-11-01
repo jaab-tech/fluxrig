@@ -89,7 +89,8 @@ const configSchemaJSON = `{
           "description": "Ticket store. Only 'memory' is implemented; the others are [Roadmap]."
         },
         "default_ttl": { "type": "string", "pattern": "^[0-9]+(s|ms|m|h)$", "default": "1m", "description": "open-ticket deadline when a request sets none." },
-        "retain_after_close": { "type": "string", "pattern": "^[0-9]+(s|ms|m|h)$", "default": "5s", "description": "window a redeemed ticket's outcome is kept for idempotent replay." }
+        "retain_after_close": { "type": "string", "pattern": "^[0-9]+(s|ms|m|h)$", "default": "5s", "description": "window a redeemed ticket's outcome is kept for idempotent replay." },
+        "max_in_flight": { "type": "integer", "minimum": 0, "default": 0, "description": "cap on the open tickets. 0 means unbounded. A new request past the cap is shed on the error port with error.reason=overloaded." }
       }
     }
   },

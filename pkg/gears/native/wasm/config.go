@@ -3,6 +3,14 @@
 
 package wasm
 
+const (
+	// defaultMemoryLimitPages is 16 MiB. A message and its reply can reach 2 MiB
+	// each, and a guest also needs its stack and its heap.
+	defaultMemoryLimitPages = 256
+	// maxMemoryLimitPages is 4 GiB, all that a 32-bit Wasm memory addresses.
+	maxMemoryLimitPages = 65536
+)
+
 // Config defines the configuration for the Wasm gear.
 type Config struct {
 	// Source is the bucket/key to fetch the Wasm module from NATS Object Store.
@@ -22,6 +30,6 @@ func (c *Config) ApplyDefaults() {
 		c.Entrypoint = "process"
 	}
 	if c.MemoryLimitPages == 0 {
-		c.MemoryLimitPages = 16 // 1MB default
+		c.MemoryLimitPages = defaultMemoryLimitPages
 	}
 }

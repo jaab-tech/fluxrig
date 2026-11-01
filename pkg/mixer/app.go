@@ -23,6 +23,7 @@ import (
 	"github.com/jaab-tech/fluxrig/pkg/bus"
 	"github.com/jaab-tech/fluxrig/pkg/config"
 	"github.com/jaab-tech/fluxrig/pkg/controller"
+	"github.com/jaab-tech/fluxrig/pkg/events"
 	"github.com/jaab-tech/fluxrig/pkg/idgen"
 	"github.com/jaab-tech/fluxrig/pkg/ingest"
 	loggerPkg "github.com/jaab-tech/fluxrig/pkg/logger"
@@ -250,6 +251,13 @@ func (a *App) Run(ctx context.Context) error {
 		if errDLQ := snakeSrv.ProvisionStreamWithAge(ctx, "flux-dlq", dlqSubjects, a.cfg.Snake.DLQMaxAge); errDLQ != nil {
 			a.log.Warn("Failed to provision dead letter stream", "error", errDLQ)
 		}
+	}
+
+	// 3d. Provision the stream of durable events. It has its own subjects and
+	// limits: a stream cannot overlap the message stream, and events are short
+	// lived. Without it a Rack keeps its traffic and parks its events.
+	if errEvents := snakeSrv.ProvisionStreamWithLimits(ctx, events.StreamName, eventSubjects(&a.cfg.Snake), eventsMaxAge(&a.cfg.Snake), a.cfg.Snake.EventsMaxBytes); errEvents != nil {
+		a.log.Warn("Failed to provision the events stream", "error", errEvents)
 	}
 
 	// 4. Discovery

@@ -42,6 +42,11 @@ type Gear struct {
 	// Config - Dynamic Plugin Names
 	inputType  string
 	outputType string
+
+	// Durable events this gear reads (ports.events), with the context they need.
+	eventType    string
+	eventSources []eventSource
+	gearCtx      sdk.GearContext
 }
 
 // New creates a new instance of the Bento gear.
@@ -56,6 +61,7 @@ func (g *Gear) Init(ctx sdk.GearContext) error {
 	g.logger = ctx.Logger().With("type", "bento")
 	g.params = ctx.Config()
 	g.emitter = ctx.Emitter()
+	g.gearCtx = ctx
 
 	// Use the Gear Name to uniquify the plugins in the Global Scope
 	// Use the Gear Name to uniquify the plugins in the Global Scope
@@ -63,6 +69,7 @@ func (g *Gear) Init(ctx sdk.GearContext) error {
 	safeName = strings.ToLower(safeName) // Ensure lowercase
 	g.inputType = fmt.Sprintf("flux_in_%s", safeName)
 	g.outputType = fmt.Sprintf("flux_out_%s", safeName)
+	g.eventType = fmt.Sprintf("flux_evt_%s", safeName)
 
 	// 1. Parse Config
 	var cfg Config
@@ -87,6 +94,13 @@ func (g *Gear) Init(ctx sdk.GearContext) error {
 			for _, o := range outs {
 				outputs = append(outputs, o.(string))
 			}
+		}
+		if evs, ok := p["events"].([]any); ok {
+			sources, errEvents := parseEventSources(ctx, evs)
+			if errEvents != nil {
+				return fmt.Errorf("bento gear %q: ports.events: %w", ctx.GearName(), errEvents)
+			}
+			g.eventSources = sources
 		}
 	}
 	g.config = cfg
@@ -126,8 +140,19 @@ func (g *Gear) Init(ctx sdk.GearContext) error {
 		return err
 	}
 
+	if len(g.eventSources) > 0 {
+		if errEvents := g.registerEventInput(); errEvents != nil {
+			return errEvents
+		}
+	}
+
 	// 4. Auto-Wiring Injection with DYNAMIC names
-	if len(inputs) > 0 {
+	if len(g.eventSources) > 0 {
+		if _, hasInput := cfg.Bento["input"]; hasInput {
+			return fmt.Errorf("bento gear %q has ports.events and its own 'input': the gear injects the input of ports.events, so remove one of them", ctx.GearName())
+		}
+		cfg.Bento["input"] = g.eventInputConfig(inputs)
+	} else if len(inputs) > 0 {
 		if _, hasInput := cfg.Bento["input"]; !hasInput {
 			cfg.Bento["input"] = map[string]any{
 				g.inputType: map[string]any{"name": inputs[0]},
@@ -324,9 +349,11 @@ func (o *fluxOutput) Write(ctx context.Context, msg *service.Message) error {
 	}
 	// The default "out" port uses the Start emit callback, which in the runtime
 	// is exactly Emit("out"), so single-output gears behave identically. Named
-	// ports require the PortEmitter.
+	// ports require the PortEmitter. A gear that reads events takes it for "out"
+	// too: the callback reports no error, and a failed emission must not ack an
+	// event.
 	switch {
-	case port == "out" && o.g.emitFn != nil:
+	case port == "out" && o.g.emitFn != nil && (len(o.g.eventSources) == 0 || o.g.emitter == nil):
 		o.g.emitFn(fm)
 	case o.g.emitter != nil:
 		if e := o.g.emitter.Emit(port, fm); e != nil {

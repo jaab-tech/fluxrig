@@ -15,6 +15,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/jaab-tech/fluxrig/pkg/config"
+	"github.com/jaab-tech/fluxrig/pkg/events"
 	"github.com/jaab-tech/fluxrig/pkg/pki"
 	"github.com/jaab-tech/fluxrig/pkg/snake"
 )
@@ -50,6 +51,25 @@ func messageSubjects(cfg *config.SnakeConfig) []string {
 		)
 	}
 	return subjects
+}
+
+// eventSubjects is the subject set of the stream of durable events.
+func eventSubjects(cfg *config.SnakeConfig) []string {
+	subjects := []string{events.SubjectRoot + ".>"}
+	if cfg.Domain != "flux" && cfg.Domain != "" {
+		subjects = append(subjects, fmt.Sprintf("%s.evt.>", cfg.Domain))
+	}
+	return subjects
+}
+
+// eventsMaxAge is the age limit of the stream of durable events. A value that
+// does not parse selects the default: zero would mean no limit.
+func eventsMaxAge(cfg *config.SnakeConfig) time.Duration {
+	age, err := time.ParseDuration(cfg.EventsMaxAge)
+	if err != nil || age <= 0 {
+		return events.DefaultStreamMaxAge
+	}
+	return age
 }
 
 // expectedStreams returns the streams the Mixer manages, each with the
@@ -88,6 +108,13 @@ func expectedStreams(cfg *config.MixerConfig) []snake.ExpectedStream {
 			MaxAge:   maxAge,
 		})
 	}
+
+	expected = append(expected, snake.ExpectedStream{
+		Name:     events.StreamName,
+		Subjects: eventSubjects(&cfg.Snake),
+		MaxAge:   eventsMaxAge(&cfg.Snake),
+		MaxBytes: cfg.Snake.EventsMaxBytes,
+	})
 
 	return expected
 }

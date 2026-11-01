@@ -49,6 +49,7 @@ type ExpectedStream struct {
 	Name     string
 	Subjects []string
 	MaxAge   time.Duration
+	MaxBytes int64
 }
 
 // StreamDiagnosis is the per-stream verdict.
@@ -257,5 +258,6 @@ func createManagedStream(ctx context.Context, js jetstream.JetStream, w Expected
 		Retention: jetstream.LimitsPolicy,
 		Replicas:  1,
 		MaxAge:    w.MaxAge,
+		MaxBytes:  w.MaxBytes,
 	})
 }

@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -68,6 +69,10 @@ type Manager struct {
 	mu            sync.Mutex
 	portsMu       sync.RWMutex // guards lazy port-ID assignment in gearPorts (emit hot path)
 	outbox        *outbox      // bus-bound emissions parked while the bus is down
+
+	eventRetrying atomic.Bool   // a loop retries the parked events
+	closing       chan struct{} // closed by Shutdown, ends that loop
+	closeOnce     sync.Once
 }
 
 func NewManager(machineID uuid.UUID, name string, b bus.Bus, ig *idgen.IDGenerator, specMgr manager.Manager, opTimeout, convTimeout, handshakeInterval time.Duration, trace, debug bool, clusterPubKey []byte) *Manager {
@@ -94,6 +99,8 @@ func NewManager(machineID uuid.UUID, name string, b bus.Bus, ig *idgen.IDGenerat
 		busSubjects:        make(map[string]bool),
 		outbox:             newOutbox(0, 0),
 	}
+	m.outbox.sendEvent = m.bus.PublishRaw
+	m.closing = make(chan struct{})
 	m.lane = newLocalLane(0, 0, m.logger)
 	return m
 }
@@ -386,6 +393,63 @@ func (m *Manager) publishPort(ctx context.Context, gearName, port string, msg *f
 	return nil
 }
 
+// publishEvent sends a durable event to the bus, or parks it when the bus does
+// not take it. Unlike a message it parks with no bus at all: a Rack that started
+// without the Mixer still owes the event, and it leaves on the next SetBus. It
+// returns an error only when the event is lost, because the outbox has no room.
+func (m *Manager) publishEvent(ctx context.Context, subject string, data []byte, id uuid.UUID) error {
+	ev := &outboxEvent{data: data, id: id}
+	m.outbox.waitClear(ctx, subject)
+	if held, parked := m.outbox.parkEventIfHeld(subject, ev); held {
+		m.kickDrain(true)
+		if !parked {
+			return errOutboxFull
+		}
+		return nil
+	}
+	if err := m.bus.PublishRaw(ctx, subject, data, id); err != nil {
+		if !m.outbox.parkEvent(subject, ev) {
+			return fmt.Errorf("%w: %w", errOutboxFull, err)
+		}
+		m.logger().Warn("bus publish failed, parking event for forward on rejoin",
+			"subject", subject, "error", err)
+		m.retryParkedEvents()
+		return nil
+	}
+	if m.outbox.len() > 0 {
+		m.kickDrain(true)
+	}
+	return nil
+}
+
+// errOutboxFull reports an event that found no room in the outbox.
+var errOutboxFull = errors.New("outbox full")
+
+// retryParkedEvents starts the loop that retries parked events, unless it runs.
+// The loop ends when no event is parked, or at Shutdown, which makes its own
+// bounded attempt.
+func (m *Manager) retryParkedEvents() {
+	if !m.eventRetrying.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer m.eventRetrying.Store(false)
+		ticker := time.NewTicker(outboxEventRetry)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-m.closing:
+				return
+			case <-ticker.C:
+			}
+			if !m.outbox.hasEvents() {
+				return
+			}
+			m.kickDrain(true)
+		}
+	}()
+}
+
 // publishesToBus reports whether an emission on subject must also go to the bus.
 func (m *Manager) publishesToBus(subject string) bool {
 	m.portsMu.RLock()
@@ -407,6 +471,9 @@ type GearContextImpl struct {
 	clusterPubKey []byte
 	emitter       sdk.PortEmitter
 	bindings      map[string]sdk.PortBinding
+	rackName      string
+	gearDeploy    map[string]string
+	events        func(ctx context.Context, subject string, data []byte, id uuid.UUID) error
 }
 
 func (g *GearContextImpl) Context() context.Context { return g.ctx }
@@ -424,6 +491,22 @@ func (g *GearContextImpl) Bus() bus.Bus                         { return g.bus }
 func (g *GearContextImpl) Manager() manager.Manager             { return g.mgr }
 func (g *GearContextImpl) ControlPlane() any                    { return g.ctrl }
 func (g *GearContextImpl) ClusterPublicKey() []byte             { return g.clusterPubKey }
+
+// RackName implements sdk.EventProvider.
+func (g *GearContextImpl) RackName() string { return g.rackName }
+
+// GearRack implements sdk.EventProvider.
+func (g *GearContextImpl) GearRack(gear string) string {
+	if rack := g.gearDeploy[gear]; rack != "" {
+		return rack
+	}
+	return g.rackName
+}
+
+// PublishEvent implements sdk.EventProvider.
+func (g *GearContextImpl) PublishEvent(ctx context.Context, subject string, data []byte, id uuid.UUID) error {
+	return g.events(ctx, subject, data, id)
+}
 
 // ApplyScenario diffs and applies the scenario.
 func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err error) {
@@ -555,6 +638,9 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err
 			clusterPubKey: m.clusterPubKey,
 			emitter:       &portEmitter{m: m, gear: gSpec.Name},
 			bindings:      portBindings[gSpec.Name],
+			rackName:      m.rackName,
+			gearDeploy:    gearDeploy,
+			events:        m.publishEvent,
 		}
 
 		// Every gear holds the same control plane. It is bound to the bus connection when
@@ -793,6 +879,7 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err
 func (m *Manager) Shutdown() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.closeOnce.Do(func() { close(m.closing) })
 	m.stopAll()
 	// A shutdown with a live bus and a non-empty outbox gets one bounded
 	// drain attempt; with no bus there is nowhere to send, so the count of

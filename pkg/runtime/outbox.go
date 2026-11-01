@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/jaab-tech/fluxrig/pkg/bus"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/jaab-tech/fluxrig/pkg/telemetry"
@@ -25,6 +27,10 @@ const (
 	defaultOutboxDrainRetries = 3
 	defaultOutboxBackpressure = time.Second
 	outboxDrainRetryWait      = 200 * time.Millisecond
+	// outboxEventRetry is how often parked events try the bus. A bus that
+	// reconnects by itself makes no SetBus, and an event has no traffic behind
+	// it to start a drain.
+	outboxEventRetry = 5 * time.Second
 )
 
 // The drain orders of the outbox (rack.outbox_order).
@@ -51,10 +57,25 @@ func ValidateOutboxOrder(order string) error {
 	return fmt.Errorf("runtime: outbox order %q: want %q or %q", order, OutboxOrderSubject, OutboxOrderNone)
 }
 
-// outboxItem is one bus-bound emission parked while the bus is down.
+// outboxItem is one bus-bound emission parked while the bus is down. It holds
+// either a message or a durable event.
 type outboxItem struct {
 	subject string
 	msg     *fluxmsg.FluxMsg
+	event   *outboxEvent
+}
+
+// outboxEvent is a durable event as it goes to the bus: its bytes, and the id
+// that makes a second publish harmless.
+type outboxEvent struct {
+	data []byte
+	id   uuid.UUID
+}
+
+// same reports whether two items are the same emission. It compares pointers,
+// so a concurrent park cannot make the match ambiguous.
+func (it outboxItem) same(other outboxItem) bool {
+	return it.msg == other.msg && it.event == other.event
 }
 
 // outbox is a bounded FIFO of emissions the bus refused. When the bus is down
@@ -85,10 +106,12 @@ type outbox struct {
 	// wait bounds how long a live emission waits for its subject's backlog
 	// before it parks behind it (rack.outbox_backpressure_timeout). Zero
 	// parks at once.
-	wait    time.Duration
-	dropped uint64
-	parked  uint64
-	drained uint64
+	wait time.Duration
+	// sendEvent publishes a parked event. A drain's publish takes a message.
+	sendEvent func(ctx context.Context, subject string, data []byte, id uuid.UUID) error
+	dropped   uint64
+	parked    uint64
+	drained   uint64
 }
 
 func newOutbox(maxMessages, drainRetries int) *outbox {
@@ -190,13 +213,69 @@ func (o *outbox) park(subject string, msg *fluxmsg.FluxMsg) {
 
 func (o *outbox) parkLocked(subject string, msg *fluxmsg.FluxMsg) {
 	for o.items.Len() >= o.max {
-		o.items.Remove(o.items.Front())
+		// An event never takes room from traffic: it leaves first.
+		victim := o.oldestEventLocked()
+		if victim == nil {
+			victim = o.items.Front()
+		} else {
+			slog.Default().Warn("outbox: a message took the place of a parked event",
+				"subject", victim.Value.(outboxItem).subject)
+		}
+		o.items.Remove(victim)
 		o.dropped++
 		countOutboxDropped()
 	}
 	o.items.PushBack(outboxItem{subject: subject, msg: msg})
 	o.parked++
 	countOutboxParked()
+}
+
+// oldestEventLocked returns the oldest parked event, or nil. The caller holds
+// o.mu.
+func (o *outbox) oldestEventLocked() *list.Element {
+	for e := o.items.Front(); e != nil; e = e.Next() {
+		if e.Value.(outboxItem).event != nil {
+			return e
+		}
+	}
+	return nil
+}
+
+// parkEvent appends an event and reports whether it did. A full outbox refuses
+// it: unlike a message, an event evicts nothing.
+func (o *outbox) parkEvent(subject string, ev *outboxEvent) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.parkEventLocked(subject, ev)
+}
+
+func (o *outbox) parkEventLocked(subject string, ev *outboxEvent) bool {
+	if o.items.Len() >= o.max {
+		return false
+	}
+	o.items.PushBack(outboxItem{subject: subject, event: ev})
+	o.parked++
+	countOutboxParked()
+	return true
+}
+
+// parkEventIfHeld parks an event behind the items on its subject. held reports
+// whether there are such items, and parked whether the event found room. The
+// check and the park share one lock, as in parkIfHeld.
+func (o *outbox) parkEventIfHeld(subject string, ev *outboxEvent) (held, parked bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if !o.ordered || !o.heldLocked(subject) {
+		return false, false
+	}
+	return true, o.parkEventLocked(subject, ev)
+}
+
+// hasEvents reports whether an event is parked.
+func (o *outbox) hasEvents() bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.oldestEventLocked() != nil
 }
 
 // parkIfHeld parks msg when the outbox keeps subject order and already holds
@@ -362,7 +441,11 @@ func (o *outbox) publishWithRetries(ctx context.Context, publish func(context.Co
 		if !o.holds(it) {
 			return errOutboxEvicted
 		}
-		err = publish(ctx, it.subject, it.msg)
+		if it.event != nil {
+			err = o.sendEvent(ctx, it.subject, it.event.data, it.event.id)
+		} else {
+			err = publish(ctx, it.subject, it.msg)
+		}
 		switch {
 		case err == nil:
 			o.setBusState(busUp)
@@ -398,21 +481,20 @@ func (o *outbox) holds(it outboxItem) bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	for e := o.items.Front(); e != nil; e = e.Next() {
-		if e.Value.(outboxItem).msg == it.msg {
+		if e.Value.(outboxItem).same(it) {
 			return true
 		}
 	}
 	return false
 }
 
-// remove takes an item out of the queue (matched by the message pointer, so a
-// concurrent park cannot make the match ambiguous) and counts it as forwarded
+// remove takes an item out of the queue and counts it as forwarded
 // or as dropped. An item the cap already evicted is not counted twice.
 func (o *outbox) remove(it outboxItem, dropped bool) {
 	o.mu.Lock()
 	var found bool
 	for e := o.items.Front(); e != nil; e = e.Next() {
-		if e.Value.(outboxItem).msg == it.msg {
+		if e.Value.(outboxItem).same(it) {
 			o.items.Remove(e)
 			found = true
 			break

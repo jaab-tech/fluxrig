@@ -739,3 +739,45 @@ func TestHandleGears(t *testing.T) {
 		t.Fatalf("unknown gear: status %d, want 404", w.Result().StatusCode)
 	}
 }
+
+// A scenario whose gear config has a key the gear does not declare is refused
+// on the import, with a 400 that names the gear and the key, and nothing is
+// stored. A dry run is refused the same way. A scenario with only declared keys
+// goes through.
+func TestHandleScenarioImport_RefusesUnknownGearConfigKey(t *testing.T) {
+	imported := 0
+	mockSC := &MockScenarioController{ImportFunc: func(context.Context, []byte, bool) (string, error) {
+		imported++
+		return "ok", nil
+	}}
+	s := NewServer(&MockRegistry{}, nil, nil, mockSC, nil, uuid.Nil, uuid.Nil, nil, nil, nil)
+
+	scenario := func(extra string) string {
+		return "meta:\n  name: t\n  version: \"1\"\ngears:\n  - name: srv\n    type: io_iso8583\n    config:\n      mode: server\n      bind: \":8583\"\n" + extra
+	}
+	for _, q := range []string{"?dry_run=true", "?activate=true", ""} {
+		imported = 0
+		req := httptest.NewRequest("POST", "/api/v1/scenario/import"+q, strings.NewReader(scenario("      stric_connection_routing: false\n")))
+		w := httptest.NewRecorder()
+		s.handleScenarioImport(w, req)
+		body := w.Body.String()
+		if w.Result().StatusCode != http.StatusBadRequest {
+			t.Errorf("%q: status = %d, want 400 (%s)", q, w.Result().StatusCode, body)
+		}
+		for _, want := range []string{"invalid gear config", `gear "srv"`, "io_iso8583", "stric_connection_routing"} {
+			if !strings.Contains(body, want) {
+				t.Errorf("%q: the answer lacks %q: %s", q, want, body)
+			}
+		}
+		if imported != 0 {
+			t.Errorf("%q: the controller was called %d time(s) for a refused scenario", q, imported)
+		}
+	}
+
+	req := httptest.NewRequest("POST", "/api/v1/scenario/import?dry_run=true", strings.NewReader(scenario("")))
+	w := httptest.NewRecorder()
+	s.handleScenarioImport(w, req)
+	if w.Result().StatusCode != http.StatusOK {
+		t.Errorf("a scenario with declared keys only: status = %d, want 200 (%s)", w.Result().StatusCode, w.Body.String())
+	}
+}

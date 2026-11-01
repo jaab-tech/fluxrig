@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 | Version | Date | Status | Summary |
 | :--- | :--- | :--- | :--- |
+| [v0.14.0](#v0140) | 2026-11-01 | Delivered | A server can greet a client that sent nothing, through durable connection events, a misspelt gear option is refused, a late reply can reach the new connection of its peer, and the Wasm gear refuses an unsigned catalog module and applies its memory limit |
 | [v0.13.1](#v0131) | 2026-10-25 | Delivered | Go 1.26.10 and x/net v0.60.0 close 23 reachable vulnerabilities, an approved Rack gets the active scenario, `fluxrig check` reports a bad configuration and answers in seconds, dead letter publishes and file wire sources are bounded, and a server reply carries the swapped TPDU |
 | [v0.13.0](#v0130) | 2026-10-20 | Delivered | ISO 20022 support: an ISO 8583 network bridges to the RTP rail, specs and lookup data upload to the Mixer, the registry lives on the bus, and a Rack parks messages while the bus is down |
 | [v0.12.0](#v0120) | 2026-09-28 | Delivered | The Mixer's API and a Rack's enrollment and heartbeat now require authentication, a Rack pins the Mixer's signing key, and guaranteed-lane messages ack only once handled |
@@ -28,6 +29,111 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 | [v0.7.1](#v071) | 2026-08-10 | Delivered | ISO 8583 TLV length hardening |
 | [v0.7.0](#v070) | 2026-08-01 | Delivered | Payment switch: Conductor gear, gear manifests, ISO 8583 TLS |
 
+
+## [v0.14.0] - 2026-11-01 {#v0140}
+
+**Before upgrading.** Four changes can stop something that runs today. Read
+[Upgrading](reference/upgrading.md#v013-to-v014), and upgrade the Mixer first.
+
+- **A gear option that the gear does not declare is refused**, also in a scenario
+  that is already active: the Rack refuses it when it applies the scenario.
+- **The Wasm gear applies `memory_limit_pages`**, and a module that declares more
+  memory than the limit does not load.
+- **A Wasm module from `snake://` with no valid cluster signature does not run.**
+- **`snake.stream_subjects` must not include `flux.evt.>`.**
+
+### Added
+
+- **Durable connection events.** `io_iso8583` publishes `opened` and `closed`,
+  in server mode and in client mode, on `flux.evt.conn.<rack>.<gear>`. A
+  `closed` event has a `reason`: `peer_closed`, `idle_timeout`, `read_error`,
+  `invalid_frame`, `closed_by_command` or `stopped`. A `bento` gear reads them
+  through `ports.events`, and each event gives one message with the `conn.id`
+  of the connection, so a server can send a logon to a client that sent nothing
+  (`examples/scenarios/iso8583_server_logon.yaml`). Several gears can read the
+  same events. A reader that was down gets what it missed, inside
+  `max_event_age` (default `30s`), and an event that fails is delivered again,
+  up to `max_deliver` (default 5). A socket never waits for the bus: the events
+  of a gear go through a bounded queue (`event_queue_size`, default 1024). When
+  the bus does not answer, an event waits in the Rack outbox, and a full outbox
+  drops it with a Warn. The events need a Mixer: the stream is there, also for
+  two gears on one Rack. `publish_events` (default `true`) turns them off. The
+  Mixer provisions the stream `flux-events`, with `snake.events_max_age`
+  (default `1h`) and `snake.events_max_bytes` (default 256 MiB). **A
+  `snake.stream_subjects` that includes `flux.evt.>` collides with this stream.**
+  Native gears read the events with `pkg/events`.
+- **`io_iso8583` `on_missing_connection`** (server mode, default `drop`) sets
+  what the server does with a reply whose connection no longer exists, for
+  example because the peer dropped the link and reconnected before the reply was
+  ready. `drop` refuses the reply, as before. `same_remote_ip` sends it on the
+  newest active connection from the remote IP of the request. `same_listener`
+  sends it on the newest active connection of the server. A reply for a live
+  connection is never redirected. Behind a NAT or a concentrator that shares one
+  IP between several terminals, `same_remote_ip` can send a reply to another
+  terminal of that IP. Client mode needs no such option: a client writes every
+  message on its current connection.
+- **`io_iso8583` `stop_timeout`** (default `5s`) bounds how long the gear waits,
+  when it stops, for its connection handlers to finish and for their events to
+  leave. `0s` does not wait.
+- **The conductor logs why a message leaves on the error port.** `no_key`,
+  `no_route` and `no_destination` write a Warn. `timeout` and `unmatched_reply`
+  write a Debug, because they grow with the traffic. The line has the reason,
+  the flux id, the connection and, where known, the route, the destination or the
+  missing field. It never has the value of the correlation key.
+
+### Changed
+
+- **A gear configuration with a key that the gear does not declare is
+  refused.** Before, a misspelt option was ignored and the default stayed in
+  force. This applies at the top level and in every nested object that the
+  schema describes with properties. The Mixer refuses the scenario when it is
+  imported, a dry run included, with a 400 that names the gear and the key. A
+  Rack refuses it when it applies the scenario. The key `labels` stays allowed
+  at the top level. A gear whose configuration is free-form sets
+  `additionalProperties: true` in its schema. **A scenario that used an
+  undeclared key now fails to import. Remove the key.** Known case: `name` in
+  the configuration of `codec_iso8583`, which nothing reads. The schemas of the
+  conductor and of `io_tcp` now declare `valet.max_in_flight` and `tags`, which
+  they read or accepted without listing them.
+- **The Wasm gear applies `memory_limit_pages`, and its default is now 256 pages
+  (16 MiB).** Before, the option had no effect and a module could grow to 4 GiB.
+  The old default of 16 pages was below what a module with a 1 MiB stack
+  declares, so it never could apply. **A module that declares more memory than
+  the limit no longer loads. A scenario that sets `memory_limit_pages: 16` now
+  fails with such a module. Raise the value or remove the key.**
+
+### Fixed
+
+- **A Rack refuses a Wasm module from the catalog that it cannot verify.** A
+  `snake://` module with no cluster signature ran with a warning, and it ran
+  with no warning when the Rack had no key to check it. Both now fail when the
+  gear starts. A module from a `file://` path can still run unsigned, for
+  development.
+- **The Wasm gear decodes the reply of a module before it frees the reply.** A
+  guest allocator that writes into a freed block made the message fail to
+  decode.
+- **The Wasm gear frees the input of a dropped message**, and of a message that
+  fails. Before, each one left its block allocated in the module. A module that
+  returns its input block has that block freed once, not twice. An `alloc` that
+  returns a null pointer is now an error, and the host no longer writes the
+  message at address 0.
+
+- **`io_iso8583` stops its connection handlers before Stop returns.** A handler
+  that was inside the emit of a frame ran its cleanup (the connection count, the
+  metrics, the removal from the table) after Stop had returned, and in a
+  redeploy against the next scenario.
+- **A graceful stop of a Rack with connected `io_iso8583` peers ends when the
+  connections stop reading.** `Drain` waited for the connections to close, and
+  they closed only at `Stop`, which comes after `Drain`. So the stop always took
+  the whole `rack.drain_timeout` (35 s by default) and logged an incomplete
+  drain, even with nothing pending. The sockets now stay open for replies until
+  `Stop`. A handler that was busy when the drain began now stops reading too.
+  `Stop` is safe to call twice.
+- **The Mixer records every gear, port and wire of a scenario in its topology
+  registry.** A unique index on `(machine_id, type_id)` kept one row of each
+  kind per machine, so each import logged `entity name already exists` for every
+  gear, port and wire after the first. Migration 3 drops the index when the
+  Mixer starts. The data is kept.
 
 ## [v0.13.1] - 2026-10-25 {#v0131}
 
@@ -1028,7 +1134,8 @@ The payment-switch release: the **Conductor** transaction switch, a manifest sys
 - **Snake Protocol**: Secure tunneling implementation for Rack-to-Mixer connectivity.
 - **FluxMsg**: Canonical JSON schema for inter-gear communication.
 
-[Unreleased]: https://github.com/jaab-tech/fluxrig/compare/v0.13.1...HEAD
+[Unreleased]: https://github.com/jaab-tech/fluxrig/compare/v0.14.0...HEAD
+[v0.14.0]: https://github.com/jaab-tech/fluxrig/releases/tag/v0.14.0
 [v0.13.1]: https://github.com/jaab-tech/fluxrig/releases/tag/v0.13.1
 [v0.13.0]: https://github.com/jaab-tech/fluxrig/releases/tag/v0.13.0
 [v0.12.0]: https://github.com/jaab-tech/fluxrig/releases/tag/v0.12.0

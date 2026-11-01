@@ -309,7 +309,7 @@ func (g *Gear) ProcessPort(ctx context.Context, port string, msg *fluxmsg.FluxMs
 func (g *Gear) handleRequest(ctx context.Context, msg *fluxmsg.FluxMsg) error {
 	key, err := g.buildKey(msg)
 	if err != nil {
-		g.emitError(msg, reasonNoKey)
+		g.emitError(msg, reasonNoKey, "error", err)
 		return nil
 	}
 
@@ -332,7 +332,7 @@ func (g *Gear) handleRequest(ctx context.Context, msg *fluxmsg.FluxMsg) error {
 	})
 	if dest == "" {
 		// Nothing available anywhere in the tree; no ticket is parked.
-		g.emitError(msg, reasonNoDestination)
+		g.emitError(msg, reasonNoDestination, "route", rt.name)
 		return nil
 	}
 
@@ -412,7 +412,7 @@ func (g *Gear) handleRequest(ctx context.Context, msg *fluxmsg.FluxMsg) error {
 func (g *Gear) handleReply(ctx context.Context, msg *fluxmsg.FluxMsg) error {
 	key, err := g.buildKey(msg)
 	if err != nil {
-		g.emitError(msg, reasonUnmatchedReply)
+		g.emitError(msg, reasonUnmatchedReply, "error", err)
 		return nil
 	}
 
@@ -509,6 +509,7 @@ func (g *Gear) onExpire(t *valet.Ticket) {
 		}
 	}
 	msg.Metadata["error.reason"] = reasonTimeout
+	g.logOutcome(msg, reasonTimeout, "destination", t.Destination)
 	// Bound how many expiry emissions hit the bus concurrently: a mass timeout
 	// (e.g. a scheme outage) fires many of these callbacks at once.
 	if g.expireSem != nil {
@@ -635,8 +636,9 @@ func mapLen(container any) int {
 }
 
 // emitError annotates the original message with a reason and sends it out the
-// error port. The conductor never authors a reply of its own.
-func (g *Gear) emitError(msg *fluxmsg.FluxMsg, reason string) {
+// error port. The conductor never authors a reply of its own. attrs are extra
+// log attributes for the line that records the outcome (see logOutcome).
+func (g *Gear) emitError(msg *fluxmsg.FluxMsg, reason string, attrs ...any) {
 	if msg == nil {
 		return
 	}
@@ -644,9 +646,40 @@ func (g *Gear) emitError(msg *fluxmsg.FluxMsg, reason string) {
 		msg.Metadata = make(map[string]string, 1)
 	}
 	msg.Metadata["error.reason"] = reason
+	g.logOutcome(msg, reason, attrs...)
 	if err := g.emitter.Emit(portError, msg); err != nil {
 		g.logger.Error("error emission failed", "reason", reason, "error", err)
 	}
+}
+
+// logOutcome writes one line for a message that leaves on the error port, so
+// that the reason is in the log and not only in the error.reason metadata.
+//
+// A reason that points at the scenario or at the message (no_key, no_route,
+// no_destination) is a Warn. A reason that grows with the volume of traffic
+// (timeout, unmatched_reply) is a Debug: an outage of the destination would
+// otherwise write one Warn for each request in flight. overloaded and
+// invalid_origin write their own line where they are decided.
+//
+// The line carries the ids that find the message in a trace and the connection
+// it came from. It never carries the value of the correlation key, because a
+// scenario may build the key from fields that hold card data.
+func (g *Gear) logOutcome(msg *fluxmsg.FluxMsg, reason string, attrs ...any) {
+	level := slog.LevelDebug
+	switch reason {
+	case reasonNoKey, reasonNoRoute, reasonNoDestination:
+		level = slog.LevelWarn
+	case reasonOverloaded, reasonInvalidOrigin:
+		return
+	}
+	ctx := context.Background()
+	if !g.logger.Enabled(ctx, level) {
+		return
+	}
+	fields := make([]any, 0, 6+len(attrs))
+	fields = append(fields, "reason", reason, "flux_id", msg.FluxID.String(), "conn_id", msg.Metadata["conn.id"])
+	fields = append(fields, attrs...)
+	g.logger.Log(ctx, level, "message sent to the error port", fields...)
 }
 
 // Drain refuses new requests but keeps matching replies until open tickets

@@ -61,6 +61,7 @@ type mockCtx struct {
 	emitter  sdk.PortEmitter
 	bindings map[string]sdk.PortBinding
 	cp       any
+	logger   *slog.Logger // nil: slog.Default()
 }
 
 func (m *mockCtx) Bindings() map[string]sdk.PortBinding { return m.bindings }
@@ -69,7 +70,12 @@ func (m *mockCtx) Context() context.Context { return context.Background() }
 func (m *mockCtx) Config() map[string]any   { return m.cfg }
 func (m *mockCtx) GearName() string         { return "conductor-test" }
 func (m *mockCtx) MachineID() uuid.UUID     { return uuid.Nil }
-func (m *mockCtx) Logger() *slog.Logger     { return slog.Default() }
+func (m *mockCtx) Logger() *slog.Logger {
+	if m.logger != nil {
+		return m.logger
+	}
+	return slog.Default()
+}
 func (m *mockCtx) IDGen() sdk.IDGenerator   { return nil }
 func (m *mockCtx) Bus() bus.Bus             { return nil }
 func (m *mockCtx) Manager() manager.Manager { return nil }
@@ -909,5 +915,150 @@ func TestOverloadShedsNewRequest(t *testing.T) {
 	}
 	if extra := em.take(); len(extra) != 0 {
 		t.Fatalf("a retransmission must be absorbed, not shed or re-routed: %+v", extra)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The log line of an outcome on the error port
+// ---------------------------------------------------------------------------
+
+// lockedBuffer is a log sink that the engine's goroutines and the test share.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// newLoggedGear is newTestGear with a log sink at the given level.
+func newLoggedGear(t *testing.T, clk valet.Clock, avail func(string) bool, level slog.Level) (*Gear, *capEmitter, *lockedBuffer) {
+	t.Helper()
+	sink := &lockedBuffer{}
+	em := &capEmitter{}
+	g := New()
+	g.clock = clk
+	g.availability = avail
+	logger := slog.New(slog.NewTextHandler(sink, &slog.HandlerOptions{Level: level}))
+	if err := g.Init(&mockCtx{cfg: switchConfig(), emitter: em, logger: logger}); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	t.Cleanup(func() { _ = g.Stop() })
+	return g, em, sink
+}
+
+// A fixed id, so that no random id can contain a digit string that the test looks for.
+var outcomeFluxID = uuid.MustParse("0198a7c0-aaaa-7bbb-8ccc-ddddeeeeffff")
+
+func outcomeLines(log string) []string {
+	var out []string
+	for _, l := range strings.Split(log, "\n") {
+		if strings.Contains(l, "message sent to the error port") {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// no_key, no_route and no_destination point at the scenario or at the message:
+// each one is a Warn that names the reason, so the cause is in the log.
+func TestOutcomeWarnsForConfigurationReasons(t *testing.T) {
+	cases := []struct {
+		name   string
+		avail  func(string) bool
+		build  func() *fluxmsg.FluxMsg
+		reason string
+		extra  string
+	}{
+		{"no_key", nil, func() *fluxmsg.FluxMsg {
+			m := request("123456")
+			delete(m.Data, "41")
+			return m
+		}, "no_key", `correlation field \"41\" missing`},
+		{"no_route", nil, func() *fluxmsg.FluxMsg {
+			m := request("123456")
+			m.Data["2"] = "9999000011112222"
+			return m
+		}, "no_route", ""},
+		{"no_destination", func(string) bool { return false }, func() *fluxmsg.FluxMsg { return request("123456") }, "no_destination", "route=scheme-a"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			g, em, sink := newLoggedGear(t, newFakeClock(), tc.avail, slog.LevelWarn)
+			m := tc.build()
+			m.FluxID = outcomeFluxID
+			if err := g.ProcessPort(context.Background(), "in", m); err != nil {
+				t.Fatalf("in: %v", err)
+			}
+			em.take()
+			lines := outcomeLines(sink.String())
+			if len(lines) != 1 {
+				t.Fatalf("want one outcome line at Warn, got %d:\n%s", len(lines), sink.String())
+			}
+			l := lines[0]
+			for _, want := range []string{"level=WARN", "reason=" + tc.reason, "flux_id=" + m.FluxID.String(), "conn_id=terminal-7", tc.extra} {
+				if !strings.Contains(l, want) {
+					t.Errorf("line lacks %q:\n%s", want, l)
+				}
+			}
+			// The value of the key, and the card number, must not reach the log.
+			for _, secret := range []string{"123456", "TERM0001", "4111111111111111", "9999000011112222"} {
+				if strings.Contains(sink.String(), secret) {
+					t.Errorf("the log holds %q:\n%s", secret, sink.String())
+				}
+			}
+		})
+	}
+}
+
+// timeout and unmatched_reply grow with the volume of traffic: Debug, so that
+// an outage does not write a Warn for each request, and visible at Debug.
+func TestOutcomeIsDebugForVolumeReasons(t *testing.T) {
+	for _, level := range []slog.Level{slog.LevelWarn, slog.LevelDebug} {
+		clk := newFakeClock()
+		g, em, sink := newLoggedGear(t, clk, nil, level)
+		ctx := context.Background()
+
+		m := request("000008")
+		m.FluxID = outcomeFluxID
+		if err := g.ProcessPort(ctx, "in", m); err != nil {
+			t.Fatalf("in: %v", err)
+		}
+		clk.Advance(31 * time.Second) // timeout
+		if err := g.ProcessPort(ctx, "in_reply", reply("999999")); err != nil {
+			t.Fatalf("in_reply: %v", err) // unmatched_reply
+		}
+		em.take()
+
+		lines := outcomeLines(sink.String())
+		if level == slog.LevelWarn {
+			if len(lines) != 0 {
+				t.Fatalf("at Warn the volume reasons must be silent, got:\n%s", sink.String())
+			}
+			continue
+		}
+		if len(lines) != 2 {
+			t.Fatalf("at Debug want a timeout line and an unmatched_reply line, got %d:\n%s", len(lines), sink.String())
+		}
+		joined := strings.Join(lines, "\n")
+		for _, want := range []string{"level=DEBUG", "reason=timeout", "destination=out_scheme_a", "conn_id=terminal-7", "flux_id=" + m.FluxID.String(), "reason=unmatched_reply"} {
+			if !strings.Contains(joined, want) {
+				t.Errorf("lines lack %q:\n%s", want, joined)
+			}
+		}
+		for _, secret := range []string{"000008", "999999", "TERM0001"} {
+			if strings.Contains(sink.String(), secret) {
+				t.Errorf("the log holds %q:\n%s", secret, sink.String())
+			}
+		}
 	}
 }

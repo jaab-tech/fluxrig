@@ -102,6 +102,11 @@ type SnakeConfig struct {
 	// server. A dead letter that cannot be written in time is logged and the
 	// consumer moves on, so a stalled server does not hold it.
 	DLQPublishTimeout string `koanf:"dlq_publish_timeout" example:"5s"`
+	// EventsMaxAge and EventsMaxBytes bound the stream of durable events. A
+	// reader that was down longer than the age has lost what it missed.
+	// Mixer-side only.
+	EventsMaxAge   string `koanf:"events_max_age" example:"1h"`
+	EventsMaxBytes int64  `koanf:"events_max_bytes" example:"268435456"`
 }
 
 // TelemetryConfig configures self-reporting metrics and logs.

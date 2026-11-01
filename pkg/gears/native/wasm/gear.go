@@ -62,25 +62,17 @@ func (g *Gear) Init(ctx sdk.GearContext) error {
 	}
 
 	// 1b. Verify Wasm Payload
-	// Only Snake KV payloads should have cluster signatures for now, but we'll enforce it for any source if present or required.
-	// For offline testing (file://) we might allow bypass if signature is missing, but let's be strict if cluster pub key is set.
-	clusterPub := ctx.ClusterPublicKey()
-	if len(clusterPub) > 0 {
-		sig, stripped, errExt := catalog.ExtractCustomSection(payload, "fluxrig.cluster.signature")
-		if errExt != nil {
-			g.log.Warn("Wasm payload missing fluxrig.cluster.signature, running in dev/insecure mode")
-		} else {
-			hashBytes := sha256.Sum256(stripped)
-			if !ed25519.Verify(clusterPub, hashBytes[:], sig) {
-				return fmt.Errorf("wasm supply chain security violation: invalid cluster signature")
-			}
-			g.log.Info("Wasm supply chain cluster signature verified successfully")
-			payload = stripped
-		}
+	payload, err = g.verifyPayload(ctx.ClusterPublicKey(), payload)
+	if err != nil {
+		return err
 	}
 
 	// 2. Initialize Wazero
-	g.runtime = wazero.NewRuntime(ctx.Context())
+	if g.config.MemoryLimitPages > maxMemoryLimitPages {
+		return fmt.Errorf("wasm memory_limit_pages %d exceeds the maximum of %d", g.config.MemoryLimitPages, maxMemoryLimitPages)
+	}
+	g.runtime = wazero.NewRuntimeWithConfig(ctx.Context(),
+		wazero.NewRuntimeConfig().WithMemoryLimitPages(g.config.MemoryLimitPages))
 
 	// Register Host Functions (env.log)
 	envBuilder := g.runtime.NewHostModuleBuilder("env")
@@ -118,6 +110,35 @@ func (g *Gear) Init(ctx sdk.GearContext) error {
 	}
 
 	return nil
+}
+
+// verifyPayload checks the cluster signature of a module and returns the module
+// without it. A module from the catalog must carry a valid signature. A local
+// file may have none, for development.
+func (g *Gear) verifyPayload(clusterPub, payload []byte) ([]byte, error) {
+	fromCatalog := strings.HasPrefix(g.config.Source, "snake://")
+	if len(clusterPub) == 0 {
+		if fromCatalog {
+			return nil, fmt.Errorf("wasm supply chain security violation: no cluster public key to verify %s", g.config.Source)
+		}
+		return payload, nil
+	}
+
+	sig, stripped, errExt := catalog.ExtractCustomSection(payload, "fluxrig.cluster.signature")
+	if errExt != nil {
+		if fromCatalog {
+			return nil, fmt.Errorf("wasm supply chain security violation: %s has no cluster signature", g.config.Source)
+		}
+		g.log.Warn("Wasm payload missing fluxrig.cluster.signature, running in dev/insecure mode")
+		return payload, nil
+	}
+
+	hashBytes := sha256.Sum256(stripped)
+	if !ed25519.Verify(clusterPub, hashBytes[:], sig) {
+		return nil, fmt.Errorf("wasm supply chain security violation: invalid cluster signature")
+	}
+	g.log.Info("Wasm supply chain cluster signature verified successfully")
+	return stripped, nil
 }
 
 // fetchPayload retrieves the compiled .wasm module.
@@ -191,6 +212,10 @@ func (g *Gear) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.Flux
 		return nil, fmt.Errorf("wasm alloc failed: %w", err)
 	}
 	ptr := uint32(allocRes[0])
+	if ptr == 0 {
+		return nil, fmt.Errorf("wasm alloc returned a null pointer for %d bytes", len(b))
+	}
+	defer func() { _, _ = g.free.Call(ctx, uint64(ptr), uint64(len(b))) }()
 
 	// 3. Write to Wasm memory
 	if !g.mod.Memory().Write(ptr, b) {
@@ -203,7 +228,7 @@ func (g *Gear) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.Flux
 		return nil, fmt.Errorf("wasm process call failed: %w", err)
 	}
 
-	// 5. Read result
+	// 5. Read result. The input block is freed on return, on every path.
 	packed := procRes[0]
 	retPtr := uint32(packed >> 32)
 	retLen := uint32(packed & 0xFFFFFFFF)
@@ -218,14 +243,18 @@ func (g *Gear) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.Flux
 		return nil, fmt.Errorf("wasm memory read failed")
 	}
 
-	// 6. Free both original and new memory
-	_, _ = g.free.Call(ctx, uint64(ptr), uint64(len(b)))
-	_, _ = g.free.Call(ctx, uint64(retPtr), uint64(retLen))
-
-	// 7. Unmarshal result
+	// 6. Unmarshal result. retBytes is a view of guest memory, so this comes
+	// before free gives the block back to the guest.
 	var outMsg fluxmsg.FluxMsg
-	if err := cbor.Unmarshal(retBytes, &outMsg); err != nil {
-		return nil, fmt.Errorf("wasm cbor unmarshal failed: %w", err)
+	errDecode := cbor.Unmarshal(retBytes, &outMsg)
+
+	// 7. Free the result, unless the guest returned the input block.
+	if retPtr != ptr {
+		_, _ = g.free.Call(ctx, uint64(retPtr), uint64(retLen))
+	}
+
+	if errDecode != nil {
+		return nil, fmt.Errorf("wasm cbor unmarshal failed: %w", errDecode)
 	}
 
 	return &outMsg, nil

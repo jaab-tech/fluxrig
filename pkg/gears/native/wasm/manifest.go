@@ -24,9 +24,9 @@ func (g *Gear) Manifest() sdk.Manifest {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
   "properties": {
-    "source": { "type": "string", "description": "Path or URN of the .wasm module (e.g. file://... or a CAS urn)." },
+    "source": { "type": "string", "description": "Location of the .wasm module: file://<path>, or snake://<bucket>/<key> for the catalog." },
     "entrypoint": { "type": "string", "description": "Exported function to call per message." },
-    "memory_limit_pages": { "type": "integer", "description": "Wasm linear-memory cap in 64KiB pages." }
+    "memory_limit_pages": { "type": "integer", "minimum": 1, "maximum": 65536, "default": 256, "description": "Wasm linear-memory cap in 64KiB pages. A module that needs more does not load." }
   },
   "required": ["source"]
 }`,

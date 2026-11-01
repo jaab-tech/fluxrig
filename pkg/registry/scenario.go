@@ -152,6 +152,16 @@ func (s *Scenario) Validate() error {
 		}
 	}
 
+	// A reader of events names the gear it reads. A wrong name would never fail:
+	// the reader would wait for events that nothing publishes.
+	for _, g := range s.Gears {
+		for _, source := range eventSources(g.Config) {
+			if !gearNames[source] {
+				return fmt.Errorf("gear %s reads the events of unknown gear '%s'", g.Name, source)
+			}
+		}
+	}
+
 	// 3. Validate Wires
 	for i, w := range s.Wires {
 		if w.From == "" || w.To == "" {
@@ -215,6 +225,34 @@ func (s *Scenario) Validate() error {
 type portDecl struct {
 	inputs  map[string]bool
 	outputs map[string]bool
+}
+
+// eventSources returns the gears that a config reads events from, without the
+// Rack of a "rack.gear" reference.
+func eventSources(config map[string]any) []string {
+	ports, ok := config["ports"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	entries, ok := ports["events"].([]any)
+	if !ok {
+		return nil
+	}
+	var sources []string
+	for _, entry := range entries {
+		e, ok := entry.(map[string]any)
+		if !ok {
+			continue
+		}
+		ref, _ := e["gear"].(string)
+		if _, gear, dotted := strings.Cut(ref, "."); dotted {
+			ref = gear
+		}
+		if ref != "" {
+			sources = append(sources, ref)
+		}
+	}
+	return sources
 }
 
 // portsFromConfig extracts a gear's declared ports from config.ports, tolerating

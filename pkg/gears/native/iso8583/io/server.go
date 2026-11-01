@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -21,6 +22,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
+	"github.com/jaab-tech/fluxrig/pkg/events"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/jaab-tech/fluxrig/pkg/idgen"
 	"github.com/jaab-tech/fluxrig/pkg/logger"
@@ -37,6 +39,9 @@ type Server struct {
 	conns    sync.Map // map[string]*Connection
 	done     chan struct{}
 
+	// connEvent, when set, observes each connection that opens and closes.
+	connEvent connEventFunc
+
 	// Metrics
 	meter       metric.Meter
 	msgsIn      metric.Int64Counter
@@ -48,13 +53,43 @@ type Server struct {
 	connsTotal  metric.Int64Counter
 
 	activeConns atomic.Int64
-	draining    atomic.Bool
+	// readers counts the connections whose handler still reads. A handler leaves
+	// the count when its connection stops reading for a drain, or when it exits.
+	// Drain waits for this count, not for activeConns: a drained connection stays
+	// open for replies until Stop.
+	readers  atomic.Int64
+	draining atomic.Bool
+	stopOnce sync.Once
 }
 
 // Connection represents an active ISO8583 connection.
 type Connection struct {
-	id   string
-	conn net.Conn
+	id    string
+	conn  net.Conn
+	since time.Time // when the server accepted it
+	// byCommand records that a conn.close command closed the socket. The read
+	// that follows only fails, so the handler could not tell otherwise.
+	byCommand atomic.Bool
+}
+
+// connEventFunc observes a connection lifecycle: events.Opened, or events.Closed
+// with a reason.
+type connEventFunc func(event, connID string, remote net.Addr, reason string)
+
+// closeReason names why a read ended a connection. done is closed when the gear
+// stops, and that is why a read fails on a socket that Stop closed.
+func closeReason(err error, done chan struct{}) string {
+	var netErr net.Error
+	switch {
+	case !isActive(done):
+		return events.ReasonStopped
+	case errors.Is(err, io.EOF):
+		return events.ReasonPeerClosed
+	case errors.As(err, &netErr) && netErr.Timeout():
+		return events.ReasonIdleTimeout
+	default:
+		return events.ReasonReadError
+	}
 }
 
 // NewServer creates a new ISO8583 server.
@@ -87,6 +122,49 @@ func NewServer(cfg *Config, log *slog.Logger, emit func(*fluxmsg.FluxMsg), idGen
 		connsActive: connsActive,
 		connsTotal:  connsTotal,
 	}
+}
+
+// OnConnEvent registers an observer for each connection that opens and closes.
+// Must be called before Start.
+func (s *Server) OnConnEvent(fn connEventFunc) { s.connEvent = fn }
+
+func (s *Server) notifyConn(event string, c *Connection, reason string) {
+	if s.connEvent != nil {
+		s.connEvent(event, c.id, c.conn.RemoteAddr(), reason)
+	}
+}
+
+// replacementConnection returns the connection that on_missing_connection picks
+// for a reply whose own connection is gone, or nil. It is the newest active
+// connection that the policy accepts: from the same remote IP as the request
+// (peer.ip, which the server stamped on it), or any connection of this server.
+// The remote port is never compared: it changes when a peer reconnects.
+func (s *Server) replacementConnection(lostID, peerIP string) *Connection {
+	policy := s.config.OnMissingConnection
+	if policy != OnMissingConnectionSameIP && policy != OnMissingConnectionListener {
+		return nil
+	}
+	if policy == OnMissingConnectionSameIP && peerIP == "" {
+		return nil
+	}
+	var newest *Connection
+	s.conns.Range(func(_, v any) bool {
+		c := v.(*Connection)
+		if c.id == lostID {
+			return true
+		}
+		if policy == OnMissingConnectionSameIP {
+			host, _, err := net.SplitHostPort(c.conn.RemoteAddr().String())
+			if err != nil || host != peerIP {
+				return true
+			}
+		}
+		if newest == nil || c.since.After(newest.since) {
+			newest = c
+		}
+		return true
+	})
+	return newest
 }
 
 // Start begins listening for connections.
@@ -170,12 +248,21 @@ func (s *Server) acceptLoop(ctx context.Context) {
 		}
 
 		s.activeConns.Add(1)
+		s.readers.Add(1)
 		go s.handleConn(ctx, conn)
 	}
 }
 
 func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	defer s.activeConns.Add(-1)
+	reading := true
+	stopReading := func() {
+		if reading {
+			reading = false
+			s.readers.Add(-1)
+		}
+	}
+	defer stopReading()
 
 	id := s.idGen.NextEntityID(idgen.EntitySession)
 	connID := fmt.Sprintf("0x%x", id)
@@ -183,18 +270,34 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	s.connsTotal.Add(ctx, 1)
 	s.connsActive.Add(ctx, 1)
 
-	c := &Connection{id: connID, conn: conn}
+	c := &Connection{id: connID, conn: conn, since: time.Now()}
 	s.conns.Store(connID, c)
+	reason := events.ReasonStopped
 	defer func() {
 		s.connsActive.Add(ctx, -1)
 		s.conns.Delete(connID)
 		_ = conn.Close()
+		if c.byCommand.Load() {
+			reason = events.ReasonClosedByCommand
+		}
+		s.notifyConn(events.Closed, c, reason)
 	}()
 
 	s.log.Info("connection accepted", "conn_id", connID, "remote", conn.RemoteAddr())
+	s.notifyConn(events.Opened, c, "")
 
 	for {
 		if !isActive(s.done) {
+			return
+		}
+
+		// A drain that began while this handler was busy (inside emit, say) set
+		// a past read deadline that the next line would replace. Stop reading
+		// here, so the handler does not sit out a whole idle timeout.
+		if s.isDraining() {
+			s.log.Info("Draining connection (Read Stopped, Write Open)", "conn_id", connID)
+			stopReading()
+			<-s.done
 			return
 		}
 
@@ -203,6 +306,7 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 		// (shorter) in-progress ReadTimeout that readFrame applies to the body.
 		if err := setReadDeadline(conn, time.Duration(s.config.IdleTimeout)); err != nil {
 			s.log.Warn("failed to set read deadline", "error", err)
+			reason = closeReason(err, s.done)
 			return
 		}
 
@@ -212,7 +316,8 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 			// Check if we are draining (forced read error)
 			if s.isDraining() {
 				s.log.Info("Draining connection (Read Stopped, Write Open)", "conn_id", connID)
-				// Block until server is fully stopped (ctx done or Stop called)
+				stopReading()
+				// Keep the socket open for replies until Stop.
 				<-s.done
 				return
 			}
@@ -222,6 +327,7 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 			} else {
 				s.log.Warn("read error", "conn_id", connID, "remote", conn.RemoteAddr().String(), "error", err)
 			}
+			reason = closeReason(err, s.done)
 			return
 		}
 
@@ -255,6 +361,7 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 				"remote", conn.RemoteAddr().String(),
 				"len", len(payload),
 			)
+			reason = events.ReasonInvalidFrame
 			return
 		}
 
@@ -364,6 +471,13 @@ func (s *Server) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*fluxmsg.Fl
 		} else {
 			return nil, fmt.Errorf("connection %s not found and no fallback available", connID)
 		}
+	} else if conn = s.replacementConnection(connID, msg.Metadata["peer.ip"]); conn != nil {
+		s.log.Warn("connection not found, reply sent on a newer connection",
+			"policy", s.config.OnMissingConnection,
+			"target_id", connID,
+			"fallback_id", conn.id,
+			"remote", conn.conn.RemoteAddr().String(),
+		)
 	} else {
 		return nil, fmt.Errorf("connection %s not found", connID)
 	}
@@ -498,12 +612,13 @@ func (s *Server) Disconnect(connID string) error {
 	}
 	conn := val.(*Connection)
 	s.log.Warn("Forcefully closing connection via Control Plane", "conn_id", connID)
+	conn.byCommand.Store(true)
 	return conn.conn.Close()
 }
 
 // Stop closes all connections and the listener.
 func (s *Server) Stop() error {
-	close(s.done)
+	s.stopOnce.Do(func() { close(s.done) })
 	if s.listener != nil {
 		_ = s.listener.Close()
 	}
@@ -511,6 +626,32 @@ func (s *Server) Stop() error {
 		_ = value.(*Connection).conn.Close()
 		return true
 	})
+	return s.waitConnections(time.Duration(s.config.StopTimeout))
+}
+
+// waitConnections waits for the connection handlers to return, at most timeout.
+// Closing a socket does not stop its handler: the handler may be inside the
+// emit of a frame it has read, and it runs its cleanup (the connection event,
+// the metrics, the removal from the table) only after that. A Stop that returned
+// before then let those run against a gear that was already stopped, and during
+// a redeploy against the next scenario. The count is decremented by the last
+// deferred call of a handler, so zero means every handler is done.
+func (s *Server) waitConnections(timeout time.Duration) error {
+	if timeout <= 0 || s.activeConns.Load() == 0 {
+		return nil
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	ticker := time.NewTicker(drainPollInterval)
+	defer ticker.Stop()
+	for s.activeConns.Load() != 0 {
+		select {
+		case <-timer.C:
+			return fmt.Errorf("io_iso8583: %d connection handler(s) still running %s after stop",
+				s.activeConns.Load(), timeout)
+		case <-ticker.C:
+		}
+	}
 	return nil
 }
 
@@ -549,20 +690,20 @@ func (s *Server) Drain(ctx context.Context) error {
 		return true
 	})
 
-	// Wait for the connections that are still finishing, not for the deadline.
-	// Returning ctx.Err() unconditionally made every orderly shutdown arrive at
-	// the runtime as "Drain Gear Failed".
+	// Wait until every connection has stopped reading. They stay open for
+	// replies until Stop, so activeConns cannot reach zero here: it would make
+	// every Drain with a connected peer run to its deadline.
 	ticker := time.NewTicker(drainPollInterval)
 	defer ticker.Stop()
 	for {
-		if s.activeConns.Load() == 0 {
-			s.log.Info("Server drained")
+		if s.readers.Load() == 0 {
+			s.log.Info("Server drained", "open_connections", s.activeConns.Load())
 			return nil
 		}
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("io_iso8583: %d connection(s) still active at the drain deadline: %w",
-				s.activeConns.Load(), ctx.Err())
+			return fmt.Errorf("io_iso8583: %d connection(s) still reading at the drain deadline: %w",
+				s.readers.Load(), ctx.Err())
 		case <-ticker.C:
 		}
 	}

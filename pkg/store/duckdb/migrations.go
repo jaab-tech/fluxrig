@@ -34,6 +34,11 @@ var migrations = []Migration{
 		Name:    "registry_moved_to_kv",
 		Up:      migrateV2,
 	},
+	{
+		Version: 3,
+		Name:    "registry_many_entities_per_machine",
+		Up:      migrateV3,
+	},
 }
 
 // migrateV2 deletes the Mixer, Rack and Snake rows. The registry of those
@@ -43,6 +48,22 @@ var migrations = []Migration{
 func migrateV2(ctx context.Context, tx *sql.Tx) error {
 	if _, err := tx.ExecContext(ctx, "DELETE FROM registry WHERE type_id IN (2, 4, 9)"); err != nil {
 		return fmt.Errorf("drop registry identity rows: %w", err)
+	}
+	return nil
+}
+
+// migrateV3 drops the unique index on (machine_id, type_id). It allowed one row
+// of each type per machine, which fitted the identity rows of version 1 (one
+// Rack per machine). Those rows live in the key-value registry now, and what the
+// table holds is the topology of a scenario: many gears, ports and wires on one
+// machine. With the index, only the first of each kind was stored and every
+// other registration failed. A plain index keeps the lookup by machine and type.
+func migrateV3(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, "DROP INDEX IF EXISTS idx_registry_machine"); err != nil {
+		return fmt.Errorf("drop unique registry machine index: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, "CREATE INDEX IF NOT EXISTS idx_registry_machine_type ON registry (machine_id, type_id)"); err != nil {
+		return fmt.Errorf("create registry machine index: %w", err)
 	}
 	return nil
 }
