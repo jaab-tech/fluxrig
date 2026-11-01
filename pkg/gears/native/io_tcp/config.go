@@ -141,6 +141,7 @@ func SchemaJSON() string {
     "bind": { "type": "string", "default": ":8080", "description": "server mode: address to listen on, e.g. ':9000'." },
     "connect": { "type": "string", "description": "client mode: upstream address to dial, host:port." },
     "reconnect_wait": { "type": "string", "pattern": "^[0-9]+(s|ms|m|h)$", "default": "5s", "description": "client mode: delay before redialing a dropped connection, e.g. '1s'." },
+    "tags": { "type": "object", "additionalProperties": { "type": "string" }, "description": "free labels for the operator, for example role: ingress. The gear does not read them." },
     "read_responses": { "type": "boolean", "default": true, "description": "client mode: whether to read responses from the server. Set to false for one-way send (e.g. to an echo server that doesn't send proper ISO8583 responses)." },
     "max_connections": { "type": "integer", "default": 4096, "description": "server mode: maximum concurrent connections (0 = unlimited)." },
     "framing": { "type": "string", "enum": ["delimiter", "length_prefix2", "length_prefix4"], "default": "delimiter", "description": "message framing mode: delimiter (newline, etc), length_prefix2 (2-byte BE), length_prefix4 (4-byte BE)." },

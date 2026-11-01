@@ -131,3 +131,43 @@ func TestStore_MigrateV2DropsIdentityRowsKeepsTopology(t *testing.T) {
 	assert.Equal(t, 0, identity)
 	assert.Equal(t, 1, topology)
 }
+
+// Version 3 drops the unique index on (machine_id, type_id) that version 1
+// created, keeps the rows, and leaves a plain index for the lookup. A store at
+// version 2 has the unique index; the test puts it back to stand in for one.
+func TestStore_MigrateV3AllowsManyEntitiesPerMachineAndKeepsRows(t *testing.T) {
+	s, err := NewStore(slog.Default(), "")
+	require.NoError(t, err)
+	defer func() { _ = s.Close() }()
+	ctx := context.Background()
+	require.NoError(t, s.Migrate(ctx))
+
+	_, err = s.DB().ExecContext(ctx, "DROP INDEX IF EXISTS idx_registry_machine_type")
+	require.NoError(t, err)
+	_, err = s.DB().ExecContext(ctx, "CREATE UNIQUE INDEX idx_registry_machine ON registry (machine_id, type_id)")
+	require.NoError(t, err)
+
+	machine := uuid.New()
+	_, err = s.DB().ExecContext(ctx,
+		"INSERT INTO registry (entity_id, type_id, machine_id, name) VALUES (?, 5, ?, 'first')", uuid.New(), machine)
+	require.NoError(t, err)
+	_, err = s.DB().ExecContext(ctx,
+		"INSERT INTO registry (entity_id, type_id, machine_id, name) VALUES (?, 5, ?, 'second')", uuid.New(), machine)
+	require.Error(t, err, "the version 2 index must refuse a second gear on the machine")
+
+	// Running the step twice must be safe: it is part of a migration that can be retried.
+	for i := 0; i < 2; i++ {
+		tx, errTx := s.DB().BeginTx(ctx, nil)
+		require.NoError(t, errTx)
+		require.NoError(t, migrateV3(ctx, tx))
+		require.NoError(t, tx.Commit())
+	}
+
+	_, err = s.DB().ExecContext(ctx,
+		"INSERT INTO registry (entity_id, type_id, machine_id, name) VALUES (?, 5, ?, 'second')", uuid.New(), machine)
+	require.NoError(t, err)
+
+	var rows int
+	require.NoError(t, s.DB().QueryRowContext(ctx, "SELECT count(*) FROM registry WHERE machine_id = ?", machine).Scan(&rows))
+	assert.Equal(t, 2, rows)
+}

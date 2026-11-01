@@ -27,6 +27,18 @@ on:
   # A red nightly is investigated by re-running it by hand against a branch.
   workflow_dispatch:
 
+# The duckdb CLI release the nightly installs. It tracks the DuckDB engine that
+# go.mod's duckdb-go driver embeds (v2.10506.0 is DuckDB v1.5.6), so the CLI
+# reads and writes the same Parquet the Go code does. Raise it together with
+# that driver. Do not use `latest`: DuckDB v2.0.0 renamed the CLI assets
+# (duckdb-cli-linux-<arch>.tar.gz) and a moving URL broke this job overnight.
+env:
+  DUCKDB_VERSION: v1.5.6
+  # The zig toolchain that builds the Wasm payload of the 12_wasm_polyglot
+  # suite. The build flags change between zig releases, so it is pinned to
+  # 0.13.0, which builds that payload with the flags the suite uses today.
+  ZIG_VERSION: 0.13.0
+
 jobs:
   regression:
     runs-on: [self-hosted, oci-int]
@@ -47,16 +59,16 @@ jobs:
       # The group, card-data and retention segments query Parquet through the
       # duckdb CLI. It is a single static binary; install it rather than
       # skipping those segments, or the nightly proves less than it claims.
-      # `latest` on purpose: a pinned version rots, and a nightly that cannot
-      # fetch fails loudly instead of silently proving less.
+      # The version is pinned by DUCKDB_VERSION above. A nightly that cannot
+      # fetch still fails loudly instead of silently proving less.
       - name: Install duckdb CLI
         run: |
           case "$(uname -m)" in
             x86_64)  DUCKDB_ARCH=amd64 ;;
-            aarch64|arm64) DUCKDB_ARCH=arm64 ;;   # the asset name since DuckDB v1.5.6
+            aarch64|arm64) DUCKDB_ARCH=arm64 ;;   # the asset name on the v1.5 line
             *) echo "unsupported arch: $(uname -m)"; exit 1 ;;
           esac
-          curl -fSL "https://github.com/duckdb/duckdb/releases/latest/download/duckdb_cli-linux-${DUCKDB_ARCH}.zip" -o /tmp/duckdb.zip
+          curl -fSL "https://github.com/duckdb/duckdb/releases/download/${DUCKDB_VERSION}/duckdb_cli-linux-${DUCKDB_ARCH}.zip" -o /tmp/duckdb.zip
           unzip -o -q /tmp/duckdb.zip duckdb -d /tmp
           install -m 0755 /tmp/duckdb /usr/local/bin/duckdb
           duckdb --version
@@ -64,10 +76,41 @@ jobs:
       # `openapi`, which needs swag. See the note in ci.yml.
       - name: Install swag
         run: go install github.com/swaggo/swag/cmd/swag@v1.16.6
+      # `make regression` refuses to start without zig and tshark, and names
+      # them as missing prerequisites. Zig builds the Wasm payload. tshark
+      # extracts the TCP payloads of the PCAP samples that group_a replays.
+      - name: Install zig
+        run: |
+          # The checksums are the ones ziglang.org publishes for this version in
+          # https://ziglang.org/download/index.json. Change them with ZIG_VERSION.
+          case "$(uname -m)" in
+            x86_64)
+              ZIG_ARCH=x86_64
+              ZIG_SHA256=d45312e61ebcc48032b77bc4cf7fd6915c11fa16e4aad116b66c9468211230ea ;;
+            aarch64|arm64)
+              ZIG_ARCH=aarch64
+              ZIG_SHA256=041ac42323837eb5624068acd8b00cd5777dac4cf91179e8dad7a7e90dd0c556 ;;
+            *) echo "unsupported arch: $(uname -m)"; exit 1 ;;
+          esac
+          command -v xz || (apt-get update && apt-get install -y xz-utils)
+          curl -fSL "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-${ZIG_ARCH}-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz
+          echo "${ZIG_SHA256}  /tmp/zig.tar.xz" | sha256sum -c -
+          mkdir -p "/usr/local/lib/zig-${ZIG_VERSION}"
+          tar -xJf /tmp/zig.tar.xz -C "/usr/local/lib/zig-${ZIG_VERSION}" --strip-components=1
+          ln -sf "/usr/local/lib/zig-${ZIG_VERSION}/zig" /usr/local/bin/zig
+          zig version
+      # DEBIAN_FRONTEND keeps the wireshark package from prompting about
+      # non-root capture on a runner with no terminal.
+      - name: Install tshark
+        run: command -v tshark || (apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y tshark)
       # The e2e harness waits for ports and clears them with lsof. See the
       # note in ci.yml.
       - name: Ensure lsof
         run: command -v lsof || (apt-get update && apt-get install -y lsof)
+      # The coatcheck and io_tcp segments send test messages to a gear with nc.
+      # Without it they exit 127 and fail, which reads as a product failure.
+      - name: Ensure netcat
+        run: command -v nc || (apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y netcat-openbsd)
       - name: Full regression
         run: make regression
         env:
@@ -83,3 +126,15 @@ jobs:
       - name: Robot hermetic subset
         if: success() || failure()
         run: make test-robot-ci
+      # The segment logs stay on the runner, and a red segment that nobody can
+      # read proves nothing. The nightly was red for weeks with the reason out
+      # of sight. When any step fails, the logs go to the run, where whoever
+      # opens the failure can read them.
+      - name: Upload the regression logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: regression-logs
+          path: /tmp/fluxrig/consolidated_logs_*
+          retention-days: 14
+          if-no-files-found: ignore

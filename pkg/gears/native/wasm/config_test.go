@@ -24,7 +24,7 @@ func TestConfig_ApplyDefaults(t *testing.T) {
 			cfg:            wasm.Config{},
 			expectedSource: "",
 			expectedEntry:  "process",
-			expectedMem:    16,
+			expectedMem:    256,
 			checkEntry:     true,
 			checkMem:       true,
 		},
@@ -55,7 +55,7 @@ func TestConfig_ApplyDefaults(t *testing.T) {
 			cfg: wasm.Config{
 				MemoryLimitPages: 0,
 			},
-			expectedMem: 16,
+			expectedMem: 256,
 			checkEntry:  false,
 			checkMem:    true,
 		},

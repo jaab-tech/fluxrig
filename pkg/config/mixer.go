@@ -215,6 +215,8 @@ func LoadMixer(path string) (*MixerConfig, error) {
 	_ = k.Set("snake.dlq_subject", "flux.dlq")
 	_ = k.Set("snake.dlq_max_age", "720h")
 	_ = k.Set("snake.dlq_publish_timeout", "5s")
+	_ = k.Set("snake.events_max_age", "1h")
+	_ = k.Set("snake.events_max_bytes", 268435456)
 
 	// Defaults: Telemetry (Self-Monitoring)
 	_ = k.Set("telemetry.service_name", "flux.mixer")

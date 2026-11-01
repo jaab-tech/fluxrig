@@ -1,0 +1,52 @@
+meta:
+  name: "client_logon"
+  version: "1.0.0"
+
+gears:
+  - name: "client_io"
+    type: "io_iso8583"
+    config:
+      mode: "client"
+      connect: "127.0.0.1:18891"
+      reconnect_wait: "1s"
+      frame_length_size: 2
+      frame_length_endian: "big"
+      encoding: "ascii"
+      idle_timeout: "5m"
+
+  - name: "on_connect"
+    type: "bento"
+    config:
+      ports:
+        outputs: ["out"]
+        events:
+          - gear: "client_io"
+            on: ["opened"]
+            max_event_age: "8s"
+      bento:
+        pipeline:
+          processors:
+            # DE 7 is the transmission date and time, MMDDhhmmss in UTC. DE 11
+            # (STAN) counts from 1 to 999999 and wraps. The counter lives in
+            # memory, so it starts at 1 again when the Rack restarts. DE 70 001
+            # is a sign-on.
+            - mapping: |
+                meta "iso8583.mti" = "0800"
+                root = {"iso8583": {"field": {
+                  "7": now().ts_format("0102150405", "UTC"),
+                  "11": "%06d".format(counter(min: 1, max: 999999)),
+                  "70": "001"
+                }}}
+
+  - name: "encode"
+    type: "codec_iso8583"
+    config:
+      spec_path: "specs/iso8583-v87-ascii.yaml"
+      direction: "encode"
+      on_error: "reject"
+
+wires:
+  - from: "on_connect.out"
+    to: "encode.in"
+  - from: "encode.out"
+    to: "client_io.in"

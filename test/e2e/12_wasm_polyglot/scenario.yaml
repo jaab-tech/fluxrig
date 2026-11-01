@@ -11,7 +11,6 @@ gears:
       # made one developer's home directory load-bearing in a test.
       source: "file://WASM_MODULE_PATH"
       entrypoint: "process"
-      memory_limit_pages: 16
 
   - name: test-in
     type: bento

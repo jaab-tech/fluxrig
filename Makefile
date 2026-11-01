@@ -149,13 +149,15 @@ verify: build ## Run quick E2E verification script
 
 regression: build ## Run full E2E regression suite (Consolidated Runner)
 	@echo "--------------------------------------------------"
-# The suites shell out to three tools. Without them they fail on their own terms:
+# The suites shell out to a few tools. Without them they fail on their own terms:
 # a missing duckdb reports "Rack not found in DB snapshot", which reads as a Rack
 # that never registered rather than as a missing tool. Say what is absent first.
 	@missing=""; \
 	command -v duckdb  >/dev/null || missing="$$missing\n  duckdb   reads the Mixer store        (group_a, group_b, segments)                       https://duckdb.org/docs/installation/"; \
 	command -v zig     >/dev/null || missing="$$missing\n  zig      builds the Wasm payload      (12_wasm_polyglot)                                https://ziglang.org/download/"; \
 	command -v tshark  >/dev/null || missing="$$missing\n  tshark   replays the PCAP samples     (group_a's ISO 8583 phases)                        apt install tshark"; \
+	command -v nc      >/dev/null || missing="$$missing\n  nc       talks to a gear's TCP port   (coatcheck, io_tcp)                                apt install netcat-openbsd"; \
+	command -v lsof    >/dev/null || missing="$$missing\n  lsof     clears the test ports        (every segment)                                    apt install lsof"; \
 	if [ -n "$$missing" ]; then \
 		echo "Missing prerequisites for the regression suite:"; \
 		printf "$$missing\n"; \
@@ -350,6 +352,10 @@ test-robot-billpay: robot-prep build-bin iso8583-tool ## Run Robot ISO 8583 to I
 	@echo "Running the ISO 8583 to ISO 20022 bridge suite..."
 	@cd test/robot && ./run.sh suites/billpay_rtp
 
+test-robot-conn-events: robot-prep build-bin ## Run Robot Connection Events Suite
+	@echo "Running Connection Events Suite..."
+	@cd test/robot && ./run.sh suites/conn_events
+
 test-robot-conductor: robot-prep build-bin iso8583-tool ## Run Robot Conductor Suite (payment switch: stress + chaos)
 	@echo "Running Conductor Stress + Chaos Suite (chaos needs toxiproxy-server on PATH)..."
 	@cd test/robot && ./run.sh suites/conductor
@@ -385,7 +391,7 @@ test-robot-roaming-stress: robot-prep build-bin ## Run Robot Roaming Stress Suit
 	@echo "Running Roaming Stress Suite..."
 	@cd test/robot && ./run.sh suites/roaming/stress_load.robot
 
-test-robot: test-robot-iso test-robot-tlv test-robot-coatcheck test-robot-topology test-robot-telemetry test-robot-roaming test-robot-specs test-robot-validation-rules test-robot-billpay ## Run the functional Robot suites (the performance and chaos suites run on their own)
+test-robot: test-robot-iso test-robot-tlv test-robot-coatcheck test-robot-topology test-robot-telemetry test-robot-roaming test-robot-specs test-robot-validation-rules test-robot-billpay test-robot-conn-events ## Run the functional Robot suites (the performance and chaos suites run on their own)
 
 # The hermetic subset: fast suites with hermetic dependencies only (pip
 # packages, no zig, no toxiproxy, no duckdb CLI, no external simulator).

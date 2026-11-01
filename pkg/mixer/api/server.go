@@ -650,6 +650,27 @@ func (s *Server) handleEntityStats(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(ids)
 }
 
+// validateGearConfigs checks the configuration of every gear of a scenario
+// against the manifest of its type, the check a Rack makes when it applies the
+// scenario. A scenario that does not parse is left to Import, which reports it.
+// A gear type that the Mixer has no manifest for is not checked here.
+func (s *Server) validateGearConfigs(data []byte) error {
+	var sc registry.Scenario
+	if err := yaml.Unmarshal(data, &sc); err != nil {
+		return nil
+	}
+	var msgs []string
+	for _, g := range sc.Gears {
+		if err := s.gearFactory.ValidateConfig(g.Type, g.Config); err != nil {
+			msgs = append(msgs, fmt.Sprintf("gear %q: %v", g.Name, err))
+		}
+	}
+	if len(msgs) == 0 {
+		return nil
+	}
+	return errors.New(strings.Join(msgs, "; "))
+}
+
 // handleScenarioImport godoc
 // @Summary Import Scenario
 // @Description Upload a YAML scenario definition to update the topology.
@@ -683,6 +704,15 @@ func (s *Server) handleScenarioImport(w http.ResponseWriter, r *http.Request) {
 	data, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "Read error", http.StatusBadRequest)
+		return
+	}
+
+	// The gear configs are checked here, on the import, so a misspelt option
+	// is refused with a 400 that names it, and does not show up later as an
+	// error in the log of a Rack. A dry run is checked the same way.
+	if errCfg := s.validateGearConfigs(data); errCfg != nil {
+		slog.Error("Import failed", "error", errCfg)
+		http.Error(w, fmt.Sprintf("Import failed: invalid gear config: %v", errCfg), http.StatusBadRequest)
 		return
 	}
 

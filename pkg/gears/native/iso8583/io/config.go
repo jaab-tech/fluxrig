@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/jaab-tech/fluxrig/pkg/events"
 )
 
 // Mode enum
@@ -100,6 +102,16 @@ type Config struct {
 	// StrictConnectionRouting: strictly matches conn.id. Default: true.
 	StrictConnectionRouting bool `json:"strict_connection_routing" mapstructure:"strict_connection_routing"`
 
+	// OnMissingConnection: what a server does with a reply whose connection
+	// (conn.id) no longer exists, for example because the peer dropped the link
+	// and reconnected before the reply was ready. "drop" refuses the reply (an
+	// error). "same_remote_ip" sends it on the newest active connection from the
+	// remote IP (peer.ip) of the original request. "same_listener" sends it on
+	// the newest active connection of this server, that is of this listening
+	// port. Server mode only. It applies while strict_connection_routing is true;
+	// with false that field's own fallback takes over. Default: "drop".
+	OnMissingConnection string `json:"on_missing_connection" mapstructure:"on_missing_connection"`
+
 	// UnsafeRawFrameLog dumps raw frame/payload bytes (hex) at TRACE. This
 	// exposes cardholder data (PAN) and Sensitive Authentication Data (track
 	// data, PIN block, CVV) and MUST NOT be enabled inside a Cardholder Data
@@ -116,6 +128,17 @@ type Config struct {
 	ConnectTimeout Duration `json:"connect_timeout" mapstructure:"connect_timeout"`
 	// IdleTimeout: Max time for idle connection before closing. Default: 15s.
 	IdleTimeout Duration `json:"idle_timeout" mapstructure:"idle_timeout"`
+	// StopTimeout: Max time the gear waits, when it stops, for its connection
+	// handlers to finish after their sockets are closed, and for their closed
+	// events to leave. 0 does not wait. Default: 5s.
+	StopTimeout Duration `json:"stop_timeout" mapstructure:"stop_timeout"`
+
+	// PublishEvents: Publish a durable event when a connection opens and when it
+	// closes. Default: true.
+	PublishEvents bool `json:"publish_events" mapstructure:"publish_events"`
+	// EventQueueSize: Connection events that wait for the publisher. A full
+	// queue drops the event with a Warn, and the connection goes on. Default: 1024.
+	EventQueueSize int `json:"event_queue_size" mapstructure:"event_queue_size"`
 }
 
 const (
@@ -130,6 +153,10 @@ const (
 	EndianBig    = "big"
 	EndianLittle = "little"
 
+	OnMissingConnectionDrop     = "drop"
+	OnMissingConnectionSameIP   = "same_remote_ip"
+	OnMissingConnectionListener = "same_listener"
+
 	// Default values for ISO8583 Framing and Lifecycle
 	DefaultMaxConnections  = 4096
 	DefaultFrameLengthSize = 2
@@ -142,6 +169,7 @@ const (
 	DefaultWriteTimeout   = 2 * time.Second
 	DefaultConnectTimeout = 5 * time.Second
 	DefaultIdleTimeout    = 15 * time.Second
+	DefaultStopTimeout    = 5 * time.Second
 
 	DefaultEncoding = EncodingASCII
 	DefaultVariant  = VariantGeneric
@@ -161,12 +189,16 @@ func DefaultConfig() Config {
 		TPDUSwap:                true,
 		HeuristicValidation:     true,
 		StrictConnectionRouting: true,
+		OnMissingConnection:     OnMissingConnectionDrop,
 		MaxConnections:          DefaultMaxConnections,
 		ReconnectWait:           Duration(DefaultReconnectWait),
 		ReadTimeout:             Duration(DefaultReadTimeout),
 		WriteTimeout:            Duration(DefaultWriteTimeout),
 		ConnectTimeout:          Duration(DefaultConnectTimeout),
 		IdleTimeout:             Duration(DefaultIdleTimeout),
+		StopTimeout:             Duration(DefaultStopTimeout),
+		PublishEvents:           true,
+		EventQueueSize:          events.DefaultQueueSize,
 	}
 }
 
@@ -220,6 +252,9 @@ func (c *Config) ApplyDefaults() {
 	}
 
 	// Final Fallback
+	if c.OnMissingConnection == "" {
+		c.OnMissingConnection = OnMissingConnectionDrop
+	}
 	if c.Encoding == "" {
 		c.Encoding = DefaultEncoding
 	}
@@ -257,6 +292,16 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("invalid frame_length_endian: %s (must be 'big' or 'little')", c.FrameLengthEndian)
 	}
 
+	switch c.OnMissingConnection {
+	case OnMissingConnectionDrop:
+	case OnMissingConnectionSameIP, OnMissingConnectionListener:
+		if c.Mode != ModeServer {
+			return fmt.Errorf("on_missing_connection %q applies to server mode only", c.OnMissingConnection)
+		}
+	default:
+		return fmt.Errorf("invalid on_missing_connection: %s (must be 'drop', 'same_remote_ip' or 'same_listener')", c.OnMissingConnection)
+	}
+
 	return nil
 }
 
@@ -266,6 +311,8 @@ func SchemaJSON() string {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
   "properties": {
+    "publish_events": { "type": "boolean", "default": true, "description": "publish a durable event when a connection opens and when it closes. With clients that connect for each transaction, this is two writes to disk per connection." },
+    "event_queue_size": { "type": "integer", "minimum": 1, "default": 1024, "description": "connection events that wait for the publisher. A full queue drops the event with a Warn, and the connection goes on." },
     "mode": { "type": "string", "enum": ["server", "client"], "description": "server (listen for terminal/peer connections) or client (dial an upstream)." },
     "bind": { "type": "string", "description": "server mode: address to listen on, e.g. ':8583'." },
     "connect": { "type": "string", "description": "client mode: upstream address to dial, host:port." },
@@ -282,6 +329,8 @@ func SchemaJSON() string {
     "heuristic_validation": { "type": "boolean", "default": true, "description": "run lightweight MTI/bitmap sanity checks on each frame read." },
     "preserve_headers": { "type": "boolean", "description": "carry the raw protocol header through so the reply can mirror it." },
     "strict_connection_routing": { "type": "boolean", "default": true, "description": "return each reply on the exact connection (conn.id) its request arrived on." },
+    "stop_timeout": { "type": "string", "pattern": "^[0-9]+(s|ms|m|h)$", "default": "5s", "description": "max time to wait, when the gear stops, for the connection handlers to finish and for their closed events to leave. 0s does not wait." },
+    "on_missing_connection": { "type": "string", "enum": ["drop", "same_remote_ip", "same_listener"], "default": "drop", "description": "server mode: what to do with a reply whose connection no longer exists, for example after the peer reconnected. drop refuses it; same_remote_ip sends it on the newest connection from the remote IP of the request; same_listener sends it on the newest connection of this server. Applies while strict_connection_routing is true." },
     "max_connections": { "type": "integer", "default": 4096, "description": "server mode: maximum concurrent connections (0 = unlimited)." },
     "visa_src_id": { "type": "string", "description": "visa variant: source station id in the VAP header." },
     "visa_dst_id": { "type": "string", "description": "visa variant: destination station id in the VAP header." },

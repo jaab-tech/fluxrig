@@ -30,7 +30,22 @@ func (g *Gear) Manifest() sdk.Manifest {
       "description": "Declared input/output port names (bare names, e.g. 'in'/'out'); each maps to a wired flux endpoint. Omit for the implicit in/out pair.",
       "properties": {
         "inputs": { "type": "array", "items": { "type": "string" }, "description": "Named input ports this gear accepts." },
-        "outputs": { "type": "array", "items": { "type": "string" }, "description": "Named output ports this gear emits on." }
+        "outputs": { "type": "array", "items": { "type": "string" }, "description": "Named output ports this gear emits on." },
+        "events": {
+          "type": "array",
+          "description": "Durable events this gear reads as its input. Each entry gives one message for each event.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "gear": { "type": "string", "description": "the gear whose events to read, as 'gear' (on the Rack it is deployed to, or on this Rack) or 'rack.gear'." },
+              "on": { "type": "array", "items": { "type": "string", "enum": ["opened", "closed"] }, "description": "the events to read. Default: both." },
+              "max_event_age": { "type": "string", "pattern": "^[0-9]+(s|ms|m|h)$", "default": "30s", "description": "drop an event older than this, by its time of publication." },
+              "max_deliver": { "type": "integer", "minimum": 1, "default": 5, "description": "deliveries of an event whose pipeline fails." },
+              "consumer_inactive_after": { "type": "string", "pattern": "^[0-9]+(s|ms|m|h)$", "default": "1h", "description": "delete the durable consumer of a reader that stayed away for this long." }
+            },
+            "required": ["gear"]
+          }
+        }
       }
     },
     "bento": { "type": "object", "description": "Embedded Bento config (input/pipeline/output), validated by Bento." },

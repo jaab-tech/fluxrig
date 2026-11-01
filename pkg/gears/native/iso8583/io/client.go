@@ -19,6 +19,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
+	"github.com/jaab-tech/fluxrig/pkg/events"
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 	"github.com/jaab-tech/fluxrig/pkg/idgen"
 	loggerPkg "github.com/jaab-tech/fluxrig/pkg/logger"
@@ -39,6 +40,10 @@ type Client struct {
 	// (true on connect, false on disconnect). A client owns exactly one
 	// connection, so this is the gear's link state.
 	linkState func(up bool, connID string)
+	// connEvent, when set, observes each connection that opens and closes.
+	connEvent connEventFunc
+	// loopDone is closed when the dial loop has returned.
+	loopDone chan struct{}
 
 	// Metrics
 	meter       metric.Meter
@@ -71,6 +76,7 @@ func NewClient(cfg *Config, log *slog.Logger, emit func(*fluxmsg.FluxMsg), idGen
 		emit:        emit,
 		idGen:       idGen,
 		done:        make(chan struct{}),
+		loopDone:    make(chan struct{}),
 		meter:       meter,
 		msgsIn:      msgsIn,
 		msgsOut:     msgsOut,
@@ -79,6 +85,16 @@ func NewClient(cfg *Config, log *slog.Logger, emit func(*fluxmsg.FluxMsg), idGen
 		latency:     latency,
 		connsActive: connsActive,
 		connsTotal:  connsTotal,
+	}
+}
+
+// OnConnEvent registers an observer for each connection that opens and closes.
+// Must be called before Start.
+func (c *Client) OnConnEvent(fn connEventFunc) { c.connEvent = fn }
+
+func (c *Client) notifyConn(event string, connection *Connection, reason string) {
+	if c.connEvent != nil {
+		c.connEvent(event, connection.id, connection.conn.RemoteAddr(), reason)
 	}
 }
 
@@ -101,6 +117,7 @@ func (c *Client) Start(_ context.Context) error {
 }
 
 func (c *Client) runLoop() {
+	defer close(c.loopDone)
 	for {
 		if !isActive(c.done) {
 			return
@@ -150,6 +167,7 @@ func (c *Client) handleConn(conn net.Conn) {
 		c.linkState(true, connID)
 	}
 
+	reason := events.ReasonStopped
 	defer func() {
 		c.connsActive.Add(ctx, -1)
 		c.connPtr.Store(nil)
@@ -157,9 +175,14 @@ func (c *Client) handleConn(conn net.Conn) {
 		if c.linkState != nil {
 			c.linkState(false, connID)
 		}
+		if connection.byCommand.Load() {
+			reason = events.ReasonClosedByCommand
+		}
+		c.notifyConn(events.Closed, connection, reason)
 	}()
 
 	c.log.Info("connected", "target", c.config.Connect, "conn_id", connID)
+	c.notifyConn(events.Opened, connection, "")
 
 	for {
 		if !isActive(c.done) {
@@ -172,6 +195,7 @@ func (c *Client) handleConn(conn net.Conn) {
 		// requests. readFrame then bounds the body read by ReadTimeout.
 		if err := setReadDeadline(conn, time.Duration(c.config.IdleTimeout)); err != nil {
 			c.log.Warn("failed to set read deadline", "error", err)
+			reason = closeReason(err, c.done)
 			return
 		}
 
@@ -183,6 +207,7 @@ func (c *Client) handleConn(conn net.Conn) {
 			} else {
 				c.log.Warn("read error", "target", c.config.Connect, "conn_id", connID, "error", err)
 			}
+			reason = closeReason(err, c.done)
 			return
 		}
 
@@ -439,6 +464,7 @@ func (c *Client) Disconnect(connID string) error {
 		return fmt.Errorf("connection id mismatch: target %s, current %s", connID, conn.id)
 	}
 	c.log.Warn("Forcefully closing connection via Control Plane", "conn_id", conn.id)
+	conn.byCommand.Store(true)
 	return conn.conn.Close()
 }
 
@@ -446,10 +472,25 @@ func (c *Client) Disconnect(connID string) error {
 func (c *Client) Stop() error {
 	close(c.done)
 	conn := c.connPtr.Load()
-	if conn != nil {
-		_ = conn.conn.Close()
+	if conn == nil {
+		return nil
 	}
-	return nil
+	_ = conn.conn.Close()
+
+	// The handler reports the closed connection after the socket closes. With
+	// nothing connected there is nothing to wait for.
+	timeout := time.Duration(c.config.StopTimeout)
+	if timeout <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-c.loopDone:
+		return nil
+	case <-timer.C:
+		return fmt.Errorf("io_iso8583: the connection handler is still running %s after stop", timeout)
+	}
 }
 
 // Drain signals the client to stop accepting new work.

@@ -254,7 +254,7 @@ func NewServer(ctx context.Context, cfg Config) (*Server, error) {
 
 // ProvisionStream checks if a stream exists and creates it if not.
 func (s *Server) ProvisionStream(ctx context.Context, name string, subjects []string) error {
-	return s.provisionStream(ctx, name, subjects, s.streamMaxAge)
+	return s.provisionStream(ctx, name, subjects, s.streamMaxAge, s.streamMaxBytes)
 }
 
 // ProvisionStreamWithAge is ProvisionStream with an explicit max age, for a
@@ -269,10 +269,17 @@ func (s *Server) ProvisionStreamWithAge(ctx context.Context, name string, subjec
 			age = parsed
 		}
 	}
-	return s.provisionStream(ctx, name, subjects, age)
+	return s.provisionStream(ctx, name, subjects, age, s.streamMaxBytes)
 }
 
-func (s *Server) provisionStream(ctx context.Context, name string, subjects []string, maxAge time.Duration) error {
+// ProvisionStreamWithLimits is ProvisionStream with a retention of its own, in
+// age and in bytes. The stream of durable events uses it: its content is short
+// lived, and it must not share the limits of the message stream.
+func (s *Server) ProvisionStreamWithLimits(ctx context.Context, name string, subjects []string, maxAge time.Duration, maxBytes int64) error {
+	return s.provisionStream(ctx, name, subjects, maxAge, maxBytes)
+}
+
+func (s *Server) provisionStream(ctx context.Context, name string, subjects []string, maxAge time.Duration, maxBytes int64) error {
 
 	// Connect to self with retry resilience
 	var nc *nats.Conn
@@ -321,7 +328,7 @@ func (s *Server) provisionStream(ctx context.Context, name string, subjects []st
 		// setting ("no limit"), not "leave whatever the stream already has". An
 		// operator who lowers, or clears, a limit on an existing stream expects
 		// the next start to apply it, not to silently keep the old one forever.
-		cfg.MaxBytes = s.streamMaxBytes
+		cfg.MaxBytes = maxBytes
 		if _, err = js.UpdateStream(ctx, cfg); err != nil {
 			return fmt.Errorf("snake: failed to update stream %s subjects: %w", name, err)
 		}
@@ -338,7 +345,7 @@ func (s *Server) provisionStream(ctx context.Context, name string, subjects []st
 		Retention: jetstream.LimitsPolicy, // Keep until limits
 		Replicas:  1,
 		MaxAge:    maxAge,
-		MaxBytes:  s.streamMaxBytes,
+		MaxBytes:  maxBytes,
 	})
 
 	if err != nil {

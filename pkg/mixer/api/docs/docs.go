@@ -1517,6 +1517,15 @@ const docTemplate = `{
                     "type": "string",
                     "example": "flux"
                 },
+                "eventsMaxAge": {
+                    "description": "EventsMaxAge and EventsMaxBytes bound the stream of durable events. A\nreader that was down longer than the age has lost what it missed.\nMixer-side only.",
+                    "type": "string",
+                    "example": "1h"
+                },
+                "eventsMaxBytes": {
+                    "type": "integer",
+                    "example": 268435456
+                },
                 "inactiveThreshold": {
                     "type": "string",
                     "example": "30s"
