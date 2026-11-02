@@ -1,0 +1,105 @@
+meta:
+  name: "iso8583_periodic_echo"
+  version: "1.0.0"
+
+# Periodic ISO 8583 network echo (keep-alive), built entirely from existing gears.
+#
+#   echo-timer -> encode-echo -> uplink -> decode-reply -> echo-sink
+#
+# A bento `generate` input fires every `interval` and builds a 0800 network
+# management request. The codec encodes it, `io_iso8583` (client mode) sends it
+# to the remote host and emits the 0810 reply, the codec decodes the reply and a
+# bento sink logs it. This is the fluxrig equivalent of a jPOS client that
+# sends a periodic echo from cfg/echo_s.
+#
+# Fields set on the 0800 (the jPOS echo_s file sets 0, 3, 7, 11, 12 and 63):
+#   MTI  0800            network management request (metadata iso8583.mti)
+#   DE3  180000          processing code, as in echo_s
+#   DE7  MMDDhhmmss      transmission date and time, UTC, taken from now()
+#   DE11 000001..999999  STAN, a counter that wraps back to 1 after 999999
+#
+# Not set: DE12 and DE63 (echo_s sends them, an echo does not need them) and DE70.
+# iso8583-v87-ascii.yaml does define DE70 (network management information code,
+# fixed 3 digits). If the remote host expects it, add it to the mapping below:
+#   root.iso8583.field."70" = "301"      # echo test
+# Without DE70 the echo is identified by MTI 0800 plus DE3 alone, as in echo_s.
+#
+# Keep-alive timing. Both knobs are config fields, nothing is hardcoded:
+#   interval      the `generate` interval below. Change it to change the cadence.
+#   idle_timeout  io_iso8583 client option, default 15s. The client waits at most
+#                 idle_timeout for the next frame from the host and closes the
+#                 connection when nothing arrives, so the 0810 replies are what
+#                 keep the link open. Keep idle_timeout LARGER than interval
+#                 (with room for the host's reply time), or the client drops and
+#                 redials the connection between echoes. Here: 10s interval, 30s
+#                 idle_timeout.
+#
+# Run it from a directory that contains specs/iso8583-v87-ascii.yaml (copy it
+# from examples/specs/), because the codec resolves spec_path from the Rack's
+# working directory. Point `connect` at a host that answers 0800 with 0810.
+
+gears:
+  - name: "echo-timer"
+    type: "bento"
+    config:
+      ports:
+        outputs: ["out"]
+      bento:
+        input:
+          generate:
+            interval: "10s"          # echo cadence; keep below uplink idle_timeout
+            mapping: |
+              # MTI travels in metadata, fields in Data (what codec_iso8583 encode reads).
+              meta "iso8583.mti" = "0800"
+              root.iso8583.field."3" = "180000"
+              # DE7: MMDDhhmmss in UTC (strftime %m%d%H%M%S).
+              root.iso8583.field."7" = now().ts_strftime("%m%d%H%M%S", "UTC")
+              # DE11: STAN, 6 digits zero padded, 1..999999 then wraps.
+              root.iso8583.field."11" = "%06d".format(counter(min: 1, max: 999999))
+
+  - name: "encode-echo"
+    type: "codec_iso8583"
+    config:
+      spec_path: "specs/iso8583-v87-ascii.yaml"
+      direction: "encode"
+      on_error: "reject"
+
+  - name: "uplink"
+    type: "io_iso8583"
+    config:
+      mode: "client"
+      connect: "127.0.0.1:8583"      # the remote host that answers the echo
+      frame_length_size: 2
+      frame_length_endian: "big"
+      encoding: "ascii"
+      reconnect_wait: "5s"
+      idle_timeout: "30s"            # must exceed the echo interval (default is 15s)
+
+  - name: "decode-reply"
+    type: "codec_iso8583"
+    config:
+      spec_path: "specs/iso8583-v87-ascii.yaml"
+      direction: "decode"
+      on_error: "reject"
+
+  - name: "echo-sink"
+    type: "bento"
+    config:
+      ports:
+        inputs: ["in"]
+      bento:
+        pipeline:
+          processors:
+            # Log the 0810: MTI is in metadata, DE11 echoes the request STAN and
+            # DE39 is the host's response code (00 = approved).
+            - log:
+                level: "INFO"
+                message: 'echo reply mti=${! meta("iso8583.mti") } stan=${! this.iso8583.field."11".or("?") } rc=${! this.iso8583.field."39".or("?") }'
+        output:
+          drop: {}
+
+wires:
+  - { from: "echo-timer.out", to: "encode-echo.in" }
+  - { from: "encode-echo.out", to: "uplink.in" }
+  - { from: "uplink.out", to: "decode-reply.in" }
+  - { from: "decode-reply.out", to: "echo-sink.in" }

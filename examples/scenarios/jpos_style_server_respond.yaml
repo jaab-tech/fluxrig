@@ -1,0 +1,101 @@
+# jPOS-style ISO 8583 server that answers every network-management request.
+#
+# This is the fluxrig counterpart of the `jpos-server` jPOS example: one TCP
+# listener, a decode step, a tiny piece of logic that turns a 0800 into a 0810
+# with DE39 = 00, and an encode step that writes the reply back on the
+# connection the request came from. No conductor is needed. Read this one
+# before the forwarding example.
+#
+#   client --> server_io --> decode --> respond --> encode --> server_io --> client
+#
+# How the pieces fit:
+#   - io_iso8583 (server mode) emits each framed request on `out` and stamps
+#     `conn.id` in the message metadata. The metadata travels with the message
+#     through the codec and the bento gear untouched, so the reply returns on
+#     the very connection that asked (strict_connection_routing).
+#   - codec_iso8583 (decode) turns the wire bytes into fields:
+#     `iso8583.field.<N>` in the data, and the MTI in the `iso8583.mti`
+#     metadata key.
+#   - bento answers. Bloblang sees the data as `this` and the metadata through
+#     `meta()`. The encoder takes the MTI from the `iso8583.mti` metadata key,
+#     not from the data, so the response MTI is set with `meta`.
+#   - codec_iso8583 (encode) packs the fields again. Every field of the request
+#     that is not changed is echoed, which is what jPOS `setResponseMTI()` does.
+#
+# Differences from jpos-server:
+#   - jPOS frames each message with a 4-digit ASCII decimal length
+#     (ASCIIChannel). This scenario uses the binary length prefix that is
+#     available today (frame_length_size: 2). To interoperate with a jPOS
+#     peer on the wire, switch to the ASCII-decimal framing option once it is
+#     available and set it on the io gears; nothing else in this file changes.
+#   - The jPOS Selector routes on MTI + DE3 ("0800" + "180000"). This example
+#     answers every 0800. To match jPOS exactly, make the first mapping drop
+#     anything whose `this.iso8583.field."3"` is not "180000".
+#   - A request that is not a 0800 is dropped, with no reply. To decline it
+#     instead, add an else branch that sets another response code.
+#
+# Run it from the repository root (the spec path below is relative to it), then
+# point a client at localhost:8888, for example the jpos-client example or
+# `iso8583-tool load`.
+
+meta:
+  name: "jpos_style_server_respond"
+  version: "1.0.0"
+
+gears:
+  # The listener. jpos-server listens on 8888.
+  - name: "server_io"
+    type: "io_iso8583"
+    config:
+      mode: "server"
+      bind: ":8888"
+      frame_length_size: 2          # binary prefix; jPOS wire compatibility needs ASCII-decimal framing
+      frame_length_endian: "big"
+      encoding: "ascii"
+      strict_connection_routing: true   # a reply only ever goes to its own connection
+      # A jPOS client keeps the link open with periodic echoes. A connection
+      # that stays silent longer than idle_timeout is closed, so raise it for
+      # long-lived clients.
+      idle_timeout: "5m"
+
+  - name: "decode"
+    type: "codec_iso8583"
+    config:
+      spec_path: "examples/specs/iso8583-v87-ascii.yaml"
+      direction: "decode"
+      on_error: "reject"
+
+  # Answer 0800 with 0810 and DE39 = 00. Two processors: the first discards
+  # anything that is not a 0800, the second builds the reply.
+  - name: "respond"
+    type: "bento"
+    config:
+      ports:
+        inputs: ["in"]
+        outputs: ["out"]
+      bento:
+        pipeline:
+          processors:
+            - mapping: |
+                root = if meta("iso8583.mti") == "0800" { this } else { deleted() }
+            - mapping: |
+                root = this
+                meta "iso8583.mti" = "0810"
+                root.iso8583.field."39" = "00"
+
+  - name: "encode"
+    type: "codec_iso8583"
+    config:
+      spec_path: "examples/specs/iso8583-v87-ascii.yaml"
+      direction: "encode"
+      on_error: "reject"
+
+wires:
+  - from: "server_io.out"
+    to: "decode.in"
+  - from: "decode.out"
+    to: "respond.in"
+  - from: "respond.out"
+    to: "encode.in"
+  - from: "encode.out"
+    to: "server_io.in"

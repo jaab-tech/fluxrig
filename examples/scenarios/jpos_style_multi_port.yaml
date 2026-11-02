@@ -1,0 +1,154 @@
+# jPOS-style ISO 8583 server listening on two ports.
+#
+# This is the fluxrig counterpart of the `jpos-server-multi-port` jPOS example:
+# the same application listening on 8888 and on 8889, each port with its own
+# processing queue. In fluxrig that is two io_iso8583 gears in server mode with
+# different `bind` values, each owning a complete decode / respond / encode path.
+#
+#   :8888 --> server_8888 --> decode_8888 --> respond_8888 --> encode_8888 --> server_8888
+#   :8889 --> server_8889 --> decode_8889 --> respond_8889 --> encode_8889 --> server_8889
+#
+# Each path answers a 0800 with a 0810 and DE39 = 00, as in
+# jpos_style_server_respond.yaml (read that one first). The only difference
+# between the two paths is the name and the port, which is also the only
+# difference between the two QServer descriptors in the jPOS module. The second
+# respond step stamps DE63 with a marker so a client can tell which port
+# answered; drop that line if you do not need it.
+#
+# Can the two servers share one decode / logic path?
+#   Reading the gear code says yes, with a cost. Several wires may end on the
+#   same input port (decode.in), so both servers' `out` can feed one decode,
+#   respond and encode chain. The reply then has to go back to the right
+#   listener, and a port wired to two inputs broadcasts: encode.out would feed
+#   both server_8888.in and server_8889.in. A server finds the connection of a
+#   reply by `conn.id`; with strict_connection_routing the server that does not
+#   own the connection refuses the message ("connection ... not found") and logs
+#   an error on every reply. Nothing is misdelivered (only the owner writes),
+#   but the log is noisy. Separate paths, as below, avoid that and let each port
+#   have its own logic and telemetry. This was derived from reading the code,
+#   not from running two listeners.
+#
+# Differences from jpos-server-multi-port:
+#   - jPOS frames each message with a 4-digit ASCII decimal length
+#     (ASCIIChannel). This scenario uses the binary length prefix available
+#     today (frame_length_size: 2). To interoperate with a jPOS peer on the
+#     wire, switch to the ASCII-decimal framing option once it is available;
+#     nothing else in this file changes.
+#   - The jPOS Selector routes on MTI + DE3 ("0800" + "180000"). This example
+#     answers every 0800.
+#   - A request that is not a 0800 is dropped, with no reply.
+#
+# Run it from the repository root (the spec path below is relative to it), then
+# point clients at localhost:8888 and localhost:8889.
+
+meta:
+  name: "jpos_style_multi_port"
+  version: "1.0.0"
+
+gears:
+  # ───────────────────────── Port 8888 ─────────────────────────
+  - name: "server_8888"
+    type: "io_iso8583"
+    config:
+      mode: "server"
+      bind: ":8888"
+      frame_length_size: 2          # binary prefix; jPOS wire compatibility needs ASCII-decimal framing
+      frame_length_endian: "big"
+      encoding: "ascii"
+      strict_connection_routing: true
+      idle_timeout: "5m"            # raise for long-lived clients that only send periodic echoes
+
+  - name: "decode_8888"
+    type: "codec_iso8583"
+    config:
+      spec_path: "examples/specs/iso8583-v87-ascii.yaml"
+      direction: "decode"
+      on_error: "reject"
+
+  - name: "respond_8888"
+    type: "bento"
+    config:
+      ports:
+        inputs: ["in"]
+        outputs: ["out"]
+      bento:
+        pipeline:
+          processors:
+            - mapping: |
+                root = if meta("iso8583.mti") == "0800" { this } else { deleted() }
+            - mapping: |
+                root = this
+                meta "iso8583.mti" = "0810"
+                root.iso8583.field."39" = "00"
+                root.iso8583.field."63" = "PORT8888"
+
+  - name: "encode_8888"
+    type: "codec_iso8583"
+    config:
+      spec_path: "examples/specs/iso8583-v87-ascii.yaml"
+      direction: "encode"
+      on_error: "reject"
+
+  # ───────────────────────── Port 8889 ─────────────────────────
+  - name: "server_8889"
+    type: "io_iso8583"
+    config:
+      mode: "server"
+      bind: ":8889"
+      frame_length_size: 2
+      frame_length_endian: "big"
+      encoding: "ascii"
+      strict_connection_routing: true
+      idle_timeout: "5m"
+
+  - name: "decode_8889"
+    type: "codec_iso8583"
+    config:
+      spec_path: "examples/specs/iso8583-v87-ascii.yaml"
+      direction: "decode"
+      on_error: "reject"
+
+  - name: "respond_8889"
+    type: "bento"
+    config:
+      ports:
+        inputs: ["in"]
+        outputs: ["out"]
+      bento:
+        pipeline:
+          processors:
+            - mapping: |
+                root = if meta("iso8583.mti") == "0800" { this } else { deleted() }
+            - mapping: |
+                root = this
+                meta "iso8583.mti" = "0810"
+                root.iso8583.field."39" = "00"
+                root.iso8583.field."63" = "PORT8889"
+
+  - name: "encode_8889"
+    type: "codec_iso8583"
+    config:
+      spec_path: "examples/specs/iso8583-v87-ascii.yaml"
+      direction: "encode"
+      on_error: "reject"
+
+wires:
+  # ── Port 8888 ──
+  - from: "server_8888.out"
+    to: "decode_8888.in"
+  - from: "decode_8888.out"
+    to: "respond_8888.in"
+  - from: "respond_8888.out"
+    to: "encode_8888.in"
+  - from: "encode_8888.out"
+    to: "server_8888.in"
+
+  # ── Port 8889 ──
+  - from: "server_8889.out"
+    to: "decode_8889.in"
+  - from: "decode_8889.out"
+    to: "respond_8889.in"
+  - from: "respond_8889.out"
+    to: "encode_8889.in"
+  - from: "encode_8889.out"
+    to: "server_8889.in"

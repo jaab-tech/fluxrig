@@ -1,0 +1,193 @@
+# jPOS-style ISO 8583 server that forwards every request to an upstream server.
+#
+# This is the fluxrig counterpart of the `jpos-server-forwarding` jPOS example.
+# The jPOS module listens on 8889, hands each request to a QMUX that rides a
+# ChannelAdaptor to localhost:8888 (reconnecting every second), waits up to 30
+# seconds, copies DE39 from the upstream reply into the original message (or
+# sets 68 when nothing came back) and answers the original client. Here:
+#
+#   client --> server_io --> decode_request --> conductor --> encode_uplink --> uplink_io --> upstream :8888
+#   client <-- server_io <-- encode_response <-- conductor <-- decode_reply  <-- uplink_io <-- upstream
+#                                  ^
+#                                  +-- decline_builder <-- conductor (error port)
+#
+# Start jpos_style_server_respond.yaml (or the jpos-server example) as the
+# upstream on :8888, run this scenario, and point a client at localhost:8889.
+#
+# How the pieces fit:
+#   - conductor is the QMUX. It parks a ticket for each request under a
+#     correlation key, sends the request out of `out_uplink`, and redeems the
+#     ticket when the decoded reply arrives on `in_reply`. The matched reply
+#     leaves on `out_response`.
+#   - The client's `conn.id` is kept with the ticket and put back on the reply
+#     (the conductor restores all metadata except `iso8583.*` and `codec.*`
+#     from the request, and takes those from the reply). That is how the reply
+#     returns on the connection that asked, even though the uplink is a
+#     different socket.
+#   - The conductor never writes a response. On a timeout, a dead uplink or a
+#     missing key it sends the ORIGINAL request out of `error` with the reason
+#     in the `error.reason` metadata key. decline_builder turns that into a
+#     0810 with DE39 = 68 for a timeout (the jPOS timeout code), which goes
+#     through the same encoder and server as the happy path.
+#   - The conductor follows the uplink socket: while uplink_io is not
+#     connected, the route has no destination and the request comes out of
+#     `error` with reason `no_destination` (decline_builder answers 91). Wiring
+#     conductor -> codec -> io_iso8583 (client) in a straight line is what lets
+#     it see the link state, so keep that chain.
+#
+# Correlation key: DE41 + DE11.
+#   DE11 (STAN) is only unique per terminal, so it is not enough alone: if two
+#   clients send the same DE11, the second request would be taken for a
+#   retransmission of the first and be absorbed with no reply. DE41 (terminal
+#   id) tells the clients apart. The upstream reply must echo both fields,
+#   which the jPOS servers do. Requests that lack DE41 or DE11 come out of
+#   `error` with reason `no_key`. The jPOS client simulator's 0800 echo does
+#   not carry DE41, so for that traffic use another per-client field in the key
+#   (for example DE7 as well: ["iso8583.field.7", "iso8583.field.11"]), or
+#   have the client send DE41.
+#
+# Differences from jpos-server-forwarding:
+#   - jPOS frames each message with a 4-digit ASCII decimal length
+#     (ASCIIChannel). This scenario uses the binary length prefix available
+#     today (frame_length_size: 2). To interoperate with a jPOS peer on the
+#     wire, switch to the ASCII-decimal framing option once it is available,
+#     on both io gears; nothing else in this file changes.
+#   - The jPOS decline reuses the original message and always uses DE39 = 68
+#     when there is no reply. Here the code depends on the reason (see
+#     decline_builder).
+#   - The ticket store is in memory only, so tickets in flight are lost on a
+#     restart (jPOS's MUX does not survive a restart either).
+#
+# Run it from the repository root (the spec path below is relative to it).
+
+meta:
+  name: "jpos_style_forwarding"
+  version: "1.0.0"
+
+gears:
+  # ───────────────────────── Downstream: clients connect here ─────────────────────────
+  - name: "server_io"
+    type: "io_iso8583"
+    config:
+      mode: "server"
+      bind: ":8889"
+      frame_length_size: 2          # binary prefix; jPOS wire compatibility needs ASCII-decimal framing
+      frame_length_endian: "big"
+      encoding: "ascii"
+      strict_connection_routing: true
+      idle_timeout: "5m"
+
+  - name: "decode_request"
+    type: "codec_iso8583"
+    config:
+      spec_path: "examples/specs/iso8583-v87-ascii.yaml"
+      direction: "decode"
+      on_error: "reject"
+
+  # ───────────────────────── The mux ─────────────────────────
+  - name: "conductor"
+    type: "conductor"
+    config:
+      # One transaction = one terminal id + one trace number. See the note
+      # above on why DE11 alone is not enough.
+      correlation_key: ["iso8583.field.41", "iso8583.field.11"]
+      valet:
+        store: "memory"
+        default_ttl: "30s"          # jPOS: <property name="timeout" value="30000"/>
+        retain_after_close: "5s"    # a retransmission after the reply gets the same reply
+      routes:
+        # A route with no `match` is the catch-all: everything goes upstream.
+        - name: "upstream"
+          destination: "out_uplink"
+
+  # ───────────────────────── Upstream: the uplink to :8888 ─────────────────────────
+  - name: "encode_uplink"
+    type: "codec_iso8583"
+    config:
+      spec_path: "examples/specs/iso8583-v87-ascii.yaml"
+      direction: "encode"
+      on_error: "reject"
+
+  - name: "uplink_io"
+    type: "io_iso8583"
+    config:
+      mode: "client"
+      connect: "localhost:8888"
+      frame_length_size: 2
+      frame_length_endian: "big"
+      encoding: "ascii"
+      reconnect_wait: "1s"          # jPOS: <reconnect-delay>1000</reconnect-delay>
+      # The uplink may sit idle between requests. A connection silent for
+      # longer than idle_timeout is closed and redialed, so keep this above the
+      # longest quiet period (and above the 30s ticket TTL).
+      idle_timeout: "5m"
+
+  - name: "decode_reply"
+    type: "codec_iso8583"
+    config:
+      spec_path: "examples/specs/iso8583-v87-ascii.yaml"
+      direction: "decode"
+      on_error: "reject"
+
+  # ───────────────────────── Reply path ─────────────────────────
+  # One encoder serves both the happy path (conductor.out_response) and the
+  # declines (decline_builder.out): the two wires below meet on its input.
+  - name: "encode_response"
+    type: "codec_iso8583"
+    config:
+      spec_path: "examples/specs/iso8583-v87-ascii.yaml"
+      direction: "encode"
+      on_error: "reject"
+
+  # Authors the decline for anything the conductor could not complete. `this`
+  # is the original decoded request, the metadata still carries conn.id.
+  - name: "decline_builder"
+    type: "bento"
+    config:
+      ports:
+        inputs: ["in"]
+        outputs: ["out"]
+      bento:
+        pipeline:
+          processors:
+            - mapping: |
+                root = this
+                # Response MTI: advance the function digit (0800 -> 0810, 0200 -> 0210).
+                let req = meta("iso8583.mti")
+                meta "iso8583.mti" = $req.slice(0, 2) + (($req.slice(2, 3).number() + 1).string()) + $req.slice(3)
+                # error.reason is stamped by the conductor:
+                # timeout | no_destination | no_route | no_key | unmatched_reply
+                root.iso8583.field."39" = match meta("error.reason") {
+                  "timeout"        => "68"   # response received too late (jPOS default on no reply)
+                  "no_destination" => "91"   # uplink down: issuer or switch inoperative
+                  _                => "96"   # system malfunction
+                }
+
+wires:
+  # ── Request path: client -> decode -> conductor -> encode -> uplink ──
+  - from: "server_io.out"
+    to: "decode_request.in"
+  - from: "decode_request.out"
+    to: "conductor.in"
+  - from: "conductor.out_uplink"
+    to: "encode_uplink.in"
+  - from: "encode_uplink.out"
+    to: "uplink_io.in"
+
+  # ── Reply path: uplink -> decode -> conductor (redeem the ticket) ──
+  - from: "uplink_io.out"
+    to: "decode_reply.in"
+  - from: "decode_reply.out"
+    to: "conductor.in_reply"
+
+  # ── Matched response -> encode -> back to the client's own connection ──
+  - from: "conductor.out_response"
+    to: "encode_response.in"
+  - from: "encode_response.out"
+    to: "server_io.in"
+
+  # ── Exceptions (timeout, uplink down, missing key) -> decline -> same encoder ──
+  - from: "conductor.error"
+    to: "decline_builder.in"
+  - from: "decline_builder.out"
+    to: "encode_response.in"
