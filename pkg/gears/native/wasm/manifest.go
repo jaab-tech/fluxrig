@@ -16,6 +16,7 @@ func (g *Gear) Manifest() sdk.Manifest {
 		Summary:  "Runs a sandboxed WebAssembly module (wazero) as a polyglot message transform.",
 		DocSlug:  "wasm-logic",
 		Terminus: sdk.TerminusOpaque,
+		BusNeeds: busNeeds,
 		Ports: []sdk.Port{
 			{Name: "in", Dir: sdk.PortIn, Role: "message", Summary: "Message passed to the module."},
 			{Name: "out", Dir: sdk.PortOut, Role: "message", Summary: "Message the module returns."},

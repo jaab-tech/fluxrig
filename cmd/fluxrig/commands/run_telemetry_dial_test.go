@@ -21,7 +21,7 @@ func TestTelemetryConnectOptions_MatchesMainDialTLSPosture(t *testing.T) {
 	cfg.Snake.InsecureSkipVerify = true
 	cfg.Snake.Domain = "flux"
 
-	opts := telemetryConnectOptions(cfg, "rack-1", 10*time.Second, time.Second, 30*time.Second, 500*time.Millisecond, 10)
+	opts := telemetryConnectOptions(cfg, "rack-1", 10*time.Second, time.Second, 30*time.Second, 500*time.Millisecond, 10, 5*time.Second)
 
 	if opts.RootCA != "ca.pem" {
 		t.Errorf("RootCA did not carry through: got %q", opts.RootCA)
@@ -29,7 +29,19 @@ func TestTelemetryConnectOptions_MatchesMainDialTLSPosture(t *testing.T) {
 	if !opts.InsecureSkipVerify {
 		t.Error("InsecureSkipVerify did not carry through: telemetry would attempt real cert verification the main bus dial does not")
 	}
+	if opts.OperationTimeout != 5*time.Second {
+		t.Errorf("OperationTimeout did not carry through: got %v; without it the flusher timeout stays at one minute and a cut-off telemetry bus moves past the 60 s gate", opts.OperationTimeout)
+	}
 	if opts.Name != "rack-1-telemetry" {
 		t.Errorf("unexpected client name: got %q", opts.Name)
+	}
+}
+
+// The telemetry connection of a Rack takes the Rack's own inbox prefix, the
+// same as its main connection.
+func TestTelemetryConnectOptions_RackInboxPrefix(t *testing.T) {
+	cfg := &config.RackConfig{}
+	if got := telemetryConnectOptions(cfg, "rack-1", time.Second, time.Second, time.Second, time.Second, 1, time.Second).InboxPrefix; got != "_INBOX_rack-1" {
+		t.Errorf("telemetry inbox prefix = %q", got)
 	}
 }

@@ -5,13 +5,13 @@ package bus
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
+	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fxamacker/cbor/v2"
@@ -26,6 +26,42 @@ import (
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 )
 
+// asyncErrorHandler logs the errors NATS reports apart from any call. A refused
+// permission is one: the publish or subscribe that caused it returned nil, and
+// a request only times out, so this log is where a missing permission shows.
+func asyncErrorHandler(name string) nats.ErrHandler {
+	return func(_ *nats.Conn, sub *nats.Subscription, err error) {
+		if errors.Is(err, nats.ErrPermissionViolation) {
+			slog.Error("NATS Bus: the server refused an operation this connection has no permission for",
+				"connection", name, "error", err)
+			return
+		}
+		subject := ""
+		if sub != nil {
+			subject = sub.Subject
+		}
+		slog.Warn("NATS Bus: asynchronous error", "connection", name, "subject", subject, "error", err)
+	}
+}
+
+// connectionHandlers log the life of a connection: when it drops, each
+// attempt to reconnect that fails, and the server it reconnects to. Without
+// them a client that took a minute to reconnect across a slow link, trying a
+// server that had died on every round, left no line in its log.
+func connectionHandlers(name string) []nats.Option {
+	return []nats.Option{
+		nats.DisconnectErrHandler(func(nc *nats.Conn, err error) {
+			slog.Warn("NATS Bus: disconnected", "connection", name, "server", nc.ConnectedUrlRedacted(), "error", err)
+		}),
+		nats.ReconnectErrHandler(func(nc *nats.Conn, err error) {
+			slog.Info("NATS Bus: a reconnect attempt failed", "connection", name, "error", err)
+		}),
+		nats.ReconnectHandler(func(nc *nats.Conn) {
+			slog.Info("NATS Bus: reconnected", "connection", name, "server", nc.ConnectedUrlRedacted())
+		}),
+	}
+}
+
 // NatsBus is the concrete implementation of the Bus interface using NATS JetStream.
 type NatsBus struct {
 	conn              *nats.Conn
@@ -34,15 +70,38 @@ type NatsBus struct {
 	retryWait         time.Duration
 	retryAttempts     int
 	inactiveThreshold time.Duration
+	keepConsumers     bool
+	opTimeout         time.Duration
+	ackWait           time.Duration
+	consumerReplicas  int
+	missedHeartbeats  int
+	// streamReplicas caches the stream's replica count for consumers that
+	// take it (consumerReplicas 0); 0 until read.
+	streamReplicas    atomic.Int32
 	dlqEnabled        bool
 	dlqSubject        string
 	dlqPublishTimeout time.Duration
+	// dlqFailures counts messages the bus could not route to the dead letter
+	// queue. Read it with DLQFailures.
+	dlqFailures atomic.Uint64
+	// failoverAfter and pubMisses implement ConnectOptions.FailoverAfter:
+	// pubMisses counts publishes in a row that found no stream.
+	failoverAfter int32
+	pubMisses     atomic.Int32
+	// probing is set while a failover checks whether the server still
+	// reaches JetStream, so a burst of misses runs one check.
+	probing atomic.Bool
+	// closed ends the retries of a subscription that is still starting: it
+	// closes with Close, or when ConnectOptions.Ctx is done.
+	closed    chan struct{}
+	closeOnce sync.Once
 }
 
 // NewNatsBus creates a new instance.
 func NewNatsBus(streamName string) *NatsBus {
 	return &NatsBus{
 		streamName: streamName,
+		closed:     make(chan struct{}),
 	}
 }
 
@@ -56,6 +115,18 @@ func (n *NatsBus) Connect(url string, opts ConnectOptions) error {
 		nats.Timeout(opts.ConnectTimeout),
 		nats.ReconnectWait(opts.ReconnectWait),
 		nats.MaxReconnects(-1), // Infinite reconnects
+		nats.ErrorHandler(asyncErrorHandler(opts.Name)),
+	}
+	natsOpts = append(natsOpts, connectionHandlers(opts.Name)...)
+
+	// Bound a write that cannot be flushed. The client default is one minute,
+	// and a request or a force-reconnect to a black-holed server then sits in
+	// the socket write for that long: measured in the latam testbed, a Rack
+	// cut off from its server moved 73 s after the cut, past the 60 s that
+	// gate 1 allows. The operation timeout is the contract for one exchange,
+	// so a write that outlasts it is already too late.
+	if opts.OperationTimeout > 0 {
+		natsOpts = append(natsOpts, nats.FlusherTimeout(opts.OperationTimeout))
 	}
 
 	// --- In-Process Optimization ---
@@ -75,33 +146,26 @@ func (n *NatsBus) Connect(url string, opts ConnectOptions) error {
 		}
 	}
 
-	// --- Advanced TLS Configuration ---
-	if opts.InsecureSkipVerify || opts.RootCA != "" {
-		tlsConfig := &tls.Config{
-			InsecureSkipVerify: opts.InsecureSkipVerify, //nolint:gosec // allowed for dev/test environments
-			MinVersion:         tls.VersionTLS12,
-		}
-
-		if opts.RootCA != "" {
-			caCert, err := os.ReadFile(opts.RootCA)
-			if err != nil {
-				return fmt.Errorf("failed to read root ca: %w", err)
-			}
-			caCertPool := x509.NewCertPool()
-			if ok := caCertPool.AppendCertsFromPEM(caCert); !ok {
-				return fmt.Errorf("failed to append root ca (no PEM blocks found)")
-			}
-			tlsConfig.RootCAs = caCertPool
-		}
-
-		if opts.Domain != "" {
-			// If we have a domain (flux), we might want to use it as ServerName for verification
-			// But only if the cert supports it (it does in 08_tls_simple)
-			tlsConfig.ServerName = opts.Domain
-		}
-
-		natsOpts = append(natsOpts, nats.Secure(tlsConfig))
+	// --- Security ---
+	sec := Security{
+		RootCA:             opts.RootCA,
+		ClientCert:         opts.ClientCert,
+		ClientKey:          opts.ClientKey,
+		Credentials:        opts.Credentials,
+		InboxPrefix:        opts.InboxPrefix,
+		PingInterval:       opts.PingInterval,
+		MaxPingsOut:        opts.MaxPingsOut,
+		InsecureSkipVerify: opts.InsecureSkipVerify,
 	}
+	if !opts.External {
+		// The embedded server's certificate names the domain.
+		sec.ServerName = opts.Domain
+	}
+	secOpts, err := sec.Options()
+	if err != nil {
+		return err
+	}
+	natsOpts = append(natsOpts, secOpts...)
 
 	// 2. Connect to NATS Core with retry logic for initial connection
 	nc, err := dialWithRetry(url, natsOpts, opts)
@@ -193,7 +257,22 @@ func (n *NatsBus) finalizeConnect(opts ConnectOptions) error {
 		n.retryAttempts = 1 // At least one attempt
 	}
 	n.inactiveThreshold = opts.InactiveThreshold
+	n.keepConsumers = opts.KeepConsumers
+	n.opTimeout = opts.OperationTimeout
+	n.ackWait = opts.AckWait
+	n.consumerReplicas = opts.ConsumerReplicas
+	n.missedHeartbeats = opts.ConsumerMissedHeartbeats
+	if opts.Ctx != nil {
+		go func() {
+			select {
+			case <-opts.Ctx.Done():
+				n.closeOnce.Do(func() { close(n.closed) })
+			case <-n.closed:
+			}
+		}()
+	}
 	n.dlqEnabled = opts.DLQEnabled
+	n.failoverAfter = int32(max(opts.FailoverAfter, 0)) //nolint:gosec // a small count from config
 	n.dlqSubject = opts.DLQSubject
 	if n.dlqSubject == "" {
 		n.dlqSubject = dlqDefaultSubject
@@ -213,10 +292,186 @@ func (n *NatsBus) finalizeConnect(opts ConnectOptions) error {
 	return nil
 }
 
+// noStream reports whether a publish error means no stream answered through
+// this server: the request timed out or found no responders. A caller's own
+// cancellation, a refused message or a payload limit does not count.
+func noStream(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, nats.ErrTimeout) ||
+		errors.Is(err, nats.ErrNoResponders) ||
+		errors.Is(err, jetstream.ErrNoStreamResponse)
+}
+
+// Unavailable reports whether a JetStream request failed because the cluster
+// cannot answer it yet: a 503 from the API, which a server returns while it
+// elects a metadata leader, or no stream that answers. Such a failure passes
+// once the cluster settles; a caller can try again instead of giving up.
+func Unavailable(err error) bool {
+	var apiErr *jetstream.APIError
+	if errors.As(err, &apiErr) && apiErr.Code == http.StatusServiceUnavailable {
+		return true
+	}
+	return noStream(err)
+}
+
+// NotProvisioned reports whether a request failed because its stream does not
+// exist yet. On an external NATS a Rack can start before any Mixer has
+// provisioned the streams, and the stream appears once one does.
+func NotProvisioned(err error) bool {
+	return errors.Is(err, jetstream.ErrStreamNotFound)
+}
+
+// Disconnected reports whether a request failed because its connection
+// dropped, was reconnecting, or was closed under it. A failover reconnect
+// closes the connection on purpose, and a request in flight then fails with
+// "connection closed": a Rack that is starting tries again on a new session,
+// as it does when the cluster cannot answer yet.
+func Disconnected(err error) bool {
+	return errors.Is(err, nats.ErrConnectionClosed) ||
+		errors.Is(err, nats.ErrConnectionReconnecting) ||
+		errors.Is(err, nats.ErrDisconnected)
+}
+
+// notePublish counts publishes in a row that found no stream. When the count
+// reaches failoverAfter it forces a reconnect, which moves the connection to
+// another server in the URL list: the current one goes to the end of the
+// pool. Any publish that reaches a stream resets the count.
+//
+// A cancelled publish is skipped: the caller went away, and that says nothing
+// about the server. Every timeout counts, including one where the caller's own
+// deadline expired. A server that is black-holed keeps accepting writes until
+// the socket buffer fills, and the client's ping queues behind that data, so
+// the publish timeout is the only signal that arrives. Measured in the latam
+// testbed: without that count a cut-off Rack moved 73 s later, past the 60 s
+// that gate 1 allows.
+func (n *NatsBus) notePublish(subject string, err error) {
+	if errors.Is(err, context.Canceled) {
+		return
+	}
+	n.noteMiss(subject, noStream(err))
+}
+
+// noteRequest counts a JetStream API request (a consumer create or lookup)
+// toward the same failover: a server cut off from its cluster answers every
+// one with 503, and an idle Rack publishes too seldom to notice it soon.
+//
+// Only an answer that says the server has no JetStream counts: a 503, or no
+// responders. A timeout does not: while the whole cluster elects after a
+// member dies every server times out, and moving the connection then gains
+// nothing and costs a reconnect each time.
+func (n *NatsBus) noteRequest(subject string, err error) {
+	n.noteMiss(subject, err != nil && noJetStream(err))
+}
+
+// noJetStream reports an answer from a server that has no JetStream to
+// offer: a 503 from the API, or no responders.
+func noJetStream(err error) bool {
+	var apiErr *jetstream.APIError
+	if errors.As(err, &apiErr) && apiErr.Code == http.StatusServiceUnavailable {
+		return true
+	}
+	return errors.Is(err, nats.ErrNoResponders)
+}
+
+// noteMiss counts a request in a row that found no stream or no JetStream,
+// and resets the count on one that did.
+func (n *NatsBus) noteMiss(subject string, miss bool) {
+	if n.failoverAfter <= 0 {
+		return
+	}
+	if !miss {
+		n.pubMisses.Store(0)
+		return
+	}
+	if n.pubMisses.Add(1) < n.failoverAfter {
+		return
+	}
+	n.pubMisses.Store(0)
+	if !n.probing.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer n.probing.Store(false)
+		n.failoverIfCutOff(subject)
+	}()
+}
+
+// defaultFailoverProbeTimeout bounds the JetStream check of a failover on a
+// bus with no operation timeout (snake.operation_timeout sets it otherwise).
+const defaultFailoverProbeTimeout = 5 * time.Second
+
+// failoverProbeInterval is the pause between two JetStream checks of a
+// failover, while it waits out a possible election.
+const failoverProbeInterval = time.Second
+
+// failoverIfCutOff moves the connection to another server unless this one
+// still reaches JetStream. A stream that elects a leader, after a NATS
+// server died, answers no publish for some seconds through every server:
+// moving then gains nothing, and costs a reconnect, across a slow link a
+// long one. A server cut off from its cluster cannot answer the JetStream
+// account info either, and the connection moves.
+//
+// While the cluster elects its metadata leader, a healthy server cannot
+// answer the account info for some seconds either. So the check is asked
+// again for a while, twice the operation timeout, which outlasts an
+// election (the raft election timeout of NATS is 4 to 9 seconds): one answer
+// keeps the connection, and only a server that never answers is left.
+func (n *NatsBus) failoverIfCutOff(subject string) {
+	server := n.conn.ConnectedUrlRedacted()
+	timeout := n.opTimeout
+	if timeout <= 0 {
+		timeout = defaultFailoverProbeTimeout
+	}
+	deadline := time.Now().Add(2 * timeout)
+	for n.js != nil && n.conn.IsConnected() {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		err := n.accountInfoBounded(ctx)
+		cancel()
+		if err == nil {
+			slog.Info("NATS Bus: no stream answered, but this server reaches JetStream; staying (a stream may be electing its leader)",
+				"server", server, "subject", subject)
+			return
+		}
+		if !time.Now().Before(deadline) {
+			break
+		}
+		time.Sleep(failoverProbeInterval) // the pause between two checks of an election
+	}
+	if !n.conn.IsConnected() {
+		return // the client is reconnecting already
+	}
+	if errRe := n.conn.ForceReconnect(); errRe != nil {
+		slog.Error("NATS Bus: failover reconnect failed", "server", server, "error", errRe)
+		return
+	}
+	slog.Warn("NATS Bus: no stream answered through this server, reconnecting to another",
+		"server", server, "subject", subject, "failed_publishes", n.failoverAfter)
+}
+
+// accountInfoBounded asks the server whether it still reaches JetStream, and
+// gives up when ctx ends. The request cannot do that by itself: when the
+// server is black-holed the request can sit in a blocked socket write, which
+// nats.go bounds by its flusher timeout of one minute, not by the request
+// context. Measured in the latam testbed: one probe iteration took 70 s and
+// the Rack moved past the 60 s that gate 1 allows.
+func (n *NatsBus) accountInfoBounded(ctx context.Context) error {
+	done := make(chan error, 1)
+	go func() {
+		_, err := n.js.AccountInfo(ctx)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 // deadLetter routes data to the DLQ when enabled and returns true if the
-// message was handed off. It logs a DLQ failure itself: the caller settles the
-// original message either way, but a dead letter that could not be written
-// must not pass unnoticed. The publish is bounded by dlqPublishTimeout and by
+// message was handed off. A DLQ failure is logged, counted (DLQFailures),
+// and reported as false so the caller Nak's for redelivery instead of
+// dropping the poison message with only a log. The publish is bounded by dlqPublishTimeout and by
 // ctx, whichever ends first. A consumer callback has no parent context before
 // it decodes the message, so its decode and validate paths pass
 // context.Background() and rely on the timeout.
@@ -229,6 +484,7 @@ func (n *NatsBus) deadLetter(ctx context.Context, originSubject string, data []b
 		timeout = defaultDLQPublishTimeout
 	}
 	if err := routeToDLQ(ctx, n.js, n.dlqSubject, originSubject, data, reason, deliveries, timeout); err != nil {
+		n.dlqFailures.Add(1)
 		slog.Error("NATS Bus: failed to route message to the dead letter queue",
 			"origin_subject", originSubject,
 			"reason", reason,
@@ -237,6 +493,28 @@ func (n *NatsBus) deadLetter(ctx context.Context, originSubject string, data []b
 		return false
 	}
 	return true
+}
+
+// settlePoison settles a message no consumer could process (undecodable,
+// invalid, or failed past redelivery). routed reports whether deadLetter
+// handed it to the DLQ. A DLQ write that failed Naks for redelivery instead
+// of dropping the message with only a log; anything else Terms it, including
+// a disabled DLQ, which keeps its documented log-and-discard. It returns
+// whether the message is settled, for the resume accounting of Subscribe.
+func (n *NatsBus) settlePoison(msg jetstream.Msg, routed bool) bool {
+	if n.dlqEnabled && !routed {
+		_ = msg.Nak()
+		return false
+	}
+	_ = msg.Term()
+	return true
+}
+
+// DLQFailures counts messages the bus could not route to the dead letter
+// queue since Connect: the poison message was Nak'd for redelivery instead of
+// dropped, so a growing count says the DLQ stream itself is unhealthy.
+func (n *NatsBus) DLQFailures() uint64 {
+	return n.dlqFailures.Load()
 }
 
 // Publish serializes the FluxMsg to CBOR bytes and sends it via JetStream.
@@ -291,6 +569,7 @@ func (n *NatsBus) Publish(ctx context.Context, subject string, msg *fluxmsg.Flux
 	msgID := fmt.Sprintf("%s-%d-%s", msg.FluxID.String(), len(msg.Path), subject)
 
 	_, err = n.js.Publish(ctx, subject, data, jetstream.WithMsgID(msgID))
+	n.notePublish(subject, err)
 	if err != nil {
 		slog.Error("NATS Bus Publish Failed", "subject", subject, "error", err)
 		if errors.Is(err, nats.ErrMaxPayload) {
@@ -298,26 +577,6 @@ func (n *NatsBus) Publish(ctx context.Context, subject string, msg *fluxmsg.Flux
 		}
 	}
 	return err
-}
-
-// Purge removes messages from the stream (Best Effort). subject, when non-empty,
-// scopes the purge to messages whose subject matches it (a wildcard such as
-// "flux.msg.rack1.>" is valid): the stream is shared by every Rack, and a blanket
-// purge with no filter wipes every other Rack's guaranteed-lane traffic along
-// with the caller's own. An empty subject purges the whole stream, unchanged from
-// before this scoping existed, for a caller that genuinely means to do that.
-func (n *NatsBus) Purge(ctx context.Context, subject string) error {
-	if n.js == nil || n.streamName == "" {
-		return nil
-	}
-	s, err := n.js.Stream(ctx, n.streamName)
-	if err != nil {
-		return nil // Stream might not exist yet
-	}
-	if subject == "" {
-		return s.Purge(ctx)
-	}
-	return s.Purge(ctx, jetstream.WithPurgeSubject(subject))
 }
 
 // PublishRaw sends pre-serialized data (CBOR) with a specific deduplication ID.
@@ -329,10 +588,66 @@ func (n *NatsBus) PublishRaw(ctx context.Context, subject string, data []byte, f
 	// Send Bytes (Persistent) with Deduplication ID
 	msgID := fmt.Sprintf("%s-%s", fluxID.String(), subject)
 	_, err := n.js.Publish(ctx, subject, data, jetstream.WithMsgID(msgID))
+	n.notePublish(subject, err)
 	if err != nil {
 		slog.Error("NATS Bus PublishRaw Failed", "subject", subject, "error", err)
 	}
 	return err
+}
+
+// PublishRawBatch implements BatchRawPublisher. The messages leave in order on
+// this one connection, so the stream stores them in order, and each carries the
+// deduplication ID that PublishRaw gives it.
+func (n *NatsBus) PublishRawBatch(ctx context.Context, subject string, msgs []RawMessage) (int, error) {
+	if n.js == nil {
+		return 0, errors.New("nats bus not connected")
+	}
+	acks := make([]jetstream.PubAckFuture, 0, len(msgs))
+	for _, m := range msgs {
+		f, err := n.js.PublishAsync(subject, m.Data, jetstream.WithMsgID(fmt.Sprintf("%s-%s", m.ID.String(), subject)))
+		if err != nil {
+			n.notePublish(subject, err)
+			slog.Error("NATS Bus PublishRawBatch Failed", "subject", subject, "sent", len(acks), "of", len(msgs), "error", err)
+			return n.awaitAcks(ctx, subject, acks, len(msgs), err)
+		}
+		acks = append(acks, f)
+	}
+	return n.awaitAcks(ctx, subject, acks, len(msgs), nil)
+}
+
+// awaitAcks waits for the acknowledgements in order, and returns how many of
+// the first ones arrived. sendErr is the error that stopped the sending, when
+// one did after the acknowledged ones. Each acknowledgement gets the full
+// timeout: one timer shared by the whole batch would let a slow link spend
+// the budget on the first messages and fail the rest, degrading healthy
+// batches into partial sends with full resends.
+func (n *NatsBus) awaitAcks(ctx context.Context, subject string, acks []jetstream.PubAckFuture, total int, sendErr error) (int, error) {
+	timeout := n.opTimeout
+	if timeout <= 0 {
+		timeout = defaultFailoverProbeTimeout
+	}
+	for i, f := range acks {
+		wait := time.NewTimer(timeout)
+		var err error
+		select {
+		case <-f.Ok():
+		case err = <-f.Err():
+		case <-wait.C:
+			err = context.DeadlineExceeded
+		case <-ctx.Done():
+			err = ctx.Err()
+		}
+		wait.Stop()
+		n.notePublish(subject, err)
+		if err != nil {
+			slog.Error("NATS Bus PublishRawBatch Failed", "subject", subject, "acknowledged", i, "of", total, "error", err)
+			return i, err
+		}
+	}
+	if sendErr != nil {
+		return len(acks), sendErr
+	}
+	return len(acks), nil
 }
 
 // Subscribe listens for messages using a JetStream Consumer.
@@ -342,40 +657,19 @@ func (n *NatsBus) Subscribe(subject string, handler Handler) (Subscription, erro
 		return nil, errors.New("nats bus not connected")
 	}
 
-	ctx := context.Background()
-
-	// 1. Create Ephemeral Pull Consumer (Standard Worker Pattern)
-	// We use a short retry loop to handle propagation latency during promotion.
+	// An ephemeral pull consumer, created with a short retry loop to handle
+	// propagation latency during promotion.
 	slog.Info("NATS Subscribe Initiated", "stream", n.streamName, "subject", subject)
 
-	var cons jetstream.Consumer
-	var err error
-	var consName string
-	for i := 0; i < n.retryAttempts; i++ {
-		consName = fmt.Sprintf("flux-sub-%s", uuid.New().String())
-		cons, err = n.js.CreateOrUpdateConsumer(ctx, n.streamName, jetstream.ConsumerConfig{
-			Name:              consName,
-			FilterSubject:     subject,
-			DeliverPolicy:     jetstream.DeliverNewPolicy,
-			AckPolicy:         jetstream.AckExplicitPolicy, // Reliable baseline
-			MaxAckPending:     10000,                       // Prevent stalls during high-TPS
-			MaxDeliver:        maxGuaranteedRedeliveries,   // Bound retries on a handler that fails every time
-			InactiveThreshold: n.inactiveThreshold,         // Autonomous server-side cleanup if client crashes
-		})
-		if err == nil {
-			break
-		}
-		time.Sleep(n.retryWait)
-	}
-
-	if err != nil {
-		return nil, fmt.Errorf("failed to create ephemeral consumer for %s: %w", subject, err)
-	}
-
-	// 2. Consume Messages
-	_, cancel := context.WithCancel(ctx)
-
-	cc, err := cons.Consume(func(msg jetstream.Msg) {
+	// The consumer is replaced if it is lost with its server (liveConsumer).
+	live := newLiveConsumer(n.js, n.noteRequest, n.streamName, "flux-sub", jetstream.ConsumerConfig{
+		FilterSubject:     subject,
+		AckPolicy:         jetstream.AckExplicitPolicy, // Reliable baseline
+		MaxAckPending:     10000,                       // Prevent stalls during high-TPS
+		AckWait:           n.ackWait,                   // A message delivered through a server that died comes again after it
+		MaxDeliver:        maxGuaranteedRedeliveries,   // Bound retries on a handler that fails every time
+		InactiveThreshold: n.inactiveThreshold,         // Autonomous server-side cleanup if client crashes
+	}, n.retryWait, n.opTimeout, func(msg jetstream.Msg) bool {
 		var fluxMsg fluxmsg.FluxMsg
 
 		if errUnmarshal := cbor.Unmarshal(msg.Data(), &fluxMsg); errUnmarshal != nil {
@@ -390,9 +684,9 @@ func (n *NatsBus) Subscribe(subject string, handler Handler) (Subscription, erro
 				"bytes", len(msg.Data()),
 				"error", errUnmarshal,
 			)
-			n.deadLetter(context.Background(), subject, msg.Data(), DLQReasonDecode, deliveryCount(msg))
-			_ = msg.Term()
-			return
+			// A DLQ write that fails must not drop the message with only a
+			// log: settlePoison Nak's it for redelivery instead of Term-ing.
+			return n.settlePoison(msg, n.deadLetter(context.Background(), subject, msg.Data(), DLQReasonDecode, deliveryCount(msg)))
 		}
 
 		// Ingress validation: a message from another Rack has never been through
@@ -404,9 +698,7 @@ func (n *NatsBus) Subscribe(subject string, handler Handler) (Subscription, erro
 				"flux_id", fluxMsg.FluxID.String(),
 				"error", errValidate,
 			)
-			n.deadLetter(context.Background(), subject, msg.Data(), DLQReasonValidate, deliveryCount(msg))
-			_ = msg.Term()
-			return
+			return n.settlePoison(msg, n.deadLetter(context.Background(), subject, msg.Data(), DLQReasonValidate, deliveryCount(msg)))
 		}
 
 		// Extract Traces (OTel)
@@ -430,9 +722,7 @@ func (n *NatsBus) Subscribe(subject string, handler Handler) (Subscription, erro
 					"deliveries", deliveries,
 					"error", errHandle,
 				)
-				n.deadLetter(ctx, subject, msg.Data(), DLQReasonRedeliveryExhausted, deliveries)
-				_ = msg.Term()
-				return
+				return n.settlePoison(msg, n.deadLetter(ctx, subject, msg.Data(), DLQReasonRedeliveryExhausted, deliveries))
 			}
 			slog.Error("NATS Bus: Handler failed, message will be redelivered",
 				"subject", subject,
@@ -440,24 +730,45 @@ func (n *NatsBus) Subscribe(subject string, handler Handler) (Subscription, erro
 				"error", errHandle,
 			)
 			_ = msg.Nak()
-			return
+			return false
 		}
 		_ = msg.Ack()
+		return true
 	})
-
-	if err != nil {
-		cancel()
-		return nil, err
+	// As many copies as the stream by default: a consumer with one lives on
+	// one Mixer, and a partition of that Mixer can make it skip messages its
+	// stale copy of the stream never had.
+	live.replicas = n.subscriptionReplicas
+	live.maxMissed = n.missedHeartbeats
+	live.keep = n.keepConsumers
+	live.busClosed = n.closed
+	if err := live.start(n.retryAttempts); err != nil {
+		return nil, fmt.Errorf("failed to create ephemeral consumer for %s: %w", subject, err)
 	}
+	return live, nil
+}
 
-	return &natsSubscription{
-		cc:         cc,
-		cancel:     cancel,
-		js:         n.js,
-		streamName: n.streamName,
-		consName:   consName,
-		isDurable:  false,
-	}, nil
+// subscriptionReplicas is the replica count of an acknowledged
+// subscription's consumer: ConsumerReplicas, or the stream's own count when
+// that is 0. A stream that cannot be read is an error, never 0: the server
+// makes an ephemeral consumer created with 0 replicas a single replica.
+func (n *NatsBus) subscriptionReplicas(ctx context.Context) (int, error) {
+	if n.consumerReplicas > 0 {
+		return n.consumerReplicas, nil
+	}
+	if r := n.streamReplicas.Load(); r > 0 {
+		return int(r), nil
+	}
+	s, err := n.js.Stream(ctx, n.streamName)
+	if err != nil {
+		return 0, fmt.Errorf("bus: read stream %s: %w", n.streamName, err)
+	}
+	r := s.CachedInfo().Config.Replicas
+	if r <= 0 {
+		return 0, fmt.Errorf("bus: stream %s reports %d replicas", n.streamName, r)
+	}
+	n.streamReplicas.Store(int32(r)) //nolint:gosec // a replica count
+	return r, nil
 }
 
 // SubscribeRaw listens for raw messages using a JetStream Consumer bound to a specific stream.
@@ -465,43 +776,23 @@ func (n *NatsBus) SubscribeRaw(subject string, streamName string, handler RawHan
 	if n.js == nil {
 		return nil, errors.New("nats bus not connected")
 	}
-
-	ctx := context.Background()
-
-	// 1. Create Ephemeral Pull Consumer
-	consName := fmt.Sprintf("flux-raw-%s", uuid.New().String())
-	cons, err := n.js.CreateOrUpdateConsumer(ctx, streamName, jetstream.ConsumerConfig{
-		Name:              consName,
+	// An ephemeral pull consumer, replaced if it is lost with its server.
+	live := newLiveConsumer(n.js, n.noteRequest, streamName, "flux-raw", jetstream.ConsumerConfig{
 		FilterSubject:     subject,
-		DeliverPolicy:     jetstream.DeliverNewPolicy,
 		AckPolicy:         jetstream.AckNonePolicy,
 		InactiveThreshold: n.inactiveThreshold, // Autonomous server-side cleanup
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to create ephemeral consumer (raw): %w", err)
-	}
-
-	// 2. Consume Messages
-	_, cancel := context.WithCancel(ctx)
-
-	cc, err := cons.Consume(func(msg jetstream.Msg) {
+	}, n.retryWait, n.opTimeout, func(msg jetstream.Msg) bool {
 		_ = msg.Ack()
 		handler(context.Background(), msg.Subject(), msg.Data())
+		return true
 	})
-
-	if err != nil {
-		cancel()
-		return nil, err
+	live.maxMissed = n.missedHeartbeats
+	live.keep = n.keepConsumers
+	live.busClosed = n.closed
+	if err := live.start(1); err != nil {
+		return nil, fmt.Errorf("failed to create ephemeral consumer (raw): %w", err)
 	}
-
-	return &natsSubscription{
-		cc:         cc,
-		cancel:     cancel,
-		js:         n.js,
-		streamName: streamName,
-		consName:   consName,
-		isDurable:  false,
-	}, nil
+	return live, nil
 }
 
 // SubscribeDurable listens for messages using a persistent consumer (durableName).
@@ -510,7 +801,25 @@ func (n *NatsBus) SubscribeDurable(subject, durableName string, handler Handler)
 		return nil, errors.New("nats bus not connected")
 	}
 
-	ctx := context.Background()
+	// The create is bounded by the operation timeout, not the caller's
+	// context: an unbounded wait here held the subscriber for as long as
+	// the cluster was unreachable.
+	timeout := n.opTimeout
+	if timeout <= 0 {
+		timeout = defaultFailoverProbeTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	// A durable consumer keeps its replica count for life, like the
+	// ephemeral ones do: one created without a count during an election
+	// would stay a single replica on one server. An unreadable stream fails
+	// the subscribe, as it does for Subscribe.
+	replicas, err := n.subscriptionReplicas(ctx)
+	n.noteRequest(subject, err)
+	if err != nil {
+		return nil, err
+	}
 
 	// 1. Create Durable Consumer
 	// DeliverAllPolicy ensures full stream delivery (or resume).
@@ -521,13 +830,18 @@ func (n *NatsBus) SubscribeDurable(subject, durableName string, handler Handler)
 		DeliverPolicy: jetstream.DeliverAllPolicy,
 		AckPolicy:     jetstream.AckExplicitPolicy,
 		MaxDeliver:    maxGuaranteedRedeliveries, // Same bound as Subscribe: a handler that fails every time must not retry forever
+		AckWait:       n.ackWait,
+		Replicas:      replicas,
 	})
+	n.noteRequest(subject, err)
 	if err != nil {
 		return nil, err
 	}
 
-	// 2. Consume Messages
-	_, cancel := context.WithCancel(ctx)
+	// 2. Consume Messages. The lifecycle context is independent of the
+	// bounded create above: cancelling that at return must not end the
+	// subscription.
+	_, stop := context.WithCancel(context.Background())
 
 	cc, err := cons.Consume(func(msg jetstream.Msg) {
 		// Deserialize
@@ -543,8 +857,7 @@ func (n *NatsBus) SubscribeDurable(subject, durableName string, handler Handler)
 				"bytes", len(msg.Data()),
 				"error", errUnmarshal,
 			)
-			n.deadLetter(context.Background(), subject, msg.Data(), DLQReasonDecode, deliveryCount(msg))
-			_ = msg.Term()
+			n.settlePoison(msg, n.deadLetter(context.Background(), subject, msg.Data(), DLQReasonDecode, deliveryCount(msg)))
 			return
 		}
 
@@ -554,8 +867,7 @@ func (n *NatsBus) SubscribeDurable(subject, durableName string, handler Handler)
 				"flux_id", fluxMsg.FluxID.String(),
 				"error", errValidate,
 			)
-			n.deadLetter(context.Background(), subject, msg.Data(), DLQReasonValidate, deliveryCount(msg))
-			_ = msg.Term()
+			n.settlePoison(msg, n.deadLetter(context.Background(), subject, msg.Data(), DLQReasonValidate, deliveryCount(msg)))
 			return
 		}
 
@@ -575,8 +887,7 @@ func (n *NatsBus) SubscribeDurable(subject, durableName string, handler Handler)
 					"deliveries", deliveries,
 					"error", errHandle,
 				)
-				n.deadLetter(ctx, subject, msg.Data(), DLQReasonRedeliveryExhausted, deliveries)
-				_ = msg.Term()
+				n.settlePoison(msg, n.deadLetter(ctx, subject, msg.Data(), DLQReasonRedeliveryExhausted, deliveries))
 				return
 			}
 			slog.Error("NATS Bus: Handler failed, message will be redelivered",
@@ -591,17 +902,18 @@ func (n *NatsBus) SubscribeDurable(subject, durableName string, handler Handler)
 	})
 
 	if err != nil {
-		cancel()
+		stop()
 		return nil, err
 	}
 
 	return &natsSubscription{
 		cc:         cc,
-		cancel:     cancel,
+		cancel:     stop,
 		js:         n.js,
 		streamName: n.streamName,
 		consName:   cons.CachedInfo().Name,
 		isDurable:  true,
+		opTimeout:  n.opTimeout,
 	}, nil
 }
 
@@ -617,6 +929,7 @@ func (n *NatsBus) JetStream() jetstream.JetStream {
 }
 
 func (n *NatsBus) Close() {
+	n.closeOnce.Do(func() { close(n.closed) })
 	if n.conn != nil {
 		// Drain ensures all buffered messages are sent before closing.
 		_ = n.conn.Drain()
@@ -632,7 +945,14 @@ type natsSubscription struct {
 	streamName string
 	consName   string
 	isDurable  bool
+	// opTimeout bounds the consumer delete on Unsubscribe; zero takes
+	// defaultUnsubscribeTimeout.
+	opTimeout time.Duration
 }
+
+// defaultUnsubscribeTimeout bounds the ephemeral consumer delete of an
+// Unsubscribe when the bus has no operation timeout.
+const defaultUnsubscribeTimeout = 2 * time.Second
 
 func (s *natsSubscription) Unsubscribe() error {
 	s.cc.Stop()
@@ -641,7 +961,11 @@ func (s *natsSubscription) Unsubscribe() error {
 	// Best effort: delete the ephemeral consumer to avoid overlap with new subscriptions
 	if !s.isDurable && s.js != nil && s.streamName != "" && s.consName != "" {
 		slog.Debug("NATS Bus Unsubscribe: Deleting ephemeral consumer", "stream", s.streamName, "consumer", s.consName)
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		timeout := s.opTimeout
+		if timeout <= 0 {
+			timeout = defaultUnsubscribeTimeout
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 		if err := s.js.DeleteConsumer(ctx, s.streamName, s.consName); err != nil {
 			// Log as warning rather than error as it might be already gone (race condition with InactiveThreshold)

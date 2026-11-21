@@ -30,6 +30,176 @@ type Store struct {
 	isMemory  bool         // true for an ephemeral :memory: store (nothing to lock across processes)
 	log       *slog.Logger // Logger for store operations
 	migrateMu sync.Mutex   // guards Migrate's version-check-then-apply sequence
+	// beforeQuery runs before a telemetry query, with the kind ("logs" or
+	// "metrics") and the time range. A shared telemetry store uses it to
+	// fetch the files of that range; an error ends the query.
+	beforeQuery func(ctx context.Context, kind string, since, until time.Time) error
+}
+
+// SetBeforeQuery sets what runs before each telemetry query.
+func (s *Store) SetBeforeQuery(fn func(ctx context.Context, kind string, since, until time.Time) error) {
+	s.beforeQuery = fn
+}
+
+// TelemetryDir is where the Parquet files of the telemetry are.
+func (s *Store) TelemetryDir() string { return filepath.Join(s.dataDir, "telemetry") }
+
+// telemetryTables maps each telemetry table to the kind its files carry.
+var telemetryTables = map[string]string{"telemetry_logs": "logs", "telemetry_spans": "spans", "telemetry_metrics": "metrics"}
+
+// FlushTelemetryBatch writes the rows of each telemetry table to a Parquet
+// file named after name, under the hour of at, and empties the tables. It
+// returns the files it wrote, by kind. The same name and hour give the same
+// path, so writing a batch again replaces its files.
+func (s *Store) FlushTelemetryBatch(ctx context.Context, name string, at time.Time) (map[string]string, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	files := map[string]string{}
+	for table, kind := range telemetryTables {
+		var count int
+		// table is a key of telemetryTables, never external input.
+		if err = tx.QueryRowContext(ctx, fmt.Sprintf("SELECT count(*) FROM %s", table)).Scan(&count); err != nil {
+			return nil, err
+		}
+		if count == 0 {
+			continue
+		}
+		dir := filepath.Join(s.dataDir, "telemetry", kind, at.UTC().Format("2006/01/02/15"))
+		if err = os.MkdirAll(dir, 0750); err != nil {
+			return nil, err
+		}
+		path := filepath.Join(dir, fmt.Sprintf("%s_%s.parquet", kind, name))
+		if _, err = tx.ExecContext(ctx, fmt.Sprintf("COPY (SELECT * FROM %s) TO ? (FORMAT 'parquet', COMPRESSION 'zstd')", table), path); err != nil {
+			return nil, err
+		}
+		if _, err = tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s", table)); err != nil {
+			return nil, err
+		}
+		files[kind] = path
+	}
+	return files, tx.Commit()
+}
+
+// ClearTelemetry empties the telemetry tables: a batch this Mixer will not
+// commit, because another Mixer took the lease and commits it.
+func (s *Store) ClearTelemetry(ctx context.Context) error {
+	for table := range telemetryTables {
+		if _, err := s.db.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s", table)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// TelemetryRows is the content of the telemetry tables, for an exporter.
+type TelemetryRows struct {
+	Logs    []LogRow
+	Metrics []MetricRow
+	Spans   []SpanRow
+}
+
+// LogRow is one row of telemetry_logs.
+type LogRow struct {
+	Timestamp                          time.Time
+	EntityID                           string
+	EntityType, EntityName             string
+	TraceID, SpanID, Severity          string
+	SourceFile, SourceFunc, Body, Attr string
+	SourceLine                         int
+}
+
+// MetricRow is one row of telemetry_metrics.
+type MetricRow struct {
+	Timestamp                     time.Time
+	EntityID, EntityName          string
+	Name, Description, Type, Unit string
+	Value                         float64
+	Attr                          string
+}
+
+// SpanRow is one row of telemetry_spans.
+type SpanRow struct {
+	Start, End                                time.Time
+	EntityID, EntityName                      string
+	TraceID, SpanID, ParentSpanID, Name, Kind string
+	StatusCode, StatusMessage, Attr           string
+}
+
+// ExportTelemetry hands the rows of the telemetry tables to export, and
+// empties the tables only when export succeeds. A failed export leaves them
+// for the next try.
+func (s *Store) ExportTelemetry(ctx context.Context, export func(TelemetryRows) error) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var rows TelemetryRows
+	str := func(v sql.NullString) string { return v.String }
+	q, err := tx.QueryContext(ctx, `SELECT timestamp, CAST(entity_id AS TEXT), entity_type, entity_name, trace_id, span_id,
+		severity, source_file, source_line, source_func, body, attributes FROM telemetry_logs`)
+	if err != nil {
+		return err
+	}
+	for q.Next() {
+		var r LogRow
+		var id, et, en, tr, sp, sev, sf, fn, body, attr sql.NullString
+		var line sql.NullInt64
+		if err = q.Scan(&r.Timestamp, &id, &et, &en, &tr, &sp, &sev, &sf, &line, &fn, &body, &attr); err != nil {
+			_ = q.Close()
+			return err
+		}
+		r.EntityID, r.EntityType, r.EntityName, r.TraceID, r.SpanID = str(id), str(et), str(en), str(tr), str(sp)
+		r.Severity, r.SourceFile, r.SourceFunc, r.Body, r.Attr, r.SourceLine = str(sev), str(sf), str(fn), str(body), str(attr), int(line.Int64)
+		rows.Logs = append(rows.Logs, r)
+	}
+	_ = q.Close()
+	if q, err = tx.QueryContext(ctx, `SELECT timestamp, CAST(entity_id AS TEXT), entity_name, name, description, type, value, unit, attributes FROM telemetry_metrics`); err != nil {
+		return err
+	}
+	for q.Next() {
+		var r MetricRow
+		var id, en, n, d, ty, u, attr sql.NullString
+		var v sql.NullFloat64
+		if err = q.Scan(&r.Timestamp, &id, &en, &n, &d, &ty, &v, &u, &attr); err != nil {
+			_ = q.Close()
+			return err
+		}
+		r.EntityID, r.EntityName, r.Name, r.Description, r.Type, r.Unit, r.Attr, r.Value = str(id), str(en), str(n), str(d), str(ty), str(u), str(attr), v.Float64
+		rows.Metrics = append(rows.Metrics, r)
+	}
+	_ = q.Close()
+	if q, err = tx.QueryContext(ctx, `SELECT start_time, end_time, CAST(entity_id AS TEXT), entity_name, trace_id, span_id, parent_span_id,
+		name, kind, status_code, status_message, attributes FROM telemetry_spans`); err != nil {
+		return err
+	}
+	for q.Next() {
+		var r SpanRow
+		var id, en, tr, sp, par, n, k, sc, sm, attr sql.NullString
+		if err = q.Scan(&r.Start, &r.End, &id, &en, &tr, &sp, &par, &n, &k, &sc, &sm, &attr); err != nil {
+			_ = q.Close()
+			return err
+		}
+		r.EntityID, r.EntityName, r.TraceID, r.SpanID, r.ParentSpanID = str(id), str(en), str(tr), str(sp), str(par)
+		r.Name, r.Kind, r.StatusCode, r.StatusMessage, r.Attr = str(n), str(k), str(sc), str(sm), str(attr)
+		rows.Spans = append(rows.Spans, r)
+	}
+	_ = q.Close()
+	if len(rows.Logs)+len(rows.Metrics)+len(rows.Spans) == 0 {
+		return nil
+	}
+	if err = export(rows); err != nil {
+		return err
+	}
+	for table := range telemetryTables {
+		if _, err = tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s", table)); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // NewStore opens a DuckDB database file.
@@ -38,7 +208,15 @@ func NewStore(log *slog.Logger, path string) (*Store, error) {
 	if dsn == "" {
 		dsn = ":memory:"
 	}
-	db, err := sql.Open("duckdb", dsn)
+	// Telemetry times are stored as TIMESTAMP, without a zone, and to_timestamp
+	// turns them into the session's zone first. In UTC they are UTC whatever
+	// the zone of the host, which is what every query and export compares
+	// them to.
+	sep := "?"
+	if strings.Contains(dsn, "?") {
+		sep = "&"
+	}
+	db, err := sql.Open("duckdb", dsn+sep+"TimeZone=UTC")
 	if err != nil {
 		return nil, fmt.Errorf("failed to open duckdb: %w", err)
 	}
@@ -49,7 +227,7 @@ func NewStore(log *slog.Logger, path string) (*Store, error) {
 	if path != "" && path != ":memory:" {
 		dataDir = filepath.Dir(path)
 	}
-	return &Store{db: db, dataDir: dataDir, isMemory: dsn == ":memory:", log: log.With("component", "STORE")}, nil
+	return &Store{db: db, dataDir: dataDir, isMemory: strings.HasPrefix(dsn, ":memory:"), log: log.With("component", "STORE")}, nil
 }
 
 func (s *Store) Close() error {
@@ -317,6 +495,11 @@ func (s *Store) QueryLogsFiltered(ctx context.Context, q LogQuery) ([]TelemetryL
 	if q.Since.IsZero() {
 		q.Since = time.Now().Add(-24 * time.Hour)
 	}
+	if s.beforeQuery != nil {
+		if err := s.beforeQuery(ctx, "logs", q.Since, q.Until); err != nil {
+			return nil, err
+		}
+	}
 
 	// 1. Determine if we have Parquet files to include
 	logsDir := filepath.Join(s.dataDir, "telemetry", "logs")
@@ -385,6 +568,11 @@ func (s *Store) QueryLogsFiltered(ctx context.Context, q LogQuery) ([]TelemetryL
 func (s *Store) QueryMetricsFiltered(ctx context.Context, q MetricQuery) ([]TelemetryMetric, error) {
 	if q.Since.IsZero() {
 		q.Since = time.Now().Add(-24 * time.Hour)
+	}
+	if s.beforeQuery != nil {
+		if err := s.beforeQuery(ctx, "metrics", q.Since, q.Until); err != nil {
+			return nil, err
+		}
 	}
 
 	// 1. Determine if we have Parquet files to include

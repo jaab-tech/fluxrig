@@ -25,7 +25,15 @@ on:
     # any merge activity that would contend for ports or memory.
     - cron: '0 3 * * *'
   # A red nightly is investigated by re-running it by hand against a branch.
+  # `jobs` runs one of them alone: a run of the HA testbed on a branch must
+  # not take the self-hosted runner for the full regression.
   workflow_dispatch:
+    inputs:
+      jobs:
+        description: "Which jobs to run"
+        type: choice
+        options: [all, regression, ha]
+        default: all
 
 # The duckdb CLI release the nightly installs. It tracks the DuckDB engine that
 # go.mod's duckdb-go driver embeds (v2.10506.0 is DuckDB v1.5.6), so the CLI
@@ -41,6 +49,7 @@ env:
 
 jobs:
   regression:
+    if: github.event_name != 'workflow_dispatch' || inputs.jobs == 'all' || inputs.jobs == 'regression'
     runs-on: [self-hosted, oci-int]
     steps:
       # No ref: a scheduled run checks out the default branch, which is the
@@ -138,3 +147,42 @@ jobs:
           path: /tmp/fluxrig/consolidated_logs_*
           retention-days: 14
           if-no-files-found: ignore
+
+  # The Mixer HA testbed: three stock NATS servers, three Mixers and two
+  # Racks in Docker, at the cross-site latency profile, with TLS, client
+  # certificates and a NATS user for each Rack (make test-ha). It needs
+  # Docker with NET_ADMIN and sch_netem, so it runs on a hosted runner, not
+  # the shared self-hosted one. The results directory holds every
+  # container's log and is kept whether the run passes or fails.
+  ha:
+    if: github.event_name != 'workflow_dispatch' || inputs.jobs == 'all' || inputs.jobs == 'ha'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.26"
+          cache: true
+      - name: HA testbed
+        run: RESULTS="$RUNNER_TEMP/ha-results" make test-ha
+      - name: Keep the results
+        if: success() || failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ha-testbed-results
+          path: ${{ runner.temp }}/ha-results
+          retention-days: 14
+      # The NATS chaos testbed (make test-ha-failover): the same runner and
+      # Docker, a smaller round count so both fit the timeout. Results are
+      # kept next to the Mixer ones.
+      - name: HA failover testbed
+        run: RESULTS="$RUNNER_TEMP/ha-failover-results" SCENARIOS="baseline partition" ROUNDS=5 make test-ha-failover
+      - name: Keep the failover results
+        if: success() || failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ha-failover-results
+          path: ${{ runner.temp }}/ha-failover-results
+          retention-days: 14

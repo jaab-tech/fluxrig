@@ -38,6 +38,10 @@ const (
 	// redeliverDelay spaces the retries of a failed event, so a short failure
 	// does not spend all of max_deliver at once.
 	redeliverDelay = time.Second
+	// defaultReaderOpenTimeout bounds one Open when the config leaves
+	// OpenTimeout unset: creating the consumer is a network wait and must
+	// not hold the caller (or the reader lock) forever.
+	defaultReaderOpenTimeout = 30 * time.Second
 )
 
 // ErrNotConnected reports a reader with no usable connection. Open it again
@@ -56,10 +60,21 @@ type ReaderConfig struct {
 	On []string
 	// MaxEventAge drops an event older than this, by its ts.
 	MaxEventAge time.Duration
+	// AckWait is how long the consumer waits for an event's acknowledgement
+	// before it delivers the event again: an event sent through a NATS server
+	// that died comes back after it. It must be below MaxEventAge, or the
+	// event comes back too old to deliver; zero, or one that is not below,
+	// takes MaxEventAge.
+	AckWait time.Duration
 	// MaxDeliver bounds the deliveries of an event that fails.
 	MaxDeliver int
 	// InactiveAfter deletes a consumer with no reader for this long.
 	InactiveAfter time.Duration
+	// OpenTimeout bounds one Open: the consumer create and the consume start.
+	// Zero or less takes defaultReaderOpenTimeout. Without a bound an Open
+	// against an unreachable cluster waits on the caller's context, which is
+	// often Background and never ends.
+	OpenTimeout time.Duration
 	// Logger is the reader's logger.
 	Logger *slog.Logger
 }
@@ -92,12 +107,23 @@ type Reader struct {
 	cfg ReaderConfig
 
 	mu      sync.Mutex
+	gen     uint64 // bumped by Close: an Open racing it drops its consumer
 	conn    *nats.Conn
 	cons    jetstream.Consumer
 	cc      jetstream.ConsumeContext
 	msgs    chan jetstream.Msg
 	stopped chan struct{}
 	broken  chan struct{}
+}
+
+// ackWait is AckWait when it leaves room for a redelivery inside the age of
+// an event, and MaxEventAge otherwise: an event not settled inside its age
+// is too old to deliver again.
+func (r *Reader) ackWait() time.Duration {
+	if r.cfg.AckWait > 0 && r.cfg.AckWait < r.cfg.MaxEventAge {
+		return r.cfg.AckWait
+	}
+	return r.cfg.MaxEventAge
 }
 
 // NewReader creates a Reader and applies the defaults. It does not connect.
@@ -118,33 +144,47 @@ func NewReader(cfg ReaderConfig) *Reader {
 }
 
 // Open creates or finds the durable consumer and starts to read. It returns
-// ErrNotConnected while there is no connection.
+// ErrNotConnected while there is no connection, or when Close runs while it
+// is opening.
 //
 // A new consumer starts at the beginning of the stream. An event published
 // before the reader opened is then not lost, and what is too old is dropped by
 // its age.
+//
+// The consumer create runs without holding the reader lock, so a stalled
+// Open does not block Close; the new consumer is installed with a
+// compare-and-swap at the end, and dropped when another Open won or Close
+// ran meanwhile. The wait is bounded by OpenTimeout, not just the caller's
+// context.
 func (r *Reader) Open(ctx context.Context) error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if r.cc != nil {
+		r.mu.Unlock()
 		return nil
 	}
+	gen := r.gen
+	r.mu.Unlock()
 
 	nc := r.cfg.Conn()
 	if nc == nil || !nc.IsConnected() {
 		return ErrNotConnected
 	}
+	timeout := r.cfg.OpenTimeout
+	if timeout <= 0 {
+		timeout = defaultReaderOpenTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	js, err := jetstream.New(nc)
 	if err != nil {
 		return fmt.Errorf("events: open jetstream: %w", err)
 	}
 	cons, err := js.CreateOrUpdateConsumer(ctx, StreamName, jetstream.ConsumerConfig{
-		Durable:       r.cfg.Durable,
-		FilterSubject: r.cfg.Subject,
-		DeliverPolicy: jetstream.DeliverAllPolicy,
-		AckPolicy:     jetstream.AckExplicitPolicy,
-		// An event not settled inside its age is too old to deliver again.
-		AckWait:           r.cfg.MaxEventAge,
+		Durable:           r.cfg.Durable,
+		FilterSubject:     r.cfg.Subject,
+		DeliverPolicy:     jetstream.DeliverAllPolicy,
+		AckPolicy:         jetstream.AckExplicitPolicy,
+		AckWait:           r.ackWait(),
 		MaxDeliver:        r.cfg.MaxDeliver,
 		InactiveThreshold: r.cfg.InactiveAfter,
 	})
@@ -161,14 +201,36 @@ func (r *Reader) Open(ctx context.Context) error {
 		case msgs <- m:
 		case <-stopped:
 		}
-	}, jetstream.PullMaxMessages(readerBatch), jetstream.ConsumeErrHandler(func(_ jetstream.ConsumeContext, err error) {
-		if errors.Is(err, jetstream.ErrConsumerDeleted) {
-			once.Do(func() { close(broken) })
-		}
-		r.cfg.Logger.Debug("event reader", "durable", r.cfg.Durable, "error", err)
-	}))
+	}, jetstream.PullMaxMessages(readerBatch),
+		// A pull waits at the server that leads the consumer. When that server
+		// dies, the new leader does not know the pull, and the reader gets
+		// nothing until it misses two heartbeats and pulls again. At the
+		// defaults (half of a 30s expiry) that took as long as max_event_age,
+		// and every event it held arrived too old. The heartbeat is half the
+		// ack wait, so a lost pull is noticed before a redelivery is due.
+		jetstream.PullHeartbeat(r.ackWait()/2), jetstream.PullExpiry(2*r.ackWait()),
+		jetstream.ConsumeErrHandler(func(_ jetstream.ConsumeContext, err error) {
+			if errors.Is(err, jetstream.ErrConsumerDeleted) {
+				once.Do(func() { close(broken) })
+			}
+			r.cfg.Logger.Debug("event reader", "durable", r.cfg.Durable, "error", err)
+		}))
 	if err != nil {
 		return fmt.Errorf("events: consume %s: %w", r.cfg.Durable, err)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.cc != nil {
+		// Another Open installed a consumer meanwhile: drop ours, the
+		// reader is open already.
+		cc.Stop()
+		return nil
+	}
+	if gen != r.gen {
+		// Close ran while opening: keep it closed, drop ours. The durable
+		// consumer stays on the server for the next Open.
+		cc.Stop()
+		return ErrNotConnected
 	}
 	r.conn, r.cons, r.cc, r.msgs, r.stopped, r.broken = nc, cons, cc, msgs, stopped, broken
 	return nil
@@ -261,6 +323,7 @@ func (r *Reader) accept(m jetstream.Msg) *Delivery {
 func (r *Reader) Close() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.gen++
 	if r.cc == nil {
 		return
 	}

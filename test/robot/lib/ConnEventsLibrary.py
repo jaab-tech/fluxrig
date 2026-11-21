@@ -5,8 +5,10 @@
 connection events suite. Neither one sends anything: the point of the suite is
 that a frame arrives first."""
 
+import re
 import socket
 import struct
+import time
 
 
 class ConnEventsLibrary:
@@ -15,6 +17,21 @@ class ConnEventsLibrary:
     def __init__(self):
         self._socks = {}
         self._listener = None
+
+    def bound_port(self, log_file, timeout=30):
+        """Return the port that a server gear bound, from the Rack log. A scenario
+        that runs on two Racks of one host binds port 0 on each."""
+        deadline = time.monotonic() + float(timeout)
+        while time.monotonic() < deadline:
+            try:
+                with open(log_file, encoding="utf-8", errors="replace") as log:
+                    ports = re.findall(r"bound=\S*:(\d+)", log.read())
+            except FileNotFoundError:
+                ports = []
+            if ports:
+                return int(ports[-1])
+            time.sleep(0.1)
+        raise AssertionError(f"no bound port in {log_file} in {timeout}s")
 
     def connect_terminal(self, port, alias="terminal"):
         """Connect to a port and keep the connection under alias."""

@@ -4,6 +4,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -319,4 +320,11 @@ func TestTheHistoryOfAnUnknownSpecIsNotFound(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "nope") {
 		t.Error("the refusal does not name what was asked for")
 	}
+}
+
+func postSpec(t *testing.T, s *Server, target string, body []byte) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	s.handleSpecUpload(rec, httptest.NewRequest(http.MethodPost, target, bytes.NewReader(body)))
+	return rec
 }

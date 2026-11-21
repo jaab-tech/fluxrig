@@ -3,6 +3,11 @@
 
 package config
 
+import (
+	"fmt"
+	"time"
+)
+
 // BaseConfig defines foundational identity and persistence paths.
 type BaseConfig struct {
 	Name      string `koanf:"name" example:"node-01"`
@@ -39,6 +44,18 @@ type StoreConfig struct {
 	ClusterKeyFile string `koanf:"cluster_key_file" example:"cluster.key"`
 }
 
+// The client pings of NATS: a server that went silent is noticed within
+// about DefaultPingInterval times DefaultMaxPingsOut. The NATS client
+// defaults (2m, 2) took minutes, while every request timed out.
+const (
+	DefaultPingInterval = "5s"
+	DefaultMaxPingsOut  = 3
+	// DefaultAckWait is how long a consumer waits for the acknowledgement of
+	// a message before it delivers the message again. The JetStream default
+	// is 30s.
+	DefaultAckWait = "10s"
+)
+
 // SnakeConfig configures the NATS/JetStream connection (The Snake).
 type SnakeConfig struct {
 	URL    string `koanf:"url" example:"nats://localhost:4222"`
@@ -48,6 +65,40 @@ type SnakeConfig struct {
 	// also what a client uses to reach a domain-scoped server.
 	ClusterName string `koanf:"cluster_name" example:"flux"`
 	StreamName  string `koanf:"stream_name" example:"flux-msg"`
+	// Replicas is how many copies of every stream and bucket the Mixer
+	// provisions. The embedded server runs alone and holds one, so more than
+	// 1 needs snake.external, on a NATS cluster with at least that many servers.
+	Replicas int `koanf:"replicas" example:"1"`
+	// External means that url names a NATS cluster the operator runs. A Mixer
+	// starts no embedded server, and several Mixers on one cluster give HA. A
+	// client verifies the host of the URL and not the domain, on a Mixer and on
+	// a Rack.
+	External bool `koanf:"external" example:"false"`
+	// ClientCertFile and ClientKeyFile are the certificate this client presents
+	// to NATS. CredentialsFile is a NATS credentials file, with the permissions
+	// of this client.
+	ClientCertFile  string `koanf:"client_cert_file"`
+	ClientKeyFile   string `koanf:"client_key_file"`
+	CredentialsFile string `koanf:"credentials_file"`
+	// PingInterval and MaxPingsOut decide how fast a client of NATS, a Mixer
+	// or a Rack, notices a server that went silent: after MaxPingsOut
+	// unanswered pings sent PingInterval apart it reconnects to another
+	// server. A server that dies without closing its connections (a crash, a
+	// cut link) is noticed only so, and until then every request on the
+	// connection times out.
+	PingInterval string `koanf:"ping_interval" example:"5s"`
+	MaxPingsOut  int    `koanf:"max_pings_out" example:"3"`
+	// AckWait is how long a consumer of the guaranteed lane, and a durable
+	// one, waits for a message's acknowledgement before it delivers it again.
+	// A message sent through a NATS server that died arrives that late. It
+	// must be longer than OperationTimeout, which bounds the processing of a
+	// message by a gear: shorter, a slow gear gets each message twice.
+	AckWait string `koanf:"ack_wait" example:"10s"`
+	// FormTimeout is how long a Mixer on an external NATS waits for it to
+	// answer, and for a replicated stream to become placeable, before it gives
+	// up starting. Generous by default: an operator restarting a NATS cluster
+	// brings its servers up one after another.
+	FormTimeout string `koanf:"form_timeout" example:"2m"`
 	// StoreDir overrides where the embedded Snake keeps its JetStream store.
 	// Empty keeps the default: a "snake" directory under store.dir.
 	StoreDir                  string   `koanf:"store_dir" example:"./data/snake"`
@@ -107,6 +158,23 @@ type SnakeConfig struct {
 	// Mixer-side only.
 	EventsMaxAge   string `koanf:"events_max_age" example:"1h"`
 	EventsMaxBytes int64  `koanf:"events_max_bytes" example:"268435456"`
+	// FailoverAfter is how many JetStream publishes in a row may find no
+	// stream (a timeout or no responders) before a Rack drops its Mixer and
+	// reconnects to another one in snake.url. A Mixer cut off from its cluster
+	// keeps the Rack's connection open while every publish through it fails.
+	// 0 disables it. Rack-side only.
+	FailoverAfter int `koanf:"failover_after" example:"2"`
+	// ConsumerReplicas is the replica count of the consumer behind each
+	// acknowledged subscription (a guaranteed-lane wire, a scenario push).
+	// 0 takes the stream's replica count, so in a cluster the consumer
+	// survives the loss or the partition of a Mixer. 1 keeps one replica,
+	// lighter on the Mixers. Rack-side only.
+	ConsumerReplicas int `koanf:"consumer_replicas" example:"0"`
+	// ConsumerMissedHeartbeats is how many heartbeats in a row the consumer
+	// of a subscription may miss before the Rack replaces it, while the
+	// cluster still lists it or cannot answer. A heartbeat is due every
+	// operation_timeout. Rack-side only.
+	ConsumerMissedHeartbeats int `koanf:"consumer_missed_heartbeats" example:"2"`
 }
 
 // TelemetryConfig configures self-reporting metrics and logs.
@@ -126,4 +194,29 @@ type MetricsConfig struct {
 	HostEnabled    bool `koanf:"host_enabled"`
 	RuntimeEnabled bool `koanf:"runtime_enabled"`
 	BentoEnabled   bool `koanf:"bento_enabled"`
+}
+
+// validatePings refuses ping settings that would leave the client on the
+// NATS client defaults, which take minutes to notice a silent server.
+func (s SnakeConfig) validatePings() error {
+	if d, err := time.ParseDuration(s.PingInterval); err != nil || d <= 0 {
+		return fmt.Errorf("snake.ping_interval must be a positive duration, got %q", s.PingInterval)
+	}
+	if s.MaxPingsOut < 1 {
+		return fmt.Errorf("snake.max_pings_out must be at least 1, got %d", s.MaxPingsOut)
+	}
+	return nil
+}
+
+// validateAckWait refuses an ack wait that is not longer than the processing
+// of one message, which would deliver every slow message again.
+func (s SnakeConfig) validateAckWait() error {
+	wait, err := time.ParseDuration(s.AckWait)
+	if err != nil || wait <= 0 {
+		return fmt.Errorf("snake.ack_wait must be a positive duration, got %q", s.AckWait)
+	}
+	if op, err := time.ParseDuration(s.OperationTimeout); err == nil && wait <= op {
+		return fmt.Errorf("snake.ack_wait (%s) must be longer than snake.operation_timeout (%s), which bounds the processing of one message", s.AckWait, s.OperationTimeout)
+	}
+	return nil
 }

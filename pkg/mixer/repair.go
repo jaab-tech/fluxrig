@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/jaab-tech/fluxrig/pkg/config"
@@ -126,6 +125,10 @@ func expectedStreams(cfg *config.MixerConfig) []snake.ExpectedStream {
 // an identity: a repair runs against the existing store, read-only on who the
 // Mixer is.
 func Repair(ctx context.Context, cfg *config.MixerConfig, log *slog.Logger, force bool) int {
+	if cfg.Snake.External {
+		fmt.Println("repair works on the embedded store. An external NATS belongs to its operator: use the NATS tools.")
+		return RepairFailed
+	}
 	// Identity is loaded, never generated. A repair on a store whose key is
 	// missing fails here with the same actionable error a normal boot gives,
 	// instead of silently re-rooting authority mid-repair.
@@ -169,7 +172,7 @@ func Repair(ctx context.Context, cfg *config.MixerConfig, log *slog.Logger, forc
 	}
 	defer srv.Shutdown()
 
-	nc, err := nats.Connect(srv.ClientURL())
+	nc, err := srv.InProcessConn()
 	if err != nil {
 		log.Error("repair cannot connect to the embedded server", "error", err)
 		return RepairFailed

@@ -5,6 +5,7 @@ package fluxmsg
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/fxamacker/cbor/v2"
 	"github.com/google/uuid"
@@ -19,6 +20,35 @@ const (
 	SubjectScenarioPrefix = "flux.rack."
 	SubjectScenarioSuffix = ".scenario"
 )
+
+// SubjectToken makes a name one NATS subject token: letters, digits, "-" and
+// "_", with anything else replaced by "_" and the ends trimmed. The Mixer and
+// the Rack build the subjects of a Rack from its name with it, so both arrive
+// at the same subject, and neither a separator nor a wildcard survives.
+func SubjectToken(name string) string {
+	safe := strings.ReplaceAll(name, "..", "")
+	safe = strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			return r
+		default:
+			return '_'
+		}
+	}, safe)
+	safe = strings.Trim(safe, "_-")
+	if safe == "" {
+		safe = "unnamed"
+	}
+	return safe
+}
+
+// NotifySubject is where the Mixer sends a Rack its status, commands and
+// passport. The Rack's name comes first, so a NATS that limits each Rack to
+// its own subjects can keep a Rack from reading another Rack's passport, which
+// carries that Rack's secret.
+func NotifySubject(rack string, machineID uuid.UUID) string {
+	return fmt.Sprintf("flux.agent.notify.%s.%s", SubjectToken(rack), machineID)
+}
 
 // HelloPayload is sent by the Rack Agent on startup.
 type HelloPayload struct {
@@ -144,6 +174,13 @@ type ScenarioPayload struct {
 	MachineID uuid.UUID `cbor:"machine_id"` // Target machine ID
 	Scenario  []byte    `cbor:"scenario"`   // YAML-encoded scenario (projected for this rack)
 	Timestamp int64     `cbor:"timestamp"`  // Unix timestamp
+
+	// Reapply is set by an activation, and not by the push a Rack gets when
+	// it connects. A Rack applies such a scenario even when its gears
+	// already run it, which restarts them: that is how an operator restarts
+	// a gear that stopped. A Rack applies one activation once, however
+	// often the push is delivered (Timestamp tells them apart).
+	Reapply bool `cbor:"reapply,omitempty"`
 
 	// Specs are the spec artefacts this scenario names, carried with it.
 	//

@@ -58,6 +58,15 @@ type TelemetrySink struct {
 	stopOnce      sync.Once
 	flushInterval time.Duration
 	cache         *telemetry.MetricsCache
+	// cacheOnly keeps the live metrics of the cache and stores nothing: with
+	// a shared telemetry store, every Mixer serves live stats, and only the
+	// lease holder writes (SharedSink).
+	cacheOnly bool
+}
+
+// NewCacheSink returns a sink that only feeds the live metrics cache.
+func NewCacheSink(b bus.Bus, subject string, cache *telemetry.MetricsCache) *TelemetrySink {
+	return &TelemetrySink{bus: b, subject: subject, cache: cache, cacheOnly: true, stopCh: make(chan struct{})}
 }
 
 func NewTelemetrySink(b bus.Bus, s *duckdb.Store, subject, dataDir string, interval time.Duration, cache *telemetry.MetricsCache) *TelemetrySink {
@@ -82,7 +91,10 @@ func (s *TelemetrySink) Start(ctx context.Context) error {
 		return err
 	}
 	s.sub = sub
-	slog.Info("Telemetry Sink Started", "subject", s.subject)
+	slog.Info("Telemetry Sink Started", "subject", s.subject, "stores", !s.cacheOnly)
+	if s.cacheOnly {
+		return nil
+	}
 
 	// 2. Start Background Flusher
 	go func() {
@@ -133,6 +145,9 @@ func (s *TelemetrySink) Stop() error {
 				err = errUnsub
 			}
 		}
+		if s.cacheOnly {
+			return
+		}
 
 		flushCtx, cancel := context.WithTimeout(context.Background(), s.flushInterval)
 		defer cancel()
@@ -151,6 +166,9 @@ func (s *TelemetrySink) Stop() error {
 
 func (s *TelemetrySink) handleMessage(ctx context.Context, msg *fluxmsg.FluxMsg) error {
 	msgType := msg.Metadata["type"]
+	if s.cacheOnly && msgType != TypeMetric && msgType != TypeBatchMetrics {
+		return nil
+	}
 
 	var err error
 	switch msgType {
@@ -428,10 +446,12 @@ func (s *TelemetrySink) persistMetrics(msg *fluxmsg.FluxMsg) error {
 			continue
 		}
 
-		if _, errExec := s.store.DB().Exec(queryInsertMetric, ts, eID, eName, str("name"), str("description"), str("unit"), str("type"), valFloat, string(attrJSON)); errExec != nil {
-			slog.Error("Failed to insert metric", "error", errExec, "name", str("name"))
-			failed++
-			continue
+		if !s.cacheOnly {
+			if _, errExec := s.store.DB().Exec(queryInsertMetric, ts, eID, eName, str("name"), str("description"), str("unit"), str("type"), valFloat, string(attrJSON)); errExec != nil {
+				slog.Error("Failed to insert metric", "error", errExec, "name", str("name"))
+				failed++
+				continue
+			}
 		}
 		if s.cache != nil {
 			s.cache.SetGauge(eID, str("name"), valFloat, eName, "")

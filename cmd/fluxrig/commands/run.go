@@ -40,8 +40,24 @@ import (
 	"github.com/jaab-tech/fluxrig/pkg/version"
 )
 
+// transientBusError reports a failure that passes once the cluster settles:
+// it is electing a leader or still forming, no Mixer has provisioned the
+// streams yet, or the connection moved to another server under the request.
+// A session that meets one starts again rather than going on without what it
+// failed to set up.
+func transientBusError(err error) bool {
+	return bus.Unavailable(err) || bus.NotProvisioned(err) || bus.Disconnected(err)
+}
+
 // ErrReconnect indicates the agent needs to restart its session (e.g. identity change)
 var ErrReconnect = fmt.Errorf("reconnect needed")
+
+// pingInterval is snake.ping_interval, validated at load; zero keeps the
+// client default.
+func pingInterval(cfg config.SnakeConfig) time.Duration {
+	d, _ := time.ParseDuration(cfg.PingInterval)
+	return d
+}
 
 // sanitizeSubjectToken restricts a token used to build a NATS subject to
 // alphanumeric, hyphen and underscore, matching pkg/controller's own
@@ -50,22 +66,7 @@ var ErrReconnect = fmt.Errorf("reconnect needed")
 // echoes back in the enrollment reply topic; this Rack must compute the
 // identical string to ever subscribe to the right one.
 func sanitizeSubjectToken(s string) string {
-	safeName := strings.ReplaceAll(s, "..", "")
-	safeName = strings.ReplaceAll(safeName, "/", "_")
-	safeName = strings.ReplaceAll(safeName, "\\", "_")
-	safeName = strings.Map(func(r rune) rune {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
-			return r
-		default:
-			return '_'
-		}
-	}, safeName)
-	safeName = strings.Trim(safeName, "_-")
-	if safeName == "" {
-		safeName = "unnamed"
-	}
-	return safeName
+	return fluxmsg.SubjectToken(s)
 }
 
 // gracefulDrain drains all gears within a bounded deadline before the deferred
@@ -146,17 +147,27 @@ func RunAgent(cfg *config.RackConfig, logger *slog.Logger, logBuffer *telemetry.
 // not, so an operator relying on insecure_skip_verify (self-signed certs,
 // no distributed CA file) got a Rack that connected fine but had telemetry
 // silently fail its TLS handshake.
-func telemetryConnectOptions(cfg *config.RackConfig, clientName string, connectTimeout, reconnectWait, inactiveThreshold, initialRetryWait time.Duration, initialRetryAttempts int) bus.ConnectOptions {
+func telemetryConnectOptions(cfg *config.RackConfig, clientName string, connectTimeout, reconnectWait, inactiveThreshold, initialRetryWait time.Duration, initialRetryAttempts int, opTimeout time.Duration) bus.ConnectOptions {
 	return bus.ConnectOptions{
 		Name:                 clientName + "-telemetry",
 		ConnectTimeout:       connectTimeout,
 		ReconnectWait:        reconnectWait,
+		OperationTimeout:     opTimeout,
 		Domain:               cfg.Snake.Domain,
 		InactiveThreshold:    inactiveThreshold,
+		KeepConsumers:        cfg.Snake.External,
 		InitialRetryWait:     initialRetryWait,
 		InitialRetryAttempts: initialRetryAttempts,
 		RootCA:               cfg.Snake.RootCAFile,
+		ClientCert:           cfg.Snake.ClientCertFile,
+		ClientKey:            cfg.Snake.ClientKeyFile,
+		Credentials:          cfg.Snake.CredentialsFile,
+		InboxPrefix:          bus.RackInboxPrefix(clientName),
+		PingInterval:         pingInterval(cfg.Snake),
+		MaxPingsOut:          cfg.Snake.MaxPingsOut,
+		External:             cfg.Snake.External,
 		InsecureSkipVerify:   cfg.Snake.InsecureSkipVerify,
+		FailoverAfter:        cfg.Snake.FailoverAfter,
 	}
 }
 
@@ -231,9 +242,18 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 		SubscriptionRetryWait:     subRetryWait,
 		SubscriptionRetryAttempts: cfg.Snake.SubscriptionRetryAttempts,
 		InactiveThreshold:         inactiveThreshold,
+		KeepConsumers:             cfg.Snake.External,
 		InitialRetryWait:          initialRetryWait,
 		InitialRetryAttempts:      initialRetryAttempts,
 		RootCA:                    cfg.Snake.RootCAFile,
+		ClientCert:                cfg.Snake.ClientCertFile,
+		ClientKey:                 cfg.Snake.ClientKeyFile,
+		Credentials:               cfg.Snake.CredentialsFile,
+		InboxPrefix:               bus.RackInboxPrefix(helloName),
+		PingInterval:              pingInterval(cfg.Snake),
+		MaxPingsOut:               cfg.Snake.MaxPingsOut,
+		AckWait:                   limits.ackWait,
+		External:                  cfg.Snake.External,
 		InsecureSkipVerify:        cfg.Snake.InsecureSkipVerify,
 		// A SIGTERM/SIGINT during the initial connect retry is observed
 		// between attempts instead of only after the whole retry budget
@@ -243,6 +263,9 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 	opts.DLQEnabled = cfg.Snake.DLQEnabled
 	opts.DLQSubject = cfg.Snake.DLQSubject
 	opts.DLQPublishTimeout = limits.dlqPublish
+	opts.FailoverAfter = cfg.Snake.FailoverAfter
+	opts.ConsumerReplicas = cfg.Snake.ConsumerReplicas
+	opts.ConsumerMissedHeartbeats = cfg.Snake.ConsumerMissedHeartbeats
 	opts.InitialRetryTimeout = offlineStartBound(cfg.Rack.MachineID, offlineStartTimeout)
 	natsBus := bus.NewNatsBus(cfg.Snake.StreamName)
 	busConnected := false
@@ -331,6 +354,7 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 		logger.Info("Initializing Runtime Manager", "id", nodeID, "name", nodeName)
 		rtManager = rt.NewManager(nodeID, nodeName, managedBus, nodeGen, specMgr, opTimeout, convTimeout, handshakeInterval, cfg.Logging.Trace, cfg.Logging.Debug, pubKey)
 		rtManager.SetLaneConfig(cfg.Rack.LaneQueueSize, laneSendTimeout)
+		rtManager.SetEventAckWait(limits.ackWait)
 		_ = rtManager.SetOutboxConfig(cfg.Rack.OutboxMaxMessages, cfg.Rack.OutboxDrainRetries, cfg.Rack.OutboxOrder) // order validated at startup
 		rtManager.SetOutboxBackpressure(limits.outboxBackpressure)
 	}
@@ -401,6 +425,14 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 			return nil
 		})
 		if errSub != nil {
+			if transientBusError(errSub) {
+				// The cluster is electing a leader or still forming, no Mixer
+				// has provisioned the streams yet, or the connection moved to
+				// another server under the request. Start the session again
+				// rather than ending the Rack process.
+				logger.Warn("Failed to subscribe to enrollment; JetStream or its streams are not available yet, starting the session again", "error", errSub)
+				return ErrReconnect
+			}
 			logger.Error("Failed to subscribe to enrollment", "error", errSub)
 			return errSub
 		}
@@ -427,15 +459,13 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 			case <-ctx.Done():
 				return ctx.Err()
 			case <-enrollDeadline:
-				if cfg.Rack.MachineID == uuid.Nil {
-					logger.Warn("Enrollment Timeout. No Passport received.")
-					// NOTE: In deferred adoption mode, we no longer initialize telemetry for pending fallbacks.
-					// The Rack remains silent until officially adopted.
-					fallbackName := cfg.Base.Name
-					if fallbackName == "" {
-						fallbackName = "pending"
-					}
-					logger.Info("Rack enrollment timed out. Waiting for manual adoption.", "name", fallbackName)
+				if waitsForPassport(cfg.Rack.MachineID) {
+					// The deadline fires once; from here Hello goes out at the
+					// heartbeat interval until a Passport arrives.
+					logger.Warn("Enrollment Timeout. No Passport received. Hello is sent again at each heartbeat.",
+						"name", hello.Name, "heartbeat", hbInterval)
+					enrollTicker.Reset(hbInterval)
+					continue enrollLoop
 				} else {
 					logger.Info("Resuming Session (Offline/Timeout)", "id", cfg.Rack.MachineID)
 					// Resuming from saved passport - init telemetry with saved identity
@@ -454,7 +484,7 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 						Store:               cfg.Store,
 						Throttling:          cfg.Logging.Throttling,
 						StdoutEnabled:       true,
-						StdoutLevel:         "info",
+						StdoutLevel:         logLevel(cfg),
 						Metrics: telemetry.MetricsConfig{
 							HostEnabled:    cfg.Telemetry.Metrics.HostEnabled,
 							RuntimeEnabled: cfg.Telemetry.Metrics.RuntimeEnabled,
@@ -472,6 +502,7 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 							if !adopted {
 								rtManager = rt.NewManager(cfg.Rack.MachineID, cfg.Base.Name, natsBus, gen, specMgr, opTimeout, convTimeout, handshakeInterval, cfg.Logging.Trace, cfg.Logging.Debug, mixerPublicKey(statePath))
 								rtManager.SetLaneConfig(cfg.Rack.LaneQueueSize, laneSendTimeout)
+								rtManager.SetEventAckWait(limits.ackWait)
 								_ = rtManager.SetOutboxConfig(cfg.Rack.OutboxMaxMessages, cfg.Rack.OutboxDrainRetries, cfg.Rack.OutboxOrder) // order validated at startup
 								rtManager.SetOutboxBackpressure(limits.outboxBackpressure)
 							}
@@ -545,7 +576,7 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 							Store:               cfg.Store,
 							Throttling:          cfg.Logging.Throttling,
 							StdoutEnabled:       true,
-							StdoutLevel:         "info",
+							StdoutLevel:         logLevel(cfg),
 							Metrics: telemetry.MetricsConfig{
 								HostEnabled:    cfg.Telemetry.Metrics.HostEnabled,
 								RuntimeEnabled: cfg.Telemetry.Metrics.RuntimeEnabled,
@@ -557,8 +588,8 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 							telCfg.Logging.Level = "trace"
 						}
 
-						telBus := bus.NewNatsBus("flux-telemetry")
-						if errBus := telBus.Connect(cfg.Snake.URL, telemetryConnectOptions(cfg, clientName, connectTimeout, reconnectWait, inactiveThreshold, initialRetryWait, initialRetryAttempts)); errBus != nil {
+						telBus := bus.NewNatsBus(cfg.Telemetry.StreamName)
+						if errBus := telBus.Connect(cfg.Snake.URL, telemetryConnectOptions(cfg, clientName, connectTimeout, reconnectWait, inactiveThreshold, initialRetryWait, initialRetryAttempts, opTimeout)); errBus != nil {
 							logger.Warn("Failed to connect telemetry bus", "error", errBus)
 						} else {
 							defer telBus.Close()
@@ -610,7 +641,7 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 
 		// 1. Notifications (Status/Commands)
 		if mID != uuid.Nil {
-			notifyTopic := fmt.Sprintf("flux.agent.notify.%s", mID.String())
+			notifyTopic := fluxmsg.NotifySubject(helloName, mID)
 			_, err = managedBus.Subscribe(notifyTopic, func(ctx context.Context, msg *fluxmsg.FluxMsg) error {
 				hbResp, errParse := fluxmsg.ParseHeartbeatResponse(msg.Data)
 				if errParse != nil {
@@ -715,6 +746,12 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 				return nil
 			})
 			if err != nil {
+				if transientBusError(err) {
+					// Without this subscription the Rack would get no status,
+					// command or passport for the whole session.
+					logger.Warn("Failed to subscribe to notify; JetStream is not available yet, starting the session again", "error", err)
+					return ErrReconnect
+				}
 				logger.Error("Failed to subscribe to notify", "error", err)
 			} else {
 				logger.Info("Listening for notifications", "topic", notifyTopic)
@@ -763,12 +800,17 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 
 			if isSessionActive {
 				// The Mixer sends its scenario after the Rack has resumed its own copy.
-				if scenarios.consumeResumed(payload.Scenario) {
+				if scenarios.consumeResumed(payload.Scenario) && !payload.Reapply {
 					runtimeStarted = true
 					logger.Info("Scenario from the Mixer matches the one resumed from local state; gears keep running", "version", payload.Version)
 					return nil
 				}
+				if scenarios.keepsGears(payload) {
+					logger.Info("Scenario from the Mixer is the one already running; gears keep running", "version", payload.Version)
+					return nil
+				}
 				if errApply := rtManager.ApplyScenario(ctx, &sc); errApply != nil {
+					scenarios.running = nil
 					logger.Error("Failed to apply scenario", "error", errApply)
 					return errApply
 				}
@@ -783,6 +825,12 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 			return nil
 		})
 		if err != nil {
+			if transientBusError(err) {
+				// Without this subscription the Rack would get no scenario for
+				// the whole session.
+				logger.Warn("Failed to subscribe to scenario topic; JetStream is not available yet, starting the session again", "error", err)
+				return ErrReconnect
+			}
 			logger.Error("Failed to subscribe to scenario topic", "error", err)
 		} else {
 			logger.Info("Listening for scenario updates", "topic", scenarioTopic)
@@ -891,7 +939,7 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 				Store:               cfg.Store,
 				Throttling:          cfg.Logging.Throttling,
 				StdoutEnabled:       true,
-				StdoutLevel:         "info",
+				StdoutLevel:         logLevel(cfg),
 				Metrics: telemetry.MetricsConfig{
 					HostEnabled:    cfg.Telemetry.Metrics.HostEnabled,
 					RuntimeEnabled: cfg.Telemetry.Metrics.RuntimeEnabled,
@@ -901,8 +949,8 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 			if cfg.Logging.Trace {
 				telCfg.Logging.Level = "trace"
 			}
-			telBus := bus.NewNatsBus("flux-telemetry")
-			_ = telBus.Connect(cfg.Snake.URL, telemetryConnectOptions(cfg, clientName, connectTimeout, reconnectWait, inactiveThreshold, initialRetryWait, initialRetryAttempts))
+			telBus := bus.NewNatsBus(cfg.Telemetry.StreamName)
+			_ = telBus.Connect(cfg.Snake.URL, telemetryConnectOptions(cfg, clientName, connectTimeout, reconnectWait, inactiveThreshold, initialRetryWait, initialRetryAttempts, opTimeout))
 
 			sDown, _ := telemetry.Init(context.Background(), telCfg, telBus, logBuffer, newGen)
 			telShutdown = sDown
@@ -954,6 +1002,17 @@ func runSession(ctx context.Context, cfg *config.RackConfig, logger *slog.Logger
 			}
 		}
 	}
+}
+
+// waitsForPassport reports whether a Rack keeps enrolling after its Hello
+// burst (rack.enrollment_timeout) ended unanswered. A Rack with no identity
+// does: no Mixer has a record it can adopt, and a heartbeat without an
+// identity is rejected. It keeps its session, so a Passport that a slow Mixer
+// sends for one of the earlier Hellos still reaches it: a second Hello for the
+// name that Passport registered is a name conflict, and it would never enroll.
+// A Rack with an identity resumes from its saved Passport instead.
+func waitsForPassport(machineID uuid.UUID) bool {
+	return machineID == uuid.Nil
 }
 
 func sendHello(b bus.Bus, p *fluxmsg.HelloPayload, gen *idgen.IDGenerator) error {
@@ -1079,19 +1138,24 @@ var runCmd = &cobra.Command{
 	},
 }
 
-func setupLogger(cfg *config.RackConfig) *slog.Logger {
-	level := cfg.Logging.Level
-	// Env Override (Common convention)
-	if cfg.Logging.Trace {
-		level = "trace"
-	} else if cfg.Logging.Debug {
-		level = "debug"
+// logLevel is the level of the Rack's log: logging.level, unless
+// logging.trace or logging.debug overrides it. The log on stdout keeps it
+// after enrollment too, when the telemetry handlers replace the first logger.
+func logLevel(cfg *config.RackConfig) string {
+	switch {
+	case cfg.Logging.Trace:
+		return "trace"
+	case cfg.Logging.Debug:
+		return "debug"
 	}
 	// Fallback to defaults handled in logger.New or parseLevel
+	return cfg.Logging.Level
+}
 
+func setupLogger(cfg *config.RackConfig) *slog.Logger {
 	// Standardized Logger Setup
 	return loggerPkg.New(loggerPkg.Config{
-		Level:      level,
+		Level:      logLevel(cfg),
 		EntityType: loggerPkg.TypeRack,
 		Name:       "rack-agent",
 		Writer:     os.Stdout,

@@ -250,3 +250,18 @@ func TestNatsKV_PutWithTTLUpsertsExistingKey(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []byte("second"), val)
 }
+
+// An empty bucket has no keys; that is not an error.
+func TestNatsKV_KeysOfAnEmptyBucket(t *testing.T) {
+	ctx := context.Background()
+	s, err := snake.NewServer(ctx, snake.Config{Port: -1, ClusterName: "kv-empty", StoreDir: t.TempDir()})
+	require.NoError(t, err)
+	defer s.Shutdown()
+	nb := NewNatsBus("flux")
+	require.NoError(t, nb.Connect(s.ClientURL(), ConnectOptions{Name: "test-kv-empty"}))
+	defer nb.Close()
+	require.NoError(t, nb.KV().EnsureBucket(ctx, "empty_bucket", "memory", 1, 0))
+	keys, err := nb.KV().Keys(ctx, "empty_bucket")
+	require.NoError(t, err)
+	assert.Empty(t, keys)
+}

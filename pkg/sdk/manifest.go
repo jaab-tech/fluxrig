@@ -41,6 +41,10 @@ type Manifest struct {
 	// is the endpoint of a wire path. The zero value (TerminusTransparent)
 	// means a single-path pass-through, e.g. a codec.
 	Terminus TerminusKind `json:"terminus"`
+
+	// BusNeeds returns what a gear with this configuration does on the bus
+	// besides its wires. Nil means nothing.
+	BusNeeds func(config map[string]any) []BusNeed `json:"-"`
 }
 
 // GearCategory classifies a gear by role.

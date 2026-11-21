@@ -79,7 +79,15 @@ func (w *NatsWriter) Write(p []byte) (n int, err error) {
 		entityName = "unknown"
 	}
 
-	if err := w.bus.Publish(context.Background(), w.baseSubject+"."+entityName+".logs.json", msg); err != nil {
+	// Bound the publish. An unbounded context.Background() here lets a
+	// JetStream publish to a replicated stream block forever when the stream
+	// has no quorum (a fresh cluster still forming, or a node cut off from its
+	// peers). During the startup log flush this stalls the Mixer before it
+	// ever binds its API, which the phase-6 testbed caught. the writer's
+	// timeout is the bound.
+	wctx, cancel := context.WithTimeout(context.Background(), w.timeout)
+	defer cancel()
+	if err := w.bus.Publish(wctx, w.baseSubject+"."+entityName+".logs.json", msg); err != nil {
 		return 0, err
 	}
 	return len(p), nil

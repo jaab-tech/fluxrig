@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -112,14 +111,17 @@ type ScenarioController struct {
 	waitTimeout time.Duration
 	specs       manager.Manager // resolves the spec artefacts a scenario names
 
-	// deliveryMu guards the delivery record. It is separate from mu, which
-	// Activate holds for the whole push: PushActiveToRackSince consults the
-	// record from the enrollment path without waiting on an activation.
+	// deliveryMu guards the delivery record. It is separate from mu so an
+	// enrollment-triggered push consults the record without waiting on an
+	// activation: Activate releases mu before the fan-out below and only
+	// bumps the activation under deliveryMu.
 	deliveryMu sync.Mutex
 	// activation counts activations. delivered records, per Rack, the
 	// activation it last received and when, so the push that follows an
 	// enrollment does not send a Rack the scenario that the activation has
-	// just sent it: every push restarts the Rack's gears.
+	// just sent it: every push restarts the Rack's gears. Entries are
+	// bounded (see maxDeliveredEntries): a Rack that is renamed or removed
+	// leaves nothing behind forever.
 	activation uint64
 	delivered  map[string]delivery
 }
@@ -176,6 +178,40 @@ func (c *ScenarioController) CurrentName() string {
 		return c.active.Meta.Name
 	}
 	return "none"
+}
+
+// FollowActive keeps this Mixer's active scenario in step with the pointer,
+// until ctx ends. It is for a Mixer that does not hold the write lease: the
+// holder moves the pointer, and every follower must converge on it so the API
+// reports the same scenario everywhere and each Mixer's topology rows match.
+// It polls at interval (a follower need not react instantly) and reloads only
+// when the pointer names a different scenario, so a steady state costs one
+// read per tick.
+func (c *ScenarioController) FollowActive(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			active, err := c.repo.GetActive(ctx)
+			if err != nil {
+				continue // no pointer, or a transient read error: try again
+			}
+			if active.Name == c.CurrentName() {
+				continue
+			}
+			if errLoad := c.LoadActive(ctx); errLoad != nil {
+				c.log.Warn("follower could not reload the active scenario", "name", active.Name, "error", errLoad)
+			} else {
+				c.log.Info("follower adopted the active scenario", "name", active.Name)
+			}
+		}
+	}
 }
 
 // GetActiveScenario returns the currently active scenario.
@@ -311,12 +347,17 @@ func (c *ScenarioController) PushActiveToRackSince(ctx context.Context, rackName
 		return fmt.Errorf("scenario bus not initialized")
 	}
 
-	return c.pushScenarioToRacks(ctx, active, content, rackName)
+	return c.pushScenarioToRacks(ctx, active, content, rackName, false)
 }
 
 func (c *ScenarioController) Activate(ctx context.Context, name string) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	unlocked := false
+	defer func() {
+		if !unlocked {
+			c.mu.Unlock()
+		}
+	}()
 
 	safeName := sanitizeName(name)
 
@@ -384,8 +425,18 @@ func (c *ScenarioController) Activate(ctx context.Context, name string) error {
 	// that enrolls later still gets it through PushActiveToRack. But the
 	// caller must not be told the activation reached anyone when it did
 	// not, so the error is returned rather than only logged.
-	if c.bus != nil {
-		if err := c.pushScenarioToRacks(ctx, &s, registered, ""); err != nil {
+	//
+	// The push runs WITHOUT holding c.mu: the fan-out below publishes with
+	// bus timeouts and waits for rack registrations, while PushActiveToRackSince
+	// needs c.mu on the enrollment path. Everything the push reads is in
+	// the copies below. Only the activation bump above stays guarded, by
+	// deliveryMu.
+	push, content, bus := *c.active, c.activeYAML, c.bus
+	unlocked = true
+	c.mu.Unlock()
+
+	if bus != nil {
+		if err := c.pushScenarioToRacks(ctx, &push, content, "", true); err != nil {
 			c.log.Warn("failed to push scenario to racks", "error", err)
 			return fmt.Errorf("scenario %q is active but was not delivered: %w", safeName, err)
 		}
@@ -470,22 +521,7 @@ func (c *ScenarioController) LoadActive(ctx context.Context) error {
 // traversal characters nor the subject separators/wildcards (".", "*", ">")
 // survive it.
 func sanitizeName(name string) string {
-	// 1. Remove any path-related characters
-	safeName := strings.ReplaceAll(name, "..", "")
-	safeName = strings.ReplaceAll(safeName, "/", "_")
-	safeName = strings.ReplaceAll(safeName, "\\", "_")
-
-	// 2. Restrict to alphanumeric, hyphens, and underscores
-	reg := regexp.MustCompile(`[^a-zA-Z0-9\-_]`)
-	safeName = reg.ReplaceAllString(safeName, "_")
-
-	// 3. Trim and ensure not empty
-	safeName = strings.Trim(safeName, "_-")
-	if safeName == "" {
-		safeName = "unnamed"
-	}
-
-	return safeName
+	return fluxmsg.SubjectToken(name)
 }
 
 // registerScenarioEntities persists scenario, gears, and wires to the registry.
@@ -682,7 +718,8 @@ func (c *ScenarioController) registerScenarioEntities(ctx context.Context, s *re
 // pushScenarioToRacks publishes the scenario to racks.
 // If specificRack is provided, it only pushes to that one.
 // Otherwise, it iterates over s.Racks.
-func (c *ScenarioController) pushScenarioToRacks(ctx context.Context, s *registry.Scenario, content []byte, specificRack string) error {
+// reapply marks an activation: see fluxmsg.ScenarioPayload.Reapply.
+func (c *ScenarioController) pushScenarioToRacks(ctx context.Context, s *registry.Scenario, content []byte, specificRack string, reapply bool) error {
 	now := time.Now().Unix()
 	scenarioName := s.Meta.Name
 	if scenarioName == "" {
@@ -758,6 +795,7 @@ func (c *ScenarioController) pushScenarioToRacks(ctx context.Context, s *registr
 			RackName:  rackName,
 			MachineID: machineID,
 			Timestamp: now,
+			Reapply:   reapply,
 		}
 
 		// content is the scenario as registered, IDs included, encoded once
@@ -798,6 +836,18 @@ func (c *ScenarioController) pushScenarioToRacks(ctx context.Context, s *registr
 	return nil
 }
 
+// maxDeliveredEntries bounds the delivery record. It is keyed by Rack
+// name, so it grows by distinct names, not by pushes; a rename or a
+// removal leaves a stale entry behind. recordDelivery evicts entries older
+// than deliveredTTL and, past this many, the oldest ones, so the map
+// cannot grow without bound.
+const maxDeliveredEntries = 1024
+
+// deliveredTTL is how long a delivery record is kept. An enrollment push
+// only consults records newer than the enrollment itself (PushActiveToRackSince
+// compares against since), so anything older is never read again.
+const deliveredTTL = 24 * time.Hour
+
 // recordDelivery notes that rackName received the current activation now.
 func (c *ScenarioController) recordDelivery(rackName string) {
 	c.deliveryMu.Lock()
@@ -806,6 +856,31 @@ func (c *ScenarioController) recordDelivery(rackName string) {
 		c.delivered = make(map[string]delivery)
 	}
 	c.delivered[rackName] = delivery{activation: c.activation, at: time.Now()}
+	if len(c.delivered) <= maxDeliveredEntries {
+		return
+	}
+	// Over the cap: drop what the enrollment push never reads again, then
+	// the oldest, so a renamed or removed Rack leaves nothing behind.
+	now := time.Now()
+	for name, d := range c.delivered {
+		if now.Sub(d.at) >= deliveredTTL {
+			delete(c.delivered, name)
+		}
+	}
+	for len(c.delivered) > maxDeliveredEntries {
+		var oldest string
+		var at time.Time
+		first := true
+		for name, d := range c.delivered {
+			if first || d.at.Before(at) {
+				oldest, at, first = name, d.at, false
+			}
+		}
+		if first {
+			return
+		}
+		delete(c.delivered, oldest)
+	}
 }
 
 // hasGlobalGear reports whether a scenario has a gear with no deploy target,

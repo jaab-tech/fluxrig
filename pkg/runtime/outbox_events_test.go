@@ -6,6 +6,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -16,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/jaab-tech/fluxrig/pkg/bus"
+	"github.com/jaab-tech/fluxrig/pkg/sdk"
 )
 
 // eventBus records raw publishes in order, and refuses them while down is set.
@@ -148,4 +150,67 @@ func TestGearRack_ResolvesAsAWireSourceDoes(t *testing.T) {
 	g := &GearContextImpl{rackName: "here", gearDeploy: map[string]string{"pinned": "there"}}
 	assert.Equal(t, "there", g.GearRack("pinned"))
 	assert.Equal(t, "here", g.GearRack("everywhere"), "a gear with no deploy target runs on this Rack too")
+}
+
+// batchEventBus is an eventBus that also takes a batch, and counts the calls.
+type batchEventBus struct {
+	*eventBus
+	calls atomic.Int32
+}
+
+// PublishRaw counts a single publish as a call too.
+func (b *batchEventBus) PublishRaw(ctx context.Context, subject string, data []byte, id uuid.UUID) error {
+	b.calls.Add(1)
+	return b.eventBus.PublishRaw(ctx, subject, data, id)
+}
+
+func (b *batchEventBus) PublishRawBatch(ctx context.Context, subject string, msgs []bus.RawMessage) (int, error) {
+	b.calls.Add(1)
+	for i, m := range msgs {
+		if err := b.eventBus.PublishRaw(ctx, subject, m.Data, m.ID); err != nil {
+			return i, err
+		}
+	}
+	return len(msgs), nil
+}
+
+// The events parked while the bus was down leave in a batch, in order. One
+// at a time, across a slow link, a Rack drained about one event per round
+// trip and the backlog of a busy gear never emptied.
+func TestOutbox_ParkedEventsLeaveInABatch(t *testing.T) {
+	b := &batchEventBus{eventBus: &eventBus{MockBus: bus.NewMockBus()}}
+	b.down.Store(true)
+	m := newOutboxManager(t, b)
+	var want []string
+	for i := 0; i < 50; i++ {
+		body := fmt.Sprintf("e%02d", i)
+		want = append(want, body)
+		require.NoError(t, publishTestEvent(t, m, body))
+	}
+	require.Equal(t, 50, m.outbox.len())
+	callsWhileDown := b.calls.Load()
+
+	b.down.Store(false)
+	m.SetBus(b)
+	require.Eventually(t, func() bool { return len(b.arrived()) == 50 }, 5*time.Second, 10*time.Millisecond)
+	assert.Equal(t, want, b.arrived(), "the order must be kept")
+	assert.Zero(t, m.outbox.len())
+	assert.LessOrEqual(t, b.calls.Load()-callsWhileDown, int32(2), "the backlog left one event per call")
+}
+
+// Events published in a batch while the bus is up arrive in order, in one call.
+func TestPublishEvents_SendsABatchInOrder(t *testing.T) {
+	b := &batchEventBus{eventBus: &eventBus{MockBus: bus.NewMockBus()}}
+	m := newOutboxManager(t, b)
+	evs := make([]sdk.RawEvent, 10)
+	var want []string
+	for i := range evs {
+		body := fmt.Sprintf("e%d", i)
+		want = append(want, body)
+		evs[i] = sdk.RawEvent{Data: []byte(body), ID: uuid.New()}
+	}
+	require.NoError(t, m.publishEvents(context.Background(), "flux.evt.conn.r.g", evs))
+	assert.Equal(t, want, b.arrived())
+	assert.Equal(t, int32(1), b.calls.Load())
+	assert.Zero(t, m.outbox.len())
 }

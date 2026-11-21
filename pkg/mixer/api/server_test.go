@@ -366,8 +366,9 @@ func TestHandleRackAction_WithPublisher(t *testing.T) {
 		t.Errorf("Expected 200, got %d", w.Result().StatusCode)
 	}
 
-	// Verify publishStatus was called
-	if mockPub.PublishedTopic != "flux.agent.notify."+id1 {
+	// The approval renames rack-1 to pub-test, and reaches it under the name
+	// it listens on until it takes the new one.
+	if mockPub.PublishedTopic != "flux.agent.notify.rack-1."+id1 {
 		t.Errorf("Wrong topic: %s", mockPub.PublishedTopic)
 	}
 }
@@ -395,7 +396,7 @@ func TestHandleRackAction_SuspendWithPublisher(t *testing.T) {
 	}
 
 	// Verify publishStatus was called
-	if mockPub.PublishedTopic != "flux.agent.notify."+id1 {
+	if mockPub.PublishedTopic != "flux.agent.notify.rack-1."+id1 {
 		t.Errorf("Wrong topic: %s", mockPub.PublishedTopic)
 	}
 }
@@ -422,7 +423,7 @@ func TestHandleRackAction_ActivateWithPublisher(t *testing.T) {
 		t.Errorf("Expected 200, got %d", w.Result().StatusCode)
 	}
 
-	if mockPub.PublishedTopic != "flux.agent.notify."+id1 {
+	if mockPub.PublishedTopic != "flux.agent.notify.rack-1."+id1 {
 		t.Errorf("Wrong topic: %s", mockPub.PublishedTopic)
 	}
 }

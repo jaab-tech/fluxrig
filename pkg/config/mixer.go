@@ -57,6 +57,28 @@ type RegistryConfig struct {
 	// OrphanMinAge is how old a registry record must be before the sweep
 	// treats it as left behind rather than in progress.
 	OrphanMinAge string `koanf:"orphan_min_age" example:"5m"`
+	// LeaseEnabled turns on the write lease: one Mixer holds it and does
+	// every control-plane write, so several Mixers never write the registry
+	// at once. Off by default, which keeps a single Mixer exactly as it was.
+	LeaseEnabled bool `koanf:"lease_enabled" example:"false"`
+	// LeaseBucket names the bucket that holds the lease. It must differ from
+	// the registry and liveness buckets.
+	LeaseBucket string `koanf:"lease_bucket" example:"fluxrig_lease"`
+	// LeaseTTL is the lease duration: the bucket's max age, and how long a
+	// holder may go without a successful renew before it stops writing. Sized
+	// against the slowest election at cross-site latency.
+	LeaseTTL string `koanf:"lease_ttl" example:"30s"`
+	// LeaseRenew is how often the holder renews. It must be well under
+	// LeaseTTL so an ordinary slow write does not lapse the lease.
+	LeaseRenew string `koanf:"lease_renew" example:"10s"`
+	// SpecBucket names the bucket that holds the shared spec store. It is
+	// used with the lease on: every Mixer of the cluster reads and imports
+	// specs there. A single Mixer keeps its local store.
+	SpecBucket string `koanf:"spec_bucket" example:"fluxrig_specs"`
+	// SpecMaxSize is the largest spec in bytes the shared store accepts. It
+	// is the spec bucket's max value size, so it must not exceed the Snake's
+	// max_payload (1 MiB by default).
+	SpecMaxSize int `koanf:"spec_max_size" example:"1048576"`
 }
 
 // WasmConfig defines settings for the WebAssembly Supply Chain Security Catalog.
@@ -96,6 +118,81 @@ type ObservabilityConfig struct {
 	Tier string `koanf:"tier" example:"embedded"`
 	// Embedded configures the local embedded stack.
 	Embedded EmbeddedConfig `koanf:"embedded"`
+	// Storage is where the Mixer keeps telemetry.
+	Storage StorageConfig `koanf:"storage"`
+}
+
+// Telemetry storage types.
+const (
+	StorageLocal = "local"
+	StorageS3    = "s3"
+	StorageNATS  = "nats"
+	StorageOTLP  = "otlp"
+)
+
+// StorageConfig is where the Mixer keeps the telemetry of its Racks.
+//
+// local, the default, keeps it on this Mixer's disk. With several Mixers
+// (snake.external) each one then keeps a copy of its own, which misses what
+// arrived while it was down. s3, nats and otlp are for several Mixers: the
+// Mixer that holds the write lease is the only one that reads the telemetry
+// stream, and it confirms each batch only once the store has it, so no record
+// is kept twice or lost. s3 and nats keep Parquet files every Mixer queries;
+// otlp sends the telemetry to the operator's collector, and the Mixers keep
+// none.
+type StorageConfig struct {
+	// Type is local, s3, nats or otlp.
+	Type string `koanf:"type" example:"local"`
+	// CommitTimeout bounds one upload or export of a batch. A batch that does
+	// not make it is tried again, and stays unconfirmed until it does.
+	CommitTimeout string `koanf:"commit_timeout" example:"30s"`
+	// BatchInterval is how often the lease holder commits a batch: it writes
+	// one file of each kind to s3 or nats, or sends one export to otlp. The
+	// other Mixers see the telemetry up to the last batch. Each Mixer keeps
+	// the files it writes or fetches for a query under store.dir/telemetry,
+	// under the same retention as local files.
+	BatchInterval string `koanf:"batch_interval" example:"15s"`
+	// S3, NATS and OTLP configure their type.
+	S3   S3StorageConfig   `koanf:"s3"`
+	NATS NATSStorageConfig `koanf:"nats"`
+	OTLP OTLPStorageConfig `koanf:"otlp"`
+}
+
+// S3StorageConfig is a bucket of an S3-compatible object store. The Mixer
+// requests SSE-S3 for every uploaded telemetry object.
+type S3StorageConfig struct {
+	// Endpoint is the host and port of the service, without a scheme.
+	Endpoint string `koanf:"endpoint" example:"s3.amazonaws.com"`
+	Bucket   string `koanf:"bucket" example:"fluxrig-telemetry"`
+	// Prefix is put before every object name.
+	Prefix string `koanf:"prefix" example:"telemetry"`
+	Region string `koanf:"region" example:"us-east-1"`
+	// AccessKeyFile and SecretKeyFile hold the credentials. Empty reads
+	// AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.
+	AccessKeyFile string `koanf:"access_key_file"`
+	SecretKeyFile string `koanf:"secret_key_file"`
+	// Plaintext talks HTTP instead of HTTPS. Development only.
+	Plaintext bool `koanf:"plaintext" example:"false"`
+	// CAFile verifies the service's certificate, when a public CA does not.
+	CAFile string `koanf:"ca_file"`
+}
+
+// NATSStorageConfig is an object store bucket on the NATS of the Mixers. It
+// takes snake.replicas copies.
+type NATSStorageConfig struct {
+	Bucket string `koanf:"bucket" example:"fluxrig_telemetry"`
+}
+
+// OTLPStorageConfig is an OpenTelemetry collector that takes OTLP over HTTP.
+type OTLPStorageConfig struct {
+	// Endpoint is the collector's base URL; the paths /v1/logs, /v1/metrics
+	// and /v1/traces are added to it.
+	Endpoint string `koanf:"endpoint" example:"https://collector.example:4318"`
+	// CAFile verifies the collector's certificate, when a public CA does not.
+	CAFile string `koanf:"ca_file"`
+	// HeadersFile holds extra request headers, one "Name: value" per line,
+	// such as an authorization token.
+	HeadersFile string `koanf:"headers_file"`
 }
 
 // EmbeddedConfig settings for the embedded observability stack.
@@ -128,6 +225,17 @@ type MixerSettings struct {
 	MaxPayloadSize int `koanf:"max_payload_size"`
 	// ScenarioWaitTimeout is the time to wait for a rack to register when activating a scenario.
 	ScenarioWaitTimeout string `koanf:"scenario_wait_timeout" example:"15s"`
+	// ForwardTimeout bounds a control write forwarded to the lease holder. It
+	// must cover a cross-site round trip plus the holder's own write.
+	ForwardTimeout string `koanf:"forward_timeout" example:"5s"`
+	// FollowInterval is how often a Mixer that does not hold the write lease
+	// checks the active-scenario pointer and reloads it when it changed.
+	FollowInterval string `koanf:"follow_interval" example:"5s"`
+	// QueueGroup, when set, makes a Mixer's subscriptions a shared durable
+	// queue group: exactly one member handles each message. It is turned on
+	// automatically with the write lease, so several Mixers do not each
+	// process the same Hello. Empty keeps every Mixer subscribing alone.
+	QueueGroup string `koanf:"queue_group" example:"fluxrig-mixers"`
 }
 
 // ApiConfig settings for the Control Plane REST API.
@@ -184,6 +292,9 @@ func LoadMixer(path string) (*MixerConfig, error) {
 	_ = k.Set("mixer.max_hops", 64)
 	_ = k.Set("mixer.max_payload_size", 2*1024*1024) // 2MB
 	_ = k.Set("mixer.scenario_wait_timeout", "15s")
+	_ = k.Set("mixer.forward_timeout", "5s")
+	_ = k.Set("mixer.queue_group", "fluxrig-mixers")
+	_ = k.Set("mixer.follow_interval", "5s")
 	_ = k.Set("api.port", 8090)
 	_ = k.Set("api.read_header_timeout", "3s")
 	_ = k.Set("api.control_confirm_timeout", "2s")
@@ -197,7 +308,12 @@ func LoadMixer(path string) (*MixerConfig, error) {
 	_ = k.Set("snake.domain", "flux")
 	_ = k.Set("snake.cluster_name", "flux")
 	_ = k.Set("snake.stream_name", "flux-msg")
+	_ = k.Set("snake.replicas", 1)
+	_ = k.Set("snake.form_timeout", "2m")
 	_ = k.Set("snake.operation_timeout", "5s")
+	_ = k.Set("snake.ping_interval", DefaultPingInterval)
+	_ = k.Set("snake.max_pings_out", DefaultMaxPingsOut)
+	_ = k.Set("snake.ack_wait", DefaultAckWait)
 	_ = k.Set("snake.inactive_threshold", "30s")
 	_ = k.Set("snake.store_encryption", true)
 	_ = k.Set("snake.store_cipher", "chacha")
@@ -230,6 +346,11 @@ func LoadMixer(path string) (*MixerConfig, error) {
 
 	_ = k.Set("observability.tier", "embedded")
 	_ = k.Set("observability.embedded.flush_interval", "5s")
+	_ = k.Set("observability.storage.type", StorageLocal)
+	_ = k.Set("observability.storage.commit_timeout", "30s")
+	_ = k.Set("observability.storage.batch_interval", "15s")
+	_ = k.Set("observability.storage.s3.prefix", "telemetry")
+	_ = k.Set("observability.storage.nats.bucket", "fluxrig_telemetry")
 	_ = k.Set("observability.embedded.retention_days", 30)
 	_ = k.Set("observability.embedded.rotation.check_interval", "1h")
 	_ = k.Set("observability.embedded.rotation.max_age_days", 30)
@@ -245,6 +366,12 @@ func LoadMixer(path string) (*MixerConfig, error) {
 	_ = k.Set("registry.write_retries", DefaultRegistryWriteRetries)
 	_ = k.Set("registry.sweep_interval", DefaultRegistrySweepInterval)
 	_ = k.Set("registry.orphan_min_age", DefaultRegistryOrphanMinAge)
+	_ = k.Set("registry.lease_enabled", false)
+	_ = k.Set("registry.lease_bucket", DefaultRegistryLeaseBucket)
+	_ = k.Set("registry.spec_bucket", DefaultRegistrySpecBucket)
+	_ = k.Set("registry.spec_max_size", DefaultRegistrySpecMaxSize)
+	_ = k.Set("registry.lease_ttl", DefaultRegistryLeaseTTL)
+	_ = k.Set("registry.lease_renew", DefaultRegistryLeaseRenew)
 
 	_ = k.Set("wasm.catalog_dir", "./data/wasm")
 	_ = k.Set("wasm.trusted_keys_dir", "./data/wasm/keys")
@@ -284,6 +411,21 @@ func LoadMixer(path string) (*MixerConfig, error) {
 	if err := cfg.Registry.validate(); err != nil {
 		return nil, err
 	}
+	if err := cfg.Snake.validateMode(); err != nil {
+		return nil, err
+	}
+	if err := cfg.Snake.validatePings(); err != nil {
+		return nil, err
+	}
+	if err := cfg.Snake.validateAckWait(); err != nil {
+		return nil, err
+	}
+	if err := cfg.Observability.Storage.validate(cfg.Registry.LeaseEnabled); err != nil {
+		return nil, err
+	}
+	if cfg.Snake.External && !cfg.Registry.LeaseEnabled {
+		return nil, fmt.Errorf("snake.external needs registry.lease_enabled: Mixers on one NATS must share the write lease")
+	}
 
 	// Backward Compatibility: Fallback to old field names
 	if cfg.Base.Name == "" {
@@ -302,10 +444,15 @@ const (
 	DefaultRegistryLivenessBucket = "fluxrig_liveness"
 	DefaultRegistryReplicas       = 1
 	DefaultRegistryMaxValueSize   = 1 << 20
+	DefaultRegistrySpecBucket     = "fluxrig_specs"
+	DefaultRegistrySpecMaxSize    = 1 << 20
 	DefaultRegistryLivenessTTL    = "90s"
 	DefaultRegistryWriteRetries   = 3
 	DefaultRegistrySweepInterval  = "10m"
 	DefaultRegistryOrphanMinAge   = "5m"
+	DefaultRegistryLeaseBucket    = "fluxrig_lease"
+	DefaultRegistryLeaseTTL       = "30s"
+	DefaultRegistryLeaseRenew     = "10s"
 )
 
 // WithDefaults fills the unset fields whose zero value is never valid with
@@ -332,6 +479,21 @@ func (r RegistryConfig) WithDefaults() RegistryConfig {
 	}
 	if r.OrphanMinAge == "" {
 		r.OrphanMinAge = DefaultRegistryOrphanMinAge
+	}
+	if r.LeaseBucket == "" {
+		r.LeaseBucket = DefaultRegistryLeaseBucket
+	}
+	if r.LeaseTTL == "" {
+		r.LeaseTTL = DefaultRegistryLeaseTTL
+	}
+	if r.LeaseRenew == "" {
+		r.LeaseRenew = DefaultRegistryLeaseRenew
+	}
+	if r.SpecBucket == "" {
+		r.SpecBucket = DefaultRegistrySpecBucket
+	}
+	if r.SpecMaxSize == 0 {
+		r.SpecMaxSize = DefaultRegistrySpecMaxSize
 	}
 	// WriteRetries is not defaulted here: zero is a valid setting (fail on
 	// the first conflict), and this runs on loaded configs too.
@@ -363,6 +525,89 @@ func (r RegistryConfig) validate() error {
 	// positive, or the sweep could undo a registration still in progress.
 	if d, err := time.ParseDuration(r.OrphanMinAge); err != nil || d <= 0 {
 		return fmt.Errorf("registry.orphan_min_age must be a positive duration, got %q", r.OrphanMinAge)
+	}
+	if r.SpecMaxSize < 1 || r.SpecMaxSize > math.MaxInt32 {
+		return fmt.Errorf("registry.spec_max_size must be between 1 and %d, got %d", math.MaxInt32, r.SpecMaxSize)
+	}
+	if r.LeaseEnabled {
+		if r.SpecBucket == "" || r.SpecBucket == r.Bucket || r.SpecBucket == r.LivenessBucket || r.SpecBucket == r.LeaseBucket {
+			return fmt.Errorf("registry.spec_bucket must be set and differ from the registry, liveness and lease buckets")
+		}
+		if r.LeaseBucket == "" || r.LeaseBucket == r.Bucket || r.LeaseBucket == r.LivenessBucket {
+			return fmt.Errorf("registry.lease_bucket must be set and differ from the registry and liveness buckets")
+		}
+		ttl, err := time.ParseDuration(r.LeaseTTL)
+		if err != nil || ttl <= 0 {
+			return fmt.Errorf("registry.lease_ttl must be a positive duration, got %q", r.LeaseTTL)
+		}
+		renew, err := time.ParseDuration(r.LeaseRenew)
+		if err != nil || renew <= 0 {
+			return fmt.Errorf("registry.lease_renew must be a positive duration, got %q", r.LeaseRenew)
+		}
+		// Validation runs after the defaults are applied, so both values are
+		// known here. A renew interval of half the TTL or more leaves room for
+		// at most one renew attempt before the lease lapses, so one slow renew
+		// hands the lease to another Mixer.
+		if renew > ttl/2 {
+			return fmt.Errorf("registry.lease_renew (%s) must be at most half of registry.lease_ttl (%s)", renew, ttl)
+		}
+	}
+	return nil
+}
+
+// validate refuses a telemetry storage that cannot work.
+func (s StorageConfig) validate(leaseEnabled bool) error {
+	switch s.Type {
+	case StorageLocal:
+		return nil
+	case StorageS3:
+		if s.S3.Endpoint == "" || s.S3.Bucket == "" {
+			return fmt.Errorf("observability.storage.type s3 needs observability.storage.s3.endpoint and bucket")
+		}
+	case StorageNATS:
+		if s.NATS.Bucket == "" {
+			return fmt.Errorf("observability.storage.type nats needs observability.storage.nats.bucket")
+		}
+	case StorageOTLP:
+		if s.OTLP.Endpoint == "" {
+			return fmt.Errorf("observability.storage.type otlp needs observability.storage.otlp.endpoint")
+		}
+	default:
+		return fmt.Errorf("observability.storage.type must be local, s3, nats or otlp, got %q", s.Type)
+	}
+	// One writer: the Mixer that holds the lease.
+	if !leaseEnabled {
+		return fmt.Errorf("observability.storage.type %s needs registry.lease_enabled: the Mixer that holds the lease is the one that writes", s.Type)
+	}
+	for _, in := range []struct{ name, val string }{
+		{"observability.storage.commit_timeout", s.CommitTimeout},
+		{"observability.storage.batch_interval", s.BatchInterval},
+	} {
+		if d, err := time.ParseDuration(in.val); err != nil || d <= 0 {
+			return fmt.Errorf("%s must be a positive duration, got %q", in.name, in.val)
+		}
+	}
+	return nil
+}
+
+// validateMode refuses a setup that would fail later, at startup or at the
+// first replicated write. The embedded server runs alone and holds one copy of
+// each stream, so more copies need snake.external.
+func (s SnakeConfig) validateMode() error {
+	if d, err := time.ParseDuration(s.FormTimeout); err != nil || d <= 0 {
+		return fmt.Errorf("snake.form_timeout must be a positive duration, got %q", s.FormTimeout)
+	}
+	if s.Replicas < 1 {
+		return fmt.Errorf("snake.replicas must be at least 1, got %d", s.Replicas)
+	}
+	if s.External {
+		if s.URL == "" {
+			return fmt.Errorf("snake.external needs snake.url")
+		}
+		return nil
+	}
+	if s.Replicas > 1 {
+		return fmt.Errorf("snake.replicas is %d, and the embedded NATS runs alone with one copy: more than one needs snake.external, on a NATS cluster", s.Replicas)
 	}
 	return nil
 }

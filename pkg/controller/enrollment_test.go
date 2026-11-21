@@ -166,7 +166,7 @@ func TestEnrollmentController_HandleHeartbeat(t *testing.T) {
 		t.Fatalf("HandleHeartbeat failed: %v", err)
 	}
 
-	expectedTopic := "flux.agent.notify." + machineID.String()
+	expectedTopic := "flux.agent.notify.test-rack." + machineID.String()
 	if mockPub.PublishedTopic != expectedTopic {
 		t.Errorf("Wrong topic: got %s, want %s", mockPub.PublishedTopic, expectedTopic)
 	}

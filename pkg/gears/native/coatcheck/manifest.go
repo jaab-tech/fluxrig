@@ -15,6 +15,7 @@ func (g *CoatCheckGear) Manifest() sdk.Manifest {
 		Summary:  "Sessionless context correlation: parks fields under a key on store, restores them on the matching reply.",
 		DocSlug:  "coatcheck",
 		Terminus: sdk.TerminusOpaque,
+		BusNeeds: busNeeds,
 		Ports: []sdk.Port{
 			{Name: "in", Dir: sdk.PortIn, Role: "message", Summary: "Message to check in (store) or check out (restore)."},
 			{Name: "out", Dir: sdk.PortOut, Role: "message", Summary: "Forwarded message."},

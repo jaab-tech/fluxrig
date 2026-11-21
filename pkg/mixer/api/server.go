@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"syscall"
@@ -34,9 +35,11 @@ import (
 	"github.com/jaab-tech/fluxrig/pkg/mixer/api/docs" // Swagger docs
 	"github.com/jaab-tech/fluxrig/pkg/pki"
 	"github.com/jaab-tech/fluxrig/pkg/registry"
+	"github.com/jaab-tech/fluxrig/pkg/registry/kvstore"
 	"github.com/jaab-tech/fluxrig/pkg/security"
 	"github.com/jaab-tech/fluxrig/pkg/telemetry"
 	"github.com/jaab-tech/fluxrig/pkg/version"
+	"github.com/jaab-tech/fluxrig/pkg/wasm/catalog"
 )
 
 // swag bakes the @version annotation into docs.go as a literal, so the checked-in
@@ -64,6 +67,22 @@ type Server struct {
 	// that do not exercise that endpoint; handleSimControl reports 503 rather
 	// than panicking when it is.
 	ctrlNC *nats.Conn
+	// lease is the write lease of a Mixer cluster, nil with the lease off.
+	lease        LeaseReader
+	leaseTimeout time.Duration
+}
+
+// LeaseReader is what /health needs from the write lease.
+type LeaseReader interface {
+	Held() bool
+	Holder(ctx context.Context) (kvstore.LeaseHolder, bool, error)
+}
+
+// WithLease makes /health report the write lease. timeout bounds the read of
+// the lease key, so a cluster that cannot answer does not hold the probe.
+func (s *Server) WithLease(l LeaseReader, timeout time.Duration) *Server {
+	s.lease, s.leaseTimeout = l, timeout
+	return s
 }
 
 // WithSpecStore gives the API the content-addressed store, so a spec that was
@@ -75,10 +94,13 @@ func (s *Server) WithSpecStore(m manager.Manager) *Server {
 	return s
 }
 
-// WasmCatalog defines the interface for the Wasm Catalog to avoid circular imports if needed.
+// WasmCatalog is the Wasm catalog and its keyring of trusted vendors.
 type WasmCatalog interface {
-	Import(ctx context.Context, payload []byte, allowUnsigned bool) (any, error)
-	List() (any, error)
+	Import(ctx context.Context, payload []byte, allowUnsigned bool) (catalog.WasmMetadata, error)
+	List(ctx context.Context) ([]catalog.WasmMetadata, error)
+	ListKeys(ctx context.Context) ([]catalog.TrustedKey, error)
+	TrustKey(ctx context.Context, vendor string, pub []byte) error
+	RevokeKey(ctx context.Context, vendor string) error
 }
 
 func NewServer(reg registry.Registry, pub message.Publisher, signer *pki.ClusterKey,
@@ -116,6 +138,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/topology/list", s.handleTopologyList)
 	mux.HandleFunc("POST /api/v1/wasm/import", s.handleWasmImport)
 	mux.HandleFunc("GET /api/v1/wasm/catalog", s.handleWasmCatalog)
+	mux.HandleFunc("GET /api/v1/wasm/keys", s.handleWasmKeys)
+	mux.HandleFunc("PUT /api/v1/wasm/keys/{vendor}", s.handleWasmKeyTrust)
+	mux.HandleFunc("DELETE /api/v1/wasm/keys/{vendor}", s.handleWasmKeyRevoke)
 	mux.HandleFunc("GET /api/v1/gears", s.handleGears)
 	mux.HandleFunc("GET /api/v1/gears/{type}", s.handleGearManifest)
 	mux.HandleFunc("GET /api/v1/specs", s.handleSpecs)
@@ -259,7 +284,38 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		Version:   version.String(),
 		MachineID: s.mixerID,
 		EntityID:  s.mixerEntityID,
+		Lease:     s.leaseStatus(r.Context()),
 	})
+}
+
+// leaseStatus reads the write lease for /health. A read that fails is
+// reported in the answer, not as a failed probe: the Mixer itself is up. The
+// answer carries only a generic "unavailable": /health is unauthenticated, and
+// the raw JetStream error would leak cluster internals to any caller.
+func (s *Server) leaseStatus(ctx context.Context) *LeaseStatus {
+	if s.lease == nil {
+		return nil
+	}
+	st := &LeaseStatus{Held: s.lease.Held()}
+	ctx, cancel := context.WithTimeout(ctx, s.leaseTimeout)
+	defer cancel()
+	h, ok, err := s.lease.Holder(ctx)
+	switch {
+	case err != nil:
+		st.Error = "unavailable"
+	case ok:
+		id := h.MixerID
+		st.Holder = &id
+		if !h.Since.IsZero() {
+			since := h.Since
+			st.HolderSince = &since
+		}
+		if !h.Renewed.IsZero() {
+			renewed := h.Renewed
+			st.Renewed = &renewed
+		}
+	}
+	return st
 }
 
 // handleConfig godoc
@@ -274,7 +330,24 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Config not available", http.StatusNotFound)
 		return
 	}
-	_ = json.NewEncoder(w).Encode(s.cfg)
+	public := *s.cfg
+	public.Snake.URL = redactNATSURLUserInfo(public.Snake.URL)
+	_ = json.NewEncoder(w).Encode(&public)
+}
+
+// redactNATSURLUserInfo removes credentials from every server in a NATS URL
+// list before the configuration is returned by the unauthenticated API.
+func redactNATSURLUserInfo(raw string) string {
+	servers := strings.Split(raw, ",")
+	for i, server := range servers {
+		parsed, err := url.Parse(strings.TrimSpace(server))
+		if err != nil || parsed.User == nil {
+			continue
+		}
+		parsed.User = nil
+		servers[i] = parsed.String()
+	}
+	return strings.Join(servers, ",")
 }
 
 // handleRacks godoc
@@ -292,7 +365,7 @@ func (s *Server) handleRacks(w http.ResponseWriter, r *http.Request) {
 		status := r.URL.Query().Get("status")
 		list, err := s.reg.List(r.Context(), status)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, err.Error(), errorStatus(err, http.StatusInternalServerError))
 			return
 		}
 		// Marshal before writing: an encode failure after the header is sent
@@ -342,7 +415,7 @@ func (s *Server) handleRackAction(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "Rack not found", http.StatusNotFound)
 				return
 			}
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, err.Error(), errorStatus(err, http.StatusInternalServerError))
 			return
 		}
 		w.WriteHeader(http.StatusOK)
@@ -372,9 +445,11 @@ func (s *Server) handleRackAction(w http.ResponseWriter, r *http.Request) {
 
 			// The status before the approval says whether the Rack becomes
 			// active now. A Rack that is active already runs the scenario.
-			wasActive := false
+			// The name before it says where the Rack listens: an approval
+			// that renames it reaches it under the name it has now.
+			wasActive, listening := false, ""
 			if prev, errPrev := s.reg.Get(r.Context(), id); errPrev == nil {
-				wasActive = prev.Status == "active"
+				wasActive, listening = prev.Status == "active", prev.Name
 			}
 			approvedAt := time.Now()
 			rack, err := s.reg.Approve(r.Context(), id, req.Name)
@@ -384,7 +459,7 @@ func (s *Server) handleRackAction(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				slog.Error("Approve failed", "error", err)
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				http.Error(w, err.Error(), errorStatus(err, http.StatusInternalServerError))
 				return
 			}
 			var passportBytes []byte
@@ -405,7 +480,10 @@ func (s *Server) handleRackAction(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// NOTIFY RACK
-			s.publishStatus(id, "active", "approved", passportBytes)
+			if listening == "" {
+				listening = rack.Name
+			}
+			s.publishStatus(listening, id, "active", "approved", passportBytes)
 			if !wasActive {
 				s.pushActiveToApprovedRack(r.Context(), rack.Name, approvedAt)
 			}
@@ -418,7 +496,7 @@ func (s *Server) handleRackAction(w http.ResponseWriter, r *http.Request) {
 					http.Error(w, "Rack not found", http.StatusNotFound)
 					return
 				}
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				http.Error(w, err.Error(), errorStatus(err, http.StatusInternalServerError))
 				return
 			}
 			var passportBytes []byte
@@ -439,7 +517,7 @@ func (s *Server) handleRackAction(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// NOTIFY RACK
-			s.publishStatus(id, "inactive", "suspended", passportBytes)
+			s.publishStatus(s.rackName(r.Context(), id), id, "inactive", "suspended", passportBytes)
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"status":"suspended"}`))
 			return
@@ -450,7 +528,7 @@ func (s *Server) handleRackAction(w http.ResponseWriter, r *http.Request) {
 					http.Error(w, "Rack not found", http.StatusNotFound)
 					return
 				}
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				http.Error(w, err.Error(), errorStatus(err, http.StatusInternalServerError))
 				return
 			}
 			var passportBytes []byte
@@ -471,7 +549,7 @@ func (s *Server) handleRackAction(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// NOTIFY RACK
-			s.publishStatus(id, "active", "activated", passportBytes)
+			s.publishStatus(s.rackName(r.Context(), id), id, "active", "activated", passportBytes)
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"status":"activated"}`))
 			return
@@ -497,12 +575,12 @@ func (s *Server) handleRackAction(w http.ResponseWriter, r *http.Request) {
 					http.Error(w, "Rack not found", http.StatusNotFound)
 					return
 				}
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				http.Error(w, err.Error(), errorStatus(err, http.StatusInternalServerError))
 				return
 			}
 
 			// NOTIFY RACK
-			s.publishStatus(id, rack.Status, "set_log_level:"+req.Level, nil)
+			s.publishStatus(rack.Name, id, rack.Status, "set_log_level:"+req.Level, nil)
 
 			w.WriteHeader(http.StatusOK)
 			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "level": req.Level})
@@ -516,12 +594,12 @@ func (s *Server) handleRackAction(w http.ResponseWriter, r *http.Request) {
 					http.Error(w, "Rack not found", http.StatusNotFound)
 					return
 				}
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				http.Error(w, err.Error(), errorStatus(err, http.StatusInternalServerError))
 				return
 			}
 
 			// NOTIFY RACK with "agent:shutdown" command
-			s.publishStatus(id, rack.Status, "agent:shutdown", nil)
+			s.publishStatus(rack.Name, id, rack.Status, "agent:shutdown", nil)
 
 			w.WriteHeader(http.StatusOK)
 			_ = json.NewEncoder(w).Encode(map[string]string{"status": "shutdown_command_sent"})
@@ -582,9 +660,13 @@ func (s *Server) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 		}
 
 		logs, err := s.reg.QueryLogs(r.Context(), query)
+		if errors.Is(err, registry.ErrTelemetryElsewhere) {
+			http.Error(w, err.Error(), http.StatusNotImplemented)
+			return
+		}
 		if err != nil {
 			slog.Error("QueryLogs failed", "error", err, "query", query)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, err.Error(), errorStatus(err, http.StatusInternalServerError))
 			return
 		}
 		if err := json.NewEncoder(w).Encode(logs); err != nil {
@@ -603,8 +685,12 @@ func (s *Server) handleTelemetry(w http.ResponseWriter, r *http.Request) {
 		}
 
 		metrics, err := s.reg.QueryMetrics(r.Context(), query)
+		if errors.Is(err, registry.ErrTelemetryElsewhere) {
+			http.Error(w, err.Error(), http.StatusNotImplemented)
+			return
+		}
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, err.Error(), errorStatus(err, http.StatusInternalServerError))
 			return
 		}
 		_ = json.NewEncoder(w).Encode(metrics)
@@ -685,6 +771,7 @@ func (s *Server) validateGearConfigs(data []byte) error {
 // @Failure 400 {string} string "The scenario could not be read or failed validation"
 // @Failure 409 {string} string "Imported, but not activated: a gear deploys to a name that is not an active Rack"
 // @Failure 500 {string} string "Imported, but activation failed"
+// @Failure 503 {string} string "No Mixer holds the write lease, or the cluster cannot answer yet: retry"
 // @Router /scenario/import [post]
 func (s *Server) handleScenarioImport(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -719,7 +806,7 @@ func (s *Server) handleScenarioImport(w http.ResponseWriter, r *http.Request) {
 	name, err := s.scenarioCtrl.Import(r.Context(), data, dryRun)
 	if err != nil {
 		slog.Error("Import failed", "error", err)
-		http.Error(w, fmt.Sprintf("Import failed: %v", err), http.StatusBadRequest)
+		http.Error(w, fmt.Sprintf("Import failed: %v", err), errorStatus(err, http.StatusBadRequest))
 		return
 	}
 
@@ -736,11 +823,13 @@ func (s *Server) handleScenarioImport(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// A deploy target that is not an active Rack is a state the caller can
-			// fix by enrolling it, not a fault of the Mixer.
+			// fix by enrolling it, not a fault of the Mixer. A control write
+			// with no lease holder is retryable, not a server fault.
 			status := http.StatusInternalServerError
 			if errors.Is(err, controller.ErrUnknownDeployTarget) {
 				status = http.StatusConflict
 			}
+			status = errorStatus(err, status)
 			slog.Error("Activation failed", "scenario", name, "error", err)
 			http.Error(w, fmt.Sprintf("Imported but activation failed: %v", err), status)
 			return
@@ -893,12 +982,22 @@ func (s *Server) pushActiveToApprovedRack(ctx context.Context, rackName string, 
 	}
 }
 
-func (s *Server) publishStatus(id uuid.UUID, status string, cmd string, passport []byte) {
+// rackName returns the registered name of a Rack, or "" when the registry
+// cannot give it.
+func (s *Server) rackName(ctx context.Context, id uuid.UUID) string {
+	if rack, err := s.reg.Get(ctx, id); err == nil {
+		return rack.Name
+	}
+	return ""
+}
+
+// publishStatus sends a Rack named name its status, a command and its passport.
+func (s *Server) publishStatus(name string, id uuid.UUID, status string, cmd string, passport []byte) {
 	if s.pub == nil {
 		return
 	}
 
-	topic := fmt.Sprintf("flux.agent.notify.%s", id.String())
+	topic := fluxmsg.NotifySubject(name, id)
 
 	payload := map[string]any{
 		"status":   status,
@@ -933,7 +1032,9 @@ func (s *Server) publishStatus(id uuid.UUID, status string, cmd string, passport
 // @Produce json
 // @Param allow_unsigned query boolean false "Allow unsigned modules"
 // @Param body body []byte true "Wasm binary payload"
-// @Success 200 {object} map[string]interface{}
+// @Success 200 {object} catalog.WasmMetadata
+// @Failure 400 {string} string "The module is refused: no trusted signature, or it fails the sandbox"
+// @Failure 503 {string} string "The catalog store on the bus did not take the module: nothing was imported"
 // @Router /wasm/import [post]
 func (s *Server) handleWasmImport(w http.ResponseWriter, r *http.Request) {
 	if s.wasmCatalog == nil {
@@ -952,6 +1053,10 @@ func (s *Server) handleWasmImport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	meta, err := s.wasmCatalog.Import(r.Context(), data, allowUnsigned)
+	if errors.Is(err, catalog.ErrUnavailable) {
+		http.Error(w, fmt.Sprintf("Wasm import failed, nothing was imported: %v", err), http.StatusServiceUnavailable)
+		return
+	}
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Wasm validation failed: %v", err), http.StatusBadRequest)
 		return
@@ -963,10 +1068,11 @@ func (s *Server) handleWasmImport(w http.ResponseWriter, r *http.Request) {
 
 // handleWasmCatalog godoc
 // @Summary List Wasm Catalog
-// @Description Returns the catalog of trusted and available Wasm modules
+// @Description Returns the Wasm modules of the shared catalog, the same on every Mixer
 // @Tags wasm
 // @Produce json
-// @Success 200 {array} map[string]interface{}
+// @Success 200 {array} catalog.WasmMetadata
+// @Failure 503 {string} string "The catalog store on the bus is not available"
 // @Router /wasm/catalog [get]
 func (s *Server) handleWasmCatalog(w http.ResponseWriter, r *http.Request) {
 	if s.wasmCatalog == nil {
@@ -974,14 +1080,97 @@ func (s *Server) handleWasmCatalog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	list, err := s.wasmCatalog.List()
+	list, err := s.wasmCatalog.List(r.Context())
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to read Wasm catalog: %v", err), http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("Failed to read Wasm catalog: %v", err), wasmErrorStatus(err))
 		return
 	}
 
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(list)
+}
+
+// wasmErrorStatus maps a catalog error to its HTTP status.
+func wasmErrorStatus(err error) int {
+	switch {
+	case errors.Is(err, catalog.ErrUnavailable):
+		return http.StatusServiceUnavailable
+	case errors.Is(err, catalog.ErrInvalidKey):
+		return http.StatusBadRequest
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
+// handleWasmKeys godoc
+// @Summary List trusted Wasm vendors
+// @Description Returns the vendors of the shared keyring, the same on every Mixer, revoked ones included
+// @Tags wasm
+// @Produce json
+// @Success 200 {array} catalog.TrustedKey
+// @Failure 503 {string} string "The keyring store on the bus is not available"
+// @Router /wasm/keys [get]
+func (s *Server) handleWasmKeys(w http.ResponseWriter, r *http.Request) {
+	if s.wasmCatalog == nil {
+		http.Error(w, "Wasm Catalog is not initialized", http.StatusServiceUnavailable)
+		return
+	}
+	keys, err := s.wasmCatalog.ListKeys(r.Context())
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to read the keyring: %v", err), wasmErrorStatus(err))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(keys)
+}
+
+// handleWasmKeyTrust godoc
+// @Summary Trust a Wasm vendor
+// @Description Adds the vendor's Ed25519 public key (32 raw bytes) to the shared keyring, or replaces it. Every Mixer trusts it at its next import.
+// @Tags wasm
+// @Accept application/octet-stream
+// @Param vendor path string true "Vendor name: letters, digits, - and _"
+// @Param body body []byte true "Ed25519 public key, 32 bytes"
+// @Success 204
+// @Failure 400 {string} string "Invalid vendor name or key"
+// @Failure 503 {string} string "The keyring store on the bus is not available"
+// @Router /wasm/keys/{vendor} [put]
+func (s *Server) handleWasmKeyTrust(w http.ResponseWriter, r *http.Request) {
+	if s.wasmCatalog == nil {
+		http.Error(w, "Wasm Catalog is not initialized", http.StatusServiceUnavailable)
+		return
+	}
+	pub, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1024))
+	if err != nil {
+		http.Error(w, "Failed to read the public key", http.StatusBadRequest)
+		return
+	}
+	if err = s.wasmCatalog.TrustKey(r.Context(), r.PathValue("vendor"), pub); err != nil {
+		http.Error(w, err.Error(), wasmErrorStatus(err))
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleWasmKeyRevoke godoc
+// @Summary Revoke a Wasm vendor
+// @Description Stops trusting the vendor on every Mixer. The vendor stays in the keyring as revoked, so a key file a Mixer still holds does not add it back.
+// @Tags wasm
+// @Param vendor path string true "Vendor name"
+// @Success 204
+// @Failure 400 {string} string "Invalid vendor name"
+// @Failure 503 {string} string "The keyring store on the bus is not available"
+// @Router /wasm/keys/{vendor} [delete]
+func (s *Server) handleWasmKeyRevoke(w http.ResponseWriter, r *http.Request) {
+	if s.wasmCatalog == nil {
+		http.Error(w, "Wasm Catalog is not initialized", http.StatusServiceUnavailable)
+		return
+	}
+	if err := s.wasmCatalog.RevokeKey(r.Context(), r.PathValue("vendor")); err != nil {
+		http.Error(w, err.Error(), wasmErrorStatus(err))
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // handleGears godoc
@@ -1061,6 +1250,17 @@ func (s *Server) handleSimControl(w http.ResponseWriter, r *http.Request) {
 
 	if args.Gear == "" {
 		http.Error(w, "gear is required", http.StatusBadRequest)
+		return
+	}
+
+	// The gear names the NATS subject the command is published on
+	// ("flux.ctrl.<gear>", see ctrl.ConfirmedPublish). A separator or
+	// wildcard would publish beside the named gear: to every gear, with ">" —
+	// or fail to match any, with "." splitting the token. Reject those names
+	// rather than remapping them: the gears subscribe under their own names,
+	// so a remapped subject would acknowledge nobody and read as down.
+	if strings.ContainsAny(args.Gear, ". *>") {
+		http.Error(w, `gear must be one subject token, without ".", " " or wildcards ("*" and ">")`, http.StatusBadRequest)
 		return
 	}
 

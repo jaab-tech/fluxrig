@@ -1,0 +1,114 @@
+# Copyright (c) 2026 JAAB Tech SAS, Uruguay
+# SPDX-License-Identifier: Apache-2.0
+#
+# Three stock NATS servers in one cluster, three Mixers on it in external mode
+# with the write lease on, and two Racks that know every NATS server. Site a
+# holds n1, n2, m1, m2 and r1; site b holds n3, m3 and r2. PROFILE=latam
+# shapes the link between the two sites.
+#
+# run.sh writes every config into .build/site. Addresses come from HA_NET
+# (default 172.31.77).
+name: fluxrig-ha-mixers
+
+x-node: &node
+  image: fluxrig-ha-mixer:local
+  cap_add: [NET_ADMIN]
+  restart: "no"
+  volumes:
+    - ./.build/site:/etc/fluxrig:ro
+
+x-nats: &nats
+  <<: *node
+  entrypoint: ["/usr/local/bin/nats-server"]
+
+x-mixer: &mixer
+  <<: *node
+  # The rolling scenario starts the Mixers on the previous version.
+  image: ${HA_MIXER_IMAGE:-fluxrig-ha-mixer:local}
+  volumes:
+    - ./.build/site:/etc/fluxrig:ro
+    # One signing key for all three Mixers: a Rack refuses a passport signed
+    # by a key other than the one it pinned.
+    - ./.build/cluster.key:/data/cluster.key:ro
+
+x-rack: &rack
+  <<: *node
+  entrypoint: ["/usr/local/bin/fluxrig"]
+  working_dir: /data
+  volumes:
+    - ./.build/site:/etc/fluxrig:ro
+    - ../../../examples/specs:/specs:ro
+
+services:
+  n1:
+    <<: *nats
+    container_name: fluxrig-ha-n1
+    command: ["-c", "/etc/fluxrig/n1.conf"]
+    ports: ["4223:4222"]
+    networks: { hanet: { ipv4_address: "${HA_NET:-172.31.77}.31" } }
+  n2:
+    <<: *nats
+    container_name: fluxrig-ha-n2
+    command: ["-c", "/etc/fluxrig/n2.conf"]
+    ports: ["4224:4222"]
+    networks: { hanet: { ipv4_address: "${HA_NET:-172.31.77}.32" } }
+  n3:
+    <<: *nats
+    container_name: fluxrig-ha-n3
+    command: ["-c", "/etc/fluxrig/n3.conf"]
+    ports: ["4225:4222"]
+    networks: { hanet: { ipv4_address: "${HA_NET:-172.31.77}.33" } }
+  m1:
+    <<: *mixer
+    container_name: fluxrig-ha-m1
+    command: ["-c", "/etc/fluxrig/m1.toml"]
+    ports: ["8091:8090"]
+    depends_on: [n1, n2, n3]
+    networks: { hanet: { ipv4_address: "${HA_NET:-172.31.77}.11" } }
+  m2:
+    <<: *mixer
+    container_name: fluxrig-ha-m2
+    command: ["-c", "/etc/fluxrig/m2.toml"]
+    ports: ["8092:8090"]
+    depends_on: [n1, n2, n3]
+    networks: { hanet: { ipv4_address: "${HA_NET:-172.31.77}.12" } }
+  m3:
+    <<: *mixer
+    container_name: fluxrig-ha-m3
+    command: ["-c", "/etc/fluxrig/m3.toml"]
+    ports: ["8093:8090"]
+    depends_on: [n1, n2, n3]
+    networks: { hanet: { ipv4_address: "${HA_NET:-172.31.77}.13" } }
+  # The shared telemetry stores of TELEMETRY=s3 and TELEMETRY=otlp: an S3
+  # store in memory and an OTLP collector that keeps what it takes.
+  s3:
+    <<: *node
+    container_name: fluxrig-ha-s3
+    entrypoint: ["/usr/local/bin/s3server", "-addr", ":9000"]
+    networks: { hanet: { ipv4_address: "${HA_NET:-172.31.77}.40" } }
+  otlp:
+    <<: *node
+    container_name: fluxrig-ha-otlp
+    entrypoint: ["/usr/local/bin/otlpreceiver", "-addr", ":4318", "-out", "/tmp/otlp.jsonl"]
+    networks: { hanet: { ipv4_address: "${HA_NET:-172.31.77}.41" } }
+  r1:
+    <<: *rack
+    container_name: fluxrig-ha-r1
+    command: ["rack", "-c", "/etc/fluxrig/r1.toml"]
+    # The ISO 8583 server of the events scenario.
+    ports: ["8888:8888"]
+    depends_on: [n1, n2, n3]
+    networks: { hanet: { ipv4_address: "${HA_NET:-172.31.77}.21" } }
+  r2:
+    <<: *rack
+    container_name: fluxrig-ha-r2
+    command: ["rack", "-c", "/etc/fluxrig/r2.toml"]
+    depends_on: [n1, n2, n3]
+    networks: { hanet: { ipv4_address: "${HA_NET:-172.31.77}.22" } }
+
+networks:
+  hanet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: "${HA_NET:-172.31.77}.0/24"

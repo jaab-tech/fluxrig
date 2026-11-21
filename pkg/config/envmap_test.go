@@ -109,8 +109,23 @@ func assertEveryLeafFieldRoundTrips(t *testing.T, zero any, load func() (any, er
 			// very check this test exists to coexist with.
 			if isDurationField(l.path[len(l.path)-1]) {
 				val = fmt.Sprintf("%ds", 1+i)
+				// registry.lease_renew must be at most half of lease_ttl;
+				// a distinct value well below every other one keeps it valid.
+				if strings.Join(l.path, ".") == "registry.lease_renew" {
+					val = "1ms"
+				}
+				// snake.ack_wait must be longer than operation_timeout;
+				// a distinct value above every other one keeps it valid.
+				if strings.Join(l.path, ".") == "snake.ack_wait" {
+					val = "99999s"
+				}
 			} else {
 				val = fmt.Sprintf("sentinel-%d", i)
+			}
+			// The storage type is one of a set; s3 loads with the sentinel
+			// endpoint and bucket, and with the lease on (every bool is true).
+			if strings.Join(l.path, ".") == "observability.storage.type" {
+				val = "s3"
 			}
 		}
 		want[strings.Join(l.path, ".")] = val

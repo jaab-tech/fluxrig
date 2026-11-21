@@ -163,6 +163,9 @@ func (k *natsKV) Keys(ctx context.Context, bucket string) ([]string, error) {
 
 	// NATS Keys() returns KeyLister
 	lister, err := kv.Keys(ctx)
+	if errors.Is(err, jetstream.ErrNoKeysFound) {
+		return nil, nil // an empty bucket has no keys
+	}
 	if err != nil {
 		return nil, err
 	}

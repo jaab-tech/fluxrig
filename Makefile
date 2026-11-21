@@ -344,6 +344,21 @@ test-robot-specs: robot-prep build-bin ## Run Robot Spec Suite (the contract a s
 	@echo "Running Spec Suite..."
 	@cd test/robot && ./run.sh suites/specs
 
+# The HA testbed: three stock NATS servers, three Mixers in external mode and
+# two Racks in Docker, at the cross-site latency profile, with TLS and the
+# permissions of each Rack. It runs on its own, like the load and chaos
+# suites: it is sized for a quiet machine. Needs Docker with NET_ADMIN.
+.PHONY: test-ha
+test-ha: ## Run the Mixer HA testbed (Docker): Mixer and NATS faults, cut-offs, events, permissions
+	@PROFILE=$${PROFILE:-latam} test/ha/mixers/run.sh
+
+# The NATS chaos testbed: stock JetStream nodes in Docker, faults between
+# them, the failover tool measuring write unavailability and lost writes per
+# scenario. Needs Docker with NET_ADMIN. Runs on its own like test-ha.
+.PHONY: test-ha-failover
+test-ha-failover: ## Run the NATS HA chaos testbed (Docker): partitions, loss, write unavailability
+	@test/ha/testbed/run.sh
+
 test-robot-telemetry: robot-prep build-bin ## Run Robot Telemetry Suite
 	@echo "Running Telemetry Coverage Test..."
 	@cd test/robot && ./run.sh suites/telemetry/force_log_coverage.robot

@@ -207,3 +207,16 @@ func TestLoadMixer_FileNotFound(t *testing.T) {
 		t.Error("Expected error for missing file")
 	}
 }
+
+func TestLoadMixer_Pings(t *testing.T) {
+	cfg, err := LoadMixer("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Snake.PingInterval != DefaultPingInterval || cfg.Snake.MaxPingsOut != DefaultMaxPingsOut {
+		t.Errorf("ping defaults: got %q and %d", cfg.Snake.PingInterval, cfg.Snake.MaxPingsOut)
+	}
+	if _, err := LoadMixer(writeTempTOML(t, "[snake]\nmax_pings_out = 0\n")); err == nil {
+		t.Error("max_pings_out = 0: expected an error")
+	}
+}

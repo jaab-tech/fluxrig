@@ -393,3 +393,13 @@ func TestGear_WithoutAnEventProviderPublishesNothing(t *testing.T) {
 		t.Fatal("a context with no event provider started a publisher")
 	}
 }
+
+func TestClientStopIsSafeTwice(t *testing.T) {
+	client, _, _ := eventClient(t, nil)
+	if err := client.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Stop(); err != nil {
+		t.Fatal(err)
+	}
+}

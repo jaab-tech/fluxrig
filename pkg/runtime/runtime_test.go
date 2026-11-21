@@ -30,9 +30,12 @@ type MockBus struct {
 	FailSubscribe  bool
 	DisableReflect bool
 	PanicOnPublish bool // panic on a non-probe Publish, to exercise emit recovery
-	handlers       map[string]bus.Handler
-	pubMu          sync.Mutex
-	published      []string // subjects of non-probe Publishes, for assertions
+	// PublishDelay is how long each Publish takes, as a JetStream publish
+	// across a slow link does before its acknowledgement.
+	PublishDelay time.Duration
+	handlers     map[string]bus.Handler
+	pubMu        sync.Mutex
+	published    []string // subjects of non-probe Publishes, for assertions
 }
 
 func (m *MockBus) publishedSubjects() []string {
@@ -48,6 +51,9 @@ func (m *MockBus) Connect(url string, opts bus.ConnectOptions) error {
 	return nil
 }
 func (m *MockBus) Publish(ctx context.Context, subject string, msg *fluxmsg.FluxMsg) error {
+	if m.PublishDelay > 0 {
+		time.Sleep(m.PublishDelay) // the simulated round trip, not a wait on a condition
+	}
 	if m.handlers == nil {
 		m.handlers = make(map[string]bus.Handler)
 	}
@@ -478,6 +484,30 @@ func TestManager_ConvergenceTimeout(t *testing.T) {
 		// Accept both for now as MockBus behavior may vary across environments
 		t.Errorf("Wrong error: %v", err)
 	}
+}
+
+// A probe whose publish takes longer than the probe interval, as across a
+// slow link with the stream leader on the other side, still converges. The
+// wait looked at the converged subjects only when no tick was due, and with
+// every publish longer than a tick one always was: it sent probes until the
+// timeout, and the Rack never started the scenario.
+func TestManager_ConvergesWhenAProbeTakesLongerThanItsInterval(t *testing.T) {
+	mockBus := &MockBus{PublishDelay: 600 * time.Millisecond}
+	mid := uuid.New()
+	gen, _ := idgen.New(mid)
+	mgr := NewManager(mid, "test-rack", mockBus, gen, &MockManager{}, time.Second, 5*time.Second, 50*time.Millisecond, false, false, nil)
+
+	sc := &registry.Scenario{
+		Meta: registry.ScenarioMeta{Name: "test", Version: "1.0"},
+		Gears: []registry.GearSpec{
+			{Name: "g1", Type: "io_tcp", Deploy: "test-rack", Config: map[string]any{"mode": "server", "bind": ":0"}},
+		},
+		Wires: []registry.WireSpec{
+			{From: "g2.out", To: "g1.in", Lane: registry.LaneGuaranteed},
+		},
+	}
+	require.NoError(t, mgr.ApplyScenario(context.Background(), sc))
+	mgr.Shutdown()
 }
 
 // TestManager_WaitForConvergenceDoesNotRaceTheProbeHandler is a regression test

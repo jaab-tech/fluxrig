@@ -211,3 +211,43 @@ func TestScenarioSession_AScenarioAlreadyRunningIsNotStartedAgain(t *testing.T) 
 	assert.False(t, s.resume(context.Background(), slog.Default(), again, id, "rack-1"), "and the online resume does nothing")
 	assert.Empty(t, again.applied)
 }
+
+// The Mixer can send the scenario that already runs again: a push arrives at
+// least once, a subscription that replaces its consumer redelivers it, and a
+// Rack that reconnects gets it again. That must keep the gears running; a
+// different scenario must not.
+func TestScenarioSession_RunningScenarioIsNotAppliedAgain(t *testing.T) {
+	same := func() *fluxmsg.ScenarioPayload {
+		return &fluxmsg.ScenarioPayload{Scenario: []byte(savedScenarioYAML), Timestamp: 1}
+	}
+	s := &scenarioSession{}
+	assert.False(t, s.keepsGears(same()), "nothing runs yet")
+
+	s.applied(slog.Default(), same())
+	assert.True(t, s.keepsGears(same()), "the same scenario again keeps the gears")
+	assert.False(t, s.keepsGears(&fluxmsg.ScenarioPayload{Scenario: []byte("meta:\n  name: other\n")}), "a different scenario is applied")
+
+	// A scenario resumed from the local copy and confirmed by the Mixer runs too.
+	id := uuid.New()
+	s2 := sessionWith(t, savedStore(t, id, "rack-1", savedScenarioYAML))
+	require.True(t, s2.resume(context.Background(), slog.Default(), &fakeApplier{}, id, "rack-1"))
+	require.True(t, s2.consumeResumed([]byte(savedScenarioYAML)))
+	assert.True(t, s2.keepsGears(same()))
+}
+
+// An activation of the scenario that already runs is applied, which restarts
+// the gears: that is how an operator restarts a gear that stopped. It is
+// applied once, however often the push is delivered.
+func TestScenarioSession_ActivationIsAppliedOnce(t *testing.T) {
+	s := &scenarioSession{}
+	s.applied(slog.Default(), &fluxmsg.ScenarioPayload{Scenario: []byte(savedScenarioYAML), Timestamp: 1})
+
+	activation := &fluxmsg.ScenarioPayload{Scenario: []byte(savedScenarioYAML), Timestamp: 2, Reapply: true}
+	assert.False(t, s.keepsGears(activation), "an activation restarts the gears")
+	s.applied(slog.Default(), activation)
+	assert.True(t, s.keepsGears(activation), "its redelivery does not")
+	assert.True(t, s.keepsGears(&fluxmsg.ScenarioPayload{Scenario: []byte(savedScenarioYAML), Timestamp: 3}),
+		"nor does the push of a Rack that reconnects")
+	assert.False(t, s.keepsGears(&fluxmsg.ScenarioPayload{Scenario: []byte(savedScenarioYAML), Timestamp: 4, Reapply: true}),
+		"a new activation does")
+}

@@ -58,6 +58,15 @@ func (r *busRef) Publish(ctx context.Context, subject string, msg *fluxmsg.FluxM
 	return b.Publish(ctx, subject, msg)
 }
 
+// PublishRawBatch forwards a batch to the current bus.
+func (r *busRef) PublishRawBatch(ctx context.Context, subject string, msgs []bus.RawMessage) (int, error) {
+	b := r.current()
+	if b == nil {
+		return 0, errNoBus
+	}
+	return bus.PublishRawBatch(ctx, b, subject, msgs)
+}
+
 func (r *busRef) PublishRaw(ctx context.Context, subject string, data []byte, fluxID uuid.UUID) error {
 	b := r.current()
 	if b == nil {
@@ -109,17 +118,6 @@ func (r *busRef) Close() {
 	if b := r.current(); b != nil {
 		b.Close()
 	}
-}
-
-// Purge empties the stream, or just subject within it, of a bus that can, and
-// does nothing for one that cannot.
-func (r *busRef) Purge(ctx context.Context, subject string) error {
-	if p, ok := r.current().(interface {
-		Purge(context.Context, string) error
-	}); ok {
-		return p.Purge(ctx, subject)
-	}
-	return nil
 }
 
 var _ bus.Bus = (*busRef)(nil)

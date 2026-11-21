@@ -107,11 +107,24 @@ type outbox struct {
 	// before it parks behind it (rack.outbox_backpressure_timeout). Zero
 	// parks at once.
 	wait time.Duration
+	// inflight counts the subjects with a batch send in progress outside
+	// the lock (see tryDirect). A live emission never goes direct while
+	// one is in flight on its subject: the batch may yet fail and park its
+	// suffix, which a direct send would overtake.
+	inflight map[string]int
+	// evictions counts the items the cap has evicted. A drain pass filters
+	// its runs against the live queue only when this moved since the
+	// snapshot, so the common pass costs no scan.
+	evictions uint64
 	// sendEvent publishes a parked event. A drain's publish takes a message.
 	sendEvent func(ctx context.Context, subject string, data []byte, id uuid.UUID) error
-	dropped   uint64
-	parked    uint64
-	drained   uint64
+	// sendEvents publishes a run of parked events of one subject in one
+	// batch, and returns how many of the first ones the bus took. Nil sends
+	// them one at a time with sendEvent.
+	sendEvents func(ctx context.Context, subject string, msgs []bus.RawMessage) (int, error)
+	dropped    uint64
+	parked     uint64
+	drained    uint64
 }
 
 func newOutbox(maxMessages, drainRetries int) *outbox {
@@ -122,12 +135,13 @@ func newOutbox(maxMessages, drainRetries int) *outbox {
 		drainRetries = defaultOutboxDrainRetries
 	}
 	return &outbox{
-		items:   list.New(),
-		max:     maxMessages,
-		retries: drainRetries,
-		ordered: defaultOutboxOrder == OutboxOrderSubject,
-		moved:   make(chan struct{}),
-		wait:    defaultOutboxBackpressure,
+		items:    list.New(),
+		max:      maxMessages,
+		retries:  drainRetries,
+		ordered:  defaultOutboxOrder == OutboxOrderSubject,
+		moved:    make(chan struct{}),
+		wait:     defaultOutboxBackpressure,
+		inflight: make(map[string]int),
 	}
 }
 
@@ -185,7 +199,7 @@ func (o *outbox) waitClear(ctx context.Context, subject string) {
 	defer timer.Stop()
 	for {
 		o.mu.Lock()
-		if !o.ordered || !o.heldLocked(subject) || !o.draining || o.busState == busDown {
+		if !o.ordered || (!o.heldLocked(subject) && o.inflight[subject] == 0) || !o.draining || o.busState == busDown {
 			o.mu.Unlock()
 			return
 		}
@@ -223,6 +237,7 @@ func (o *outbox) parkLocked(subject string, msg *fluxmsg.FluxMsg) {
 		}
 		o.items.Remove(victim)
 		o.dropped++
+		o.evictions++
 		countOutboxDropped()
 	}
 	o.items.PushBack(outboxItem{subject: subject, msg: msg})
@@ -259,13 +274,45 @@ func (o *outbox) parkEventLocked(subject string, ev *outboxEvent) bool {
 	return true
 }
 
+// tryDirect reserves a direct batch send on subject, and reports whether
+// one may go. With subject order a direct send while the subject is held
+// or another batch is in flight would overtake what is (or will be)
+// parked, so those park instead. The reservation is visible to every later
+// decision until endDirect; unordered mode never parks, so it never
+// reserves. Callers must pair a true with endDirect.
+func (o *outbox) tryDirect(subject string) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if !o.ordered {
+		return true
+	}
+	if o.heldLocked(subject) || o.inflight[subject] > 0 {
+		return false
+	}
+	o.inflight[subject]++
+	return true
+}
+
+// endDirect releases a reservation tryDirect made.
+func (o *outbox) endDirect(subject string) {
+	o.mu.Lock()
+	if o.inflight[subject] <= 1 {
+		delete(o.inflight, subject)
+	} else {
+		o.inflight[subject]--
+	}
+	o.signalMovedLocked()
+	o.mu.Unlock()
+}
+
 // parkEventIfHeld parks an event behind the items on its subject. held reports
 // whether there are such items, and parked whether the event found room. The
-// check and the park share one lock, as in parkIfHeld.
+// check and the park share one lock, as in parkIfHeld. A batch send in
+// flight on the subject counts as held: it may yet park its suffix.
 func (o *outbox) parkEventIfHeld(subject string, ev *outboxEvent) (held, parked bool) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	if !o.ordered || !o.heldLocked(subject) {
+	if !o.ordered || (!o.heldLocked(subject) && o.inflight[subject] == 0) {
 		return false, false
 	}
 	return true, o.parkEventLocked(subject, ev)
@@ -282,11 +329,12 @@ func (o *outbox) hasEvents() bool {
 // a message on subject, and reports whether it did. A live emission that went
 // straight to the bus would overtake the parked ones, so it queues behind
 // them instead. The check and the park share one lock, so a drain cannot
-// empty the subject between them.
+// empty the subject between them. A batch send in flight on the subject
+// counts as held, for the same reason.
 func (o *outbox) parkIfHeld(subject string, msg *fluxmsg.FluxMsg) bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	if !o.ordered || !o.heldLocked(subject) {
+	if !o.ordered || (!o.heldLocked(subject) && o.inflight[subject] == 0) {
 		return false
 	}
 	o.parkLocked(subject, msg)
@@ -369,11 +417,21 @@ func (o *outbox) runDrain(ctx context.Context, publish func(context.Context, str
 		}
 		pass := o.snapshotLocked()
 		ordered := o.ordered
+		epoch := o.evictions
 		o.mu.Unlock()
 
 		var forwarded int
 		held := make(map[string]bool)
+		// queued mirrors the pass so the membership checks below are O(1)
+		// per candidate instead of a full list scan each (see holds);
+		// gone marks what this pass already removed.
+		queued := make(map[outboxItem]struct{}, len(pass))
 		for _, it := range pass {
+			queued[it] = struct{}{}
+		}
+		gone := make(map[outboxItem]bool)
+		for i := 0; i < len(pass); i++ {
+			it := pass[i]
 			if ctx.Err() != nil {
 				stop()
 				return
@@ -381,16 +439,31 @@ func (o *outbox) runDrain(ctx context.Context, publish func(context.Context, str
 			if ordered && held[it.subject] {
 				continue
 			}
+			// Consecutive events of one subject leave in one batch: one at a
+			// time, a drain across a slow link moved about one event per
+			// round trip, slower than a busy gear makes them.
+			if run := o.eventRun(pass, i, queued, gone); len(run) > 1 && o.sendEvents != nil {
+				sent := o.sendEventRun(ctx, it.subject, run, epoch, gone)
+				forwarded += sent
+				if sent < len(run) {
+					held[it.subject] = true
+				}
+				i += len(run) - 1
+				continue
+			}
 			err := o.publishWithRetries(ctx, publish, it)
 			switch {
 			case errors.Is(err, errOutboxEvicted):
 				// The cap evicted it after the snapshot. It is counted as
 				// dropped already, and it is not sent.
+				gone[it] = true
 			case err == nil:
 				o.remove(it, false)
+				gone[it] = true
 				forwarded++
 			case errors.Is(err, bus.ErrInvalidMessage):
 				o.remove(it, true)
+				gone[it] = true
 				forwarded++
 				log().Error("outbox: dropping a message the bus can never accept",
 					"subject", it.subject, "error", err)
@@ -421,6 +494,87 @@ func (o *outbox) runDrain(ctx context.Context, publish func(context.Context, str
 			return
 		}
 	}
+}
+
+// outboxEventBatch bounds the events one drain batch sends.
+const outboxEventBatch = 256
+
+// eventRun returns the events of one subject that follow each other in pass
+// from i, at most outboxEventBatch. queued mirrors the pass snapshot and
+// gone marks what this pass already removed, so each candidate costs O(1)
+// instead of a full list scan. A run that the cap evicted mid-pass is
+// filtered by sendEventRun before it is sent.
+func (o *outbox) eventRun(pass []outboxItem, i int, queued map[outboxItem]struct{}, gone map[outboxItem]bool) []outboxItem {
+	first := pass[i]
+	if first.event == nil {
+		return nil
+	}
+	var run []outboxItem
+	for j := i; j < len(pass) && len(run) < outboxEventBatch; j++ {
+		it := pass[j]
+		if it.event == nil || it.subject != first.subject {
+			break
+		}
+		if _, ok := queued[it]; !ok || gone[it] {
+			break
+		}
+		run = append(run, it)
+	}
+	return run
+}
+
+// sendEventRun sends a run of events in one batch, takes the ones the bus
+// took out of the queue, and returns how many. epoch is the eviction count
+// when the pass snapshot was taken: only when it moved does the run get
+// filtered against the live queue, so a pass with no eviction costs no
+// scan and an item the cap evicted mid-pass is never sent. What it takes
+// out is marked in gone, so a later run in the same pass never resends it.
+func (o *outbox) sendEventRun(ctx context.Context, subject string, run []outboxItem, epoch uint64, gone map[outboxItem]bool) int {
+	if o.evictionEpoch() != epoch {
+		run = o.present(run)
+		if len(run) == 0 {
+			return 0
+		}
+	}
+	msgs := make([]bus.RawMessage, len(run))
+	for k, it := range run {
+		msgs[k] = bus.RawMessage{Data: it.event.data, ID: it.event.id}
+	}
+	sent, err := o.sendEvents(ctx, subject, msgs)
+	for _, it := range run[:sent] {
+		o.remove(it, false)
+		gone[it] = true
+	}
+	if err != nil {
+		o.setBusState(busDown)
+	} else {
+		o.setBusState(busUp)
+	}
+	return sent
+}
+
+// evictionEpoch returns how many items the cap has evicted.
+func (o *outbox) evictionEpoch() uint64 {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.evictions
+}
+
+// present returns the items of run that are still queued, in order.
+func (o *outbox) present(run []outboxItem) []outboxItem {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	live := make(map[outboxItem]struct{}, o.items.Len())
+	for e := o.items.Front(); e != nil; e = e.Next() {
+		live[e.Value.(outboxItem)] = struct{}{}
+	}
+	out := run[:0]
+	for _, it := range run {
+		if _, ok := live[it]; ok {
+			out = append(out, it)
+		}
+	}
+	return out
 }
 
 // errOutboxEvicted reports that the cap evicted an item while a drain held it

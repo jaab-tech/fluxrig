@@ -6,10 +6,16 @@ package io
 import (
 	"context"
 	"io"
+	"log/slog"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/jaab-tech/fluxrig/pkg/idgen"
 )
 
 // drainServer is a server with one idle client connection, as a terminal
@@ -31,12 +37,23 @@ func TestServerDrainReturnsWithIdleConnections(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	start := time.Now()
-	if err := srv.Drain(ctx); err != nil {
-		t.Fatalf("Drain with an idle connection: %v", err)
+	done := make(chan error, 1)
+	go func() { done <- srv.Drain(ctx) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Drain with an idle connection: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("Drain did not return before its deadline with only idle connections")
 	}
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Fatalf("Drain took %s with only idle connections", elapsed)
+	// Drain waits for readers, not for connections: no connection is
+	// reading, and the idle one is still the server's to close at Stop.
+	if got := srv.readers.Load(); got != 0 {
+		t.Fatalf("Drain returned with %d connection(s) still reading", got)
+	}
+	if got := srv.activeConns.Load(); got == 0 {
+		t.Fatal("Drain closed the idle connection; only Stop closes connections")
 	}
 }
 
@@ -77,20 +94,34 @@ func TestServerDrainKeepsTheSocketOpenForReplies(t *testing.T) {
 }
 
 // A handler that is still inside the emit of a frame has not stopped reading:
-// Drain waits for it, and gives up at its deadline with an error that names how
-// many connections still read.
+// Drain waits for it, returning only after the handler leaves emit. The
+// ordering is what the test asserts: Drain is still waiting while the handler
+// is inside, and returns once it leaves.
 func TestServerDrainWaitsForAHandlerInsideEmit(t *testing.T) {
 	srv, release := stuckServer(t, time.Second)
-	time.AfterFunc(150*time.Millisecond, func() { close(release) })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	start := time.Now()
-	if err := srv.Drain(ctx); err != nil {
-		t.Fatalf("Drain: %v", err)
+	done := make(chan error, 1)
+	go func() { done <- srv.Drain(ctx) }()
+
+	// While the handler is inside emit, Drain must still be waiting: a return
+	// here, for any reason, is the failure. The grace only gives a wrong
+	// return a chance to show itself; it asserts nothing about Drain's pace.
+	select {
+	case err := <-done:
+		t.Fatalf("Drain returned %v before the handler left emit", err)
+	case <-time.After(150 * time.Millisecond):
 	}
-	if elapsed := time.Since(start); elapsed < 150*time.Millisecond {
-		t.Fatalf("Drain returned after %s, before the handler left emit", elapsed)
+	close(release)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Drain: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("Drain did not return after the handler left emit")
 	}
 }
 
@@ -114,5 +145,65 @@ func TestServerStopTwice(t *testing.T) {
 	}
 	if err := srv.Stop(); err != nil {
 		t.Fatalf("second Stop: %v", err)
+	}
+}
+
+// errorCounter counts the records at ERROR that a server logs.
+type errorCounter struct {
+	slog.Handler
+	mu   sync.Mutex
+	msgs []string
+}
+
+func (h *errorCounter) Enabled(context.Context, slog.Level) bool { return true }
+func (h *errorCounter) Handle(_ context.Context, r slog.Record) error {
+	if r.Level >= slog.LevelError {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		h.msgs = append(h.msgs, r.Message)
+	}
+	return nil
+}
+func (h *errorCounter) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *errorCounter) WithGroup(string) slog.Handler      { return h }
+func (h *errorCounter) errors() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]string(nil), h.msgs...)
+}
+
+// Drain closes the listener on purpose, so a graceful stop has no accept error
+// to report. Before, the accept loop logged one at ERROR for every retry between
+// Drain and Stop, on every graceful stop.
+func TestServerDrainLogsNoAcceptError(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Mode = ModeServer
+	cfg.Bind = "127.0.0.1:0"
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	gen, err := idgen.New(uuid.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+	logs := &errorCounter{}
+	srv := NewServer(&cfg, slog.New(logs), (&tpduSink{}).emit, gen)
+	if err = srv.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = srv.Stop() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err = srv.Drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-srv.acceptDone:
+	case <-ctx.Done():
+		t.Fatalf("the accept loop still runs after Drain: %q", logs.errors())
+	}
+	if got := logs.errors(); len(got) != 0 {
+		t.Fatalf("a graceful stop logged at ERROR: %q", got)
 	}
 }

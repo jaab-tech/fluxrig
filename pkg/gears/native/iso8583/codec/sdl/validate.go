@@ -41,6 +41,14 @@ const (
 	ViolationCheck = "check"
 )
 
+// valueWithheld stands in a Reason for the value that broke the rule. The
+// value can be an account number or a name, which must not reach a log, the
+// message metadata or an error: the same shape as the ISO 20022 profile's
+// withholdValue (pkg/iso20022/rtp), masked here at construction so every sink
+// the Reason flows to (warn log, error.message metadata, rejection error) is
+// covered at once.
+const valueWithheld = "(value withheld)"
+
 // Validator applies a spec's semantic rules to messages.
 //
 // It is compiled once from a spec and then read-only, so it is safe to share
@@ -234,8 +242,8 @@ func (v *Validator) Validate(m Subject) []Violation {
 		if _, ok := set.Values[value]; !ok {
 			out = append(out, Violation{
 				Severity: SeverityReject, Kind: ViolationValue, DE: r.de, Path: r.path,
-				Reason: fmt.Sprintf("carries %q, which its value set does not list (the set is closed, so %s)",
-					value, known(set)),
+				Reason: fmt.Sprintf("carries %s, which its value set does not list (the set is closed, so %s)",
+					valueWithheld, known(set)),
 			})
 		}
 	}

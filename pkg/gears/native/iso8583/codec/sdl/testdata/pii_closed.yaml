@@ -1,0 +1,51 @@
+# Copyright (c) 2026 JAAB Tech SAS, Uruguay
+# SPDX-License-Identifier: Apache-2.0
+#
+# A spec with a closed value set on the PAN, for testing that a value outside
+# it never reaches a log, the message metadata or an error. The wire layer is
+# the named 1987 ASCII base, so this document is only the semantic half.
+spec:
+  id: pii_closed
+  name: PII Closed
+  version: 1.0.0
+  protocol: iso8583
+  wire:
+    format: moov
+    source: "moov:spec87ascii"
+
+  messages:
+    catalog:
+      "0200":
+        name: Financial Request
+        flow: request
+        pairs_with: "0210"
+      "0210":
+        name: Financial Response
+        flow: response
+        pairs_with: "0200"
+
+  enums:
+    allowed_pan:
+      closed: true
+      values:
+        "4111111111111111": {name: Test card one}
+        "5500000000000004": {name: Test card two}
+
+  fields:
+    2:
+      name: Primary Account Number
+      alias: card.pan
+      log_mask: true
+      values_ref: allowed_pan
+      messages:
+        - {mti: "0200", usage: mandatory}
+    4:
+      name: Amount, Transaction
+      alias: amount
+      messages:
+        - {mti: "0200", usage: mandatory}
+    11:
+      name: Systems Trace Audit Number
+      alias: stan
+      messages:
+        - {mti: "0200", usage: mandatory}

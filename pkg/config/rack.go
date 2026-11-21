@@ -4,6 +4,8 @@
 package config
 
 import (
+	"fmt"
+
 	"github.com/google/uuid"
 	"github.com/knadh/koanf/parsers/toml"
 	"github.com/knadh/koanf/providers/env"
@@ -124,6 +126,9 @@ func LoadRack(path string) (*RackConfig, error) {
 	_ = k.Set("snake.stream_name", "flux-msg")
 	_ = k.Set("snake.connect_timeout", "10s")
 	_ = k.Set("snake.reconnect_wait", "1s")
+	_ = k.Set("snake.ping_interval", DefaultPingInterval)
+	_ = k.Set("snake.max_pings_out", DefaultMaxPingsOut)
+	_ = k.Set("snake.ack_wait", DefaultAckWait)
 	_ = k.Set("snake.operation_timeout", "5s")
 	_ = k.Set("snake.subscription_retry_wait", "200ms")
 	_ = k.Set("snake.subscription_retry_attempts", 5)
@@ -136,6 +141,9 @@ func LoadRack(path string) (*RackConfig, error) {
 	_ = k.Set("snake.dlq_enabled", true)
 	_ = k.Set("snake.dlq_subject", "flux.dlq")
 	_ = k.Set("snake.dlq_publish_timeout", "5s")
+	_ = k.Set("snake.failover_after", 2)
+	_ = k.Set("snake.consumer_replicas", 0)
+	_ = k.Set("snake.consumer_missed_heartbeats", 2)
 
 	// 2. Load from File
 	if path != "" {
@@ -199,6 +207,22 @@ func LoadRack(path string) (*RackConfig, error) {
 	// consumer that discards the parse error and treats zero as real.
 	if err := validateDurations(&cfg); err != nil {
 		return nil, err
+	}
+
+	if err := cfg.Snake.validatePings(); err != nil {
+		return nil, err
+	}
+	if err := cfg.Snake.validateAckWait(); err != nil {
+		return nil, err
+	}
+	if cfg.Snake.ConsumerReplicas < 0 {
+		return nil, fmt.Errorf("snake.consumer_replicas must not be negative, got %d", cfg.Snake.ConsumerReplicas)
+	}
+	if cfg.Snake.ConsumerMissedHeartbeats < 1 {
+		return nil, fmt.Errorf("snake.consumer_missed_heartbeats must be at least 1, got %d", cfg.Snake.ConsumerMissedHeartbeats)
+	}
+	if cfg.Snake.FailoverAfter < 0 {
+		return nil, fmt.Errorf("snake.failover_after must not be negative, got %d", cfg.Snake.FailoverAfter)
 	}
 
 	// 5. Final fallback for fields that don't map perfectly via koanf tags

@@ -58,15 +58,12 @@ func busEmitSubjects(sc *registry.Scenario, rack string, gearDeploy map[string]s
 	return subjects
 }
 
-// scenarioNeedsBus reports whether running sc on this Rack uses the bus for its
-// wires: a message it publishes to it, or a consumer it feeds from it. A scenario
-// whose wires all stay inside the Rack, on the hot lane, does not.
-func scenarioNeedsBus(sc *registry.Scenario, rack string, gearDeploy map[string]string) bool {
-	if len(busEmitSubjects(sc, rack, gearDeploy)) > 0 {
-		return true
-	}
+// busConsumeSubjects returns the subjects this Rack consumes from the bus: those
+// of the wires whose consumer runs here and that do not stay on the hot lane.
+func busConsumeSubjects(sc *registry.Scenario, rack string, gearDeploy map[string]string) map[string]bool {
+	subjects := make(map[string]bool)
 	for _, w := range sc.Wires {
-		fromRack, fromGear, _ := parsePortRef(w.From)
+		fromRack, fromGear, fromPort := parsePortRef(w.From)
 		toRack, toGear, _ := parsePortRef(w.To)
 
 		consumedHere := (toRack == "" || toRack == rack) && (gearDeploy[toGear] == "" || gearDeploy[toGear] == rack)
@@ -75,10 +72,17 @@ func scenarioNeedsBus(sc *registry.Scenario, rack string, gearDeploy map[string]
 		}
 		sourceRack := firstNonEmpty(fromRack, gearDeploy[fromGear], rack)
 		if !wireOnLane(w, sourceRack, rack) {
-			return true
+			subjects[fmt.Sprintf("flux.msg.%s.%s.%s", sourceRack, fromGear, fromPort)] = true
 		}
 	}
-	return false
+	return subjects
+}
+
+// scenarioNeedsBus reports whether running sc on this Rack uses the bus for its
+// wires: a message it publishes to it, or a consumer it feeds from it. A scenario
+// whose wires all stay inside the Rack, on the hot lane, does not.
+func scenarioNeedsBus(sc *registry.Scenario, rack string, gearDeploy map[string]string) bool {
+	return len(busEmitSubjects(sc, rack, gearDeploy)) > 0 || len(busConsumeSubjects(sc, rack, gearDeploy)) > 0
 }
 
 func firstNonEmpty(values ...string) string {

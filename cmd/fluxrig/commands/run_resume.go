@@ -84,6 +84,10 @@ type scenarioSession struct {
 
 	mixerSent bool   // the Mixer has sent a scenario this session, so no older copy may be resumed
 	resumed   []byte // YAML resumed from the local copy, until the Mixer sends its own
+	running   []byte // YAML of the scenario the gears run, from the Mixer or the local copy
+	// reapplied is the Timestamp of the last activation applied with
+	// Reapply, so a redelivery of it does not restart the gears again.
+	reapplied int64
 }
 
 // newScenarioSession keeps the copy where the configuration says, or none when
@@ -115,13 +119,34 @@ func (s *scenarioSession) save(logger *slog.Logger, p *fluxmsg.ScenarioPayload) 
 // gears would only interrupt work that is already running. The caller holds mu.
 func (s *scenarioSession) consumeResumed(scenario []byte) bool {
 	same := s.resumed != nil && bytes.Equal(s.resumed, scenario)
+	if same {
+		s.running = scenario
+	}
 	s.resumed = nil
 	s.mixerSent = true
 	return same
 }
 
+// keepsGears reports whether p is the scenario the gears already run, so it
+// is not applied. The Mixer can send the same scenario again: a push is
+// delivered at least once, a subscription that replaces its consumer
+// redelivers it, and a Rack that reconnects gets it again. Applying it would
+// restart every gear and drop what a wire was receiving. An activation
+// (Reapply) is applied once even then: the operator asked for the restart.
+// The caller holds mu.
+func (s *scenarioSession) keepsGears(p *fluxmsg.ScenarioPayload) bool {
+	if s.running == nil || !bytes.Equal(s.running, p.Scenario) {
+		return false
+	}
+	return !p.Reapply || p.Timestamp == s.reapplied
+}
+
 // applied keeps the Mixer's scenario p, which is now running, as the local copy.
 func (s *scenarioSession) applied(logger *slog.Logger, p *fluxmsg.ScenarioPayload) {
+	s.running = p.Scenario
+	if p.Reapply {
+		s.reapplied = p.Timestamp
+	}
 	s.save(logger, p)
 }
 

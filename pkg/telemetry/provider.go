@@ -392,14 +392,19 @@ func Init(ctx context.Context, cfg Config, b bus.Bus, logBuffer *BufferHandler, 
 	return cleanup, nil
 }
 
+// HandshakeSubject is where a Rack sends the probes of its telemetry handshake
+// and reads them back.
+func HandshakeSubject(nodeName string) string {
+	if nodeName == "" {
+		nodeName = "unknown"
+	}
+	return fmt.Sprintf("flux.telemetry.%s.logs", nodeName)
+}
+
 // VerifyConnectivity performs a mandatory handshake with the telemetry bus.
 // It publishes sync probes relentlessly and waits for loopback.
 func VerifyConnectivity(ctx context.Context, b bus.Bus, nodeName string, handshakeTimeout, handshakeInterval time.Duration) error {
-	safeName := nodeName
-	if safeName == "" {
-		safeName = "unknown"
-	}
-	subject := fmt.Sprintf("flux.telemetry.%s.logs", safeName)
+	subject := HandshakeSubject(nodeName)
 
 	slog.Info("Waiting for telemetry-plane convergence", "subject", subject)
 
