@@ -96,6 +96,12 @@ func (ib *InstrumentedBus) Publish(ctx context.Context, subject string, msg *flu
 	return err
 }
 
+// PublishRawBatch forwards a batch to the wrapped bus, so the batch is not
+// sent one message at a time.
+func (ib *InstrumentedBus) PublishRawBatch(ctx context.Context, subject string, msgs []bus.RawMessage) (int, error) {
+	return bus.PublishRawBatch(ctx, ib.next, subject, msgs)
+}
+
 func (ib *InstrumentedBus) PublishRaw(ctx context.Context, subject string, data []byte, fluxID uuid.UUID) error {
 	start := time.Now()
 

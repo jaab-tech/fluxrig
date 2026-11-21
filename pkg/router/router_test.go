@@ -39,10 +39,11 @@ func TestRouter_Lifecycle(t *testing.T) {
 	// 3. Configure JetStream
 	businessSubjects := []string{"flux.msg.>", "flux.agent.>", "flux.rack.>", "flux.ctrl.>"}
 	telemetrySubjects := []string{"flux.telemetry.>"}
-	err = r.ConfigureJetStream(snk.ClientURL(), "test-cluster", false, "",
-		"flux-msg", businessSubjects,
-		"flux-telemetry", telemetrySubjects,
-		"", "", logger)
+	err = r.ConfigureJetStream(JetStreamSetup{
+		URL: snk.ClientURL(), Domain: "test-cluster",
+		BusinessStream: "flux-msg", BusinessSubjects: businessSubjects,
+		TelemetryStream: "flux-telemetry", TelemetrySubjects: telemetrySubjects,
+	}, logger)
 	if err != nil {
 		t.Fatalf("Failed to configure JS: %v", err)
 	}

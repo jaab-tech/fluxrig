@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 | Version | Date | Status | Summary |
 | :--- | :--- | :--- | :--- |
+| [v0.15.0](#v0150) | 2026-11-21 | Delivered |  |
 | [v0.14.0](#v0140) | 2026-11-01 | Delivered | A server can greet a client that sent nothing, through durable connection events, a misspelt gear option is refused, a late reply can reach the new connection of its peer, and the Wasm gear refuses an unsigned catalog module and applies its memory limit |
 | [v0.13.1](#v0131) | 2026-10-25 | Delivered | Go 1.26.10 and x/net v0.60.0 close 23 reachable vulnerabilities, an approved Rack gets the active scenario, `fluxrig check` reports a bad configuration and answers in seconds, dead letter publishes and file wire sources are bounded, and a server reply carries the swapped TPDU |
 | [v0.13.0](#v0130) | 2026-10-20 | Delivered | ISO 20022 support: an ISO 8583 network bridges to the RTP rail, specs and lookup data upload to the Mixer, the registry lives on the bus, and a Rack parks messages while the bus is down |
@@ -29,6 +30,378 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 | [v0.7.1](#v071) | 2026-08-10 | Delivered | ISO 8583 TLV length hardening |
 | [v0.7.0](#v070) | 2026-08-01 | Delivered | Payment switch: Conductor gear, gear manifests, ISO 8583 TLS |
 
+
+## [v0.15.0] - 2026-11-21 {#v0150}
+
+**Before upgrading.** Three changes can stop something that runs today.
+Read [Upgrading](reference/upgrading.md#v014-to-v015), and upgrade the Mixer
+and every Rack together.
+
+- **The Mixer and the Racks must run the same version.** The Mixer sends a
+  Rack its status, its commands and its passport on
+  `flux.agent.notify.<rack>.<machine-id>`, not on
+  `flux.agent.notify.<machine-id>`. A Rack of v0.14 listens on the old subject.
+- **A trusted Wasm key file whose vendor name is not 1 to 64 letters, digits,
+  `-` and `_` is ignored**, with a Warn. A module signed with that key is then
+  refused at import, unless the import allows unsigned modules. Rename the
+  file in `wasm.trusted_keys_dir`.
+- **Deleting a key file from `wasm.trusted_keys_dir` no longer stops trusting
+  the vendor.** The trusted keys now live on the bus, and the keys directory
+  only adds the vendors that the bus does not hold yet. Use
+  `fluxrig wasm keys revoke`.
+
+### Added
+
+- **Mixer HA on an external NATS.** With `snake.external = true` (default
+  `false`) the Mixer starts no embedded NATS and uses the NATS cluster at
+  `snake.url`, a comma-separated list, that the operator runs. Several Mixers
+  on one cluster give HA: every Mixer serves the API, and the Racks talk to
+  NATS directly. `snake.replicas` (default 1) is how many copies of each stream
+  and bucket the Mixer provisions. More than 1 needs `snake.external`, and the
+  Mixer warns below 3. `snake.external` needs `registry.lease_enabled`. The
+  default stays the embedded NATS with one Mixer, as in v0.14. Set
+  `snake.external = true` on the Racks too: a Rack then checks the host of the
+  URL in the server certificate, not `snake.domain`, and it leaves the
+  ephemeral consumer of an ended subscription to `snake.inactive_threshold`
+  (default `30s`) instead of deleting it. The operator keeps the NATS store,
+  its encryption at rest included, and `fluxrig-mixer --repair` refuses to run
+  against an external NATS.
+- **Client certificates and credentials for NATS.** A Mixer or a Rack presents
+  `snake.client_cert_file` and `snake.client_key_file` to a NATS server that
+  asks for a client certificate. Set both or neither. `snake.credentials_file`
+  is a NATS credentials file, with the user and the permissions the operator
+  gave that client. `snake.root_ca_file` verifies the server, as before.
+- **A Mixer checks the external NATS before it starts.** It needs NATS 2.15.0
+  or later, JetStream for its account and, when `snake.replicas` is more than
+  1, a cluster. Each of these fails the start at once, with the reason. A NATS
+  that does not answer yet, a stream that cannot be placed yet and a bucket
+  that cannot be created yet are tried again for `snake.form_timeout` (default
+  `2m`), so the Mixers can start while the cluster forms.
+- **The write lease.** With `registry.lease_enabled` (default `false`) one
+  Mixer holds a lease and does every control write: enrollment, approval,
+  removal, status, scenario import and activation, spec import. A Mixer that
+  does not hold it forwards each control write to the holder over NATS, and
+  waits for the answer up to `mixer.forward_timeout` (default `5s`). Reads are
+  served by every Mixer from the registry they share. When no Mixer holds the
+  lease, for example during an election, a control write answers 503 and can
+  be tried again. The lease lives in `registry.lease_bucket` (default
+  `fluxrig_lease`), expires after `registry.lease_ttl` (default `30s`) without
+  a renew, and the holder renews it every `registry.lease_renew` (default
+  `10s`), which must be at most half of the TTL. The registry, liveness, lease
+  and spec buckets take `registry.replicas` (default 1), not `snake.replicas`.
+  Every Mixer must hold the same cluster key (`store.cluster_key_file`): with
+  the lease on, a Mixer whose key differs from the one the cluster recorded
+  refuses to start.
+- **`/health` names the lease holder.** With the lease on, the answer has a
+  `lease` object: `held` for this Mixer, `holder` with the machine ID of the
+  holder, `holder_since`, `renewed`, and `error` when the lease could not be
+  read. The read is bounded by `mixer.forward_timeout`.
+- **Lease metrics.** With the lease on, the Mixer exports
+  `flux.mixer.lease.held` (1 on the holder, else 0) and
+  `flux.mixer.lease.transitions`, by event (`acquired`, `lost`, `released`),
+  through the telemetry stream, the way a Rack exports its metrics, unless
+  `telemetry.disabled` is set.
+- **A Mixer that does not hold the lease follows the active scenario.** It
+  reads the active-scenario pointer every `mixer.follow_interval` (default
+  `5s`) and reloads the scenario when it changed, so every Mixer reports the
+  same one.
+- **One Mixer handles each Hello and heartbeat.** With the lease on, the
+  subscriptions of the Mixers to the Hello and heartbeat subjects form a
+  durable queue group named `mixer.queue_group` (default `fluxrig-mixers`).
+  Each consumer is named after the group and the subject, and stays when a
+  Mixer stops. An empty value makes every Mixer handle every message. Without
+  the lease the setting has no effect.
+- **The spec store on the bus.** With the lease on, the Mixers share one spec
+  store in `registry.spec_bucket` (default `fluxrig_specs`). A spec uploaded
+  through any Mixer goes to the holder and is pushed by every Mixer. A spec
+  larger than `registry.spec_max_size` (default 1048576 bytes) answers 413.
+  The value must not exceed the max payload of the NATS server. The first
+  Mixer of the cluster to hold the lease copies its local spec store into the
+  bucket, once. A version that the bucket holds with other bytes, or that is
+  too large, is skipped and logged. After that the local store of a Mixer is
+  not used.
+- **Telemetry storage for several Mixers.** `observability.storage.type`
+  (default `local`) is where the Mixer keeps the telemetry of the Racks.
+  `local` keeps it on the disk of each Mixer, as before: with several Mixers
+  each one has its own copy, which misses what arrived while it was down, and
+  the Mixer warns about it. `s3`, `nats` and `otlp` need
+  `registry.lease_enabled`: the holder is the only Mixer that reads the
+  telemetry stream, and it confirms each batch only once the store has it, so
+  a new holder goes on from the last confirmed batch. The holder commits a
+  batch every `observability.storage.batch_interval` (default `15s`), and one
+  commit is bounded by `observability.storage.commit_timeout` (default `30s`).
+  A batch that fails is tried again. Every Mixer keeps the live metrics of
+  each Rack.
+  - `s3` writes Parquet files to `observability.storage.s3.bucket` at
+    `observability.storage.s3.endpoint` (host and port, no scheme), under
+    `observability.storage.s3.prefix` (default `telemetry`), in
+    `observability.storage.s3.region`. The Mixer creates the bucket when it
+    does not exist. `observability.storage.s3.access_key_file` and
+    `observability.storage.s3.secret_key_file` hold the credentials; without
+    them the Mixer reads `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`.
+    `observability.storage.s3.ca_file` verifies the service, and
+    `observability.storage.s3.plaintext` (default `false`) uses HTTP, for
+    development.
+  - `nats` writes the same files to the object store
+    `observability.storage.nats.bucket` (default `fluxrig_telemetry`), with an
+    index in `<bucket>_index`, both with `snake.replicas` copies.
+  - With `s3` and `nats`, a batch that is committed again replaces its own
+    files, so no record is kept twice. Every Mixer answers telemetry queries:
+    it fetches the files a query needs into `store.dir/telemetry`, under the
+    same retention as local files, and sees the telemetry up to the last
+    batch. The holder removes the shared files that are older than the
+    retention.
+  - `otlp` sends each batch as OTLP over HTTP, with JSON bodies, to the
+    collector at `observability.storage.otlp.endpoint`, which gets the paths
+    `/v1/logs`, `/v1/metrics` and `/v1/traces`.
+    `observability.storage.otlp.ca_file` verifies the collector, and
+    `observability.storage.otlp.headers_file` holds extra request headers,
+    one `Name: value` per line. The Mixers keep no telemetry, so the telemetry
+    queries of the API answer 501. A holder that stops after the collector
+    took a batch and before the stream had the confirmation leaves that batch
+    to the next holder, which sends it again: with OTLP that one batch can
+    arrive twice.
+- **A Rack moves to another NATS server when its server has no stream.**
+  After `snake.failover_after` (default 2) JetStream publishes in a row that
+  find no stream, or JetStream requests in a row that a server answers with no
+  JetStream, the Rack reconnects to another server of `snake.url`. A server
+  cut off from its cluster keeps the connection open while every publish
+  through it fails. 0 turns it off.
+- **The consumer of a Rack subscription is replaced when it is lost.** A
+  guaranteed-lane wire and a scenario push read through a consumer that lives
+  on one server. When the consumer is gone, or misses
+  `snake.consumer_missed_heartbeats` (default 2) heartbeats in a row, the Rack
+  creates a new one and resumes at the first message it had not settled. A
+  message can arrive twice across the change. A heartbeat is due every
+  `snake.operation_timeout` (default `5s`). `snake.consumer_replicas` (default
+  0) is the replica count of each consumer: 0 takes the replica count of the
+  stream, read again at each creation. A creation that cannot read it fails
+  and is tried again, so a consumer is never created with one replica by
+  accident. 1 keeps one replica, lighter on NATS.
+- **Each Rack has its own reply inbox, `_INBOX_<rack>`.** A NATS user for a
+  Rack can then be limited to `_INBOX_<rack>.>` and read only its own replies.
+  The Mixer keeps `_INBOX`.
+- **A Rack waits for streams that no Mixer has provisioned yet.** On an
+  external NATS a Rack can start before any Mixer. When its enrollment
+  subscription finds no stream, or JetStream cannot answer yet, the Rack
+  starts its session again instead of exiting.
+- **`fluxrig scenario permissions`** writes one NATS user for each Rack of one
+  or more scenario files, limited to the subjects that Rack uses: its own
+  messages, events and notifications, the wires it consumes, the events its
+  gears read and the buckets they use. Paste the users into the authorization
+  block of the external NATS. With several scenarios, each Rack gets what all
+  of them need. `--rack` names the Racks (default: the Racks the gears are
+  deployed to; a gear with no Rack needs `--rack`), `--user` is the NATS user
+  of a Rack with `{rack}` for its name (default `{rack}`), and `--config` reads
+  the subject names from a Rack configuration (default: the Rack defaults).
+  Generate the users again when a scenario changes.
+- **Gear manifests declare what a gear does on the bus besides its wires.**
+  `BusNeeds` in `sdk.Manifest` lists the connection events a gear reads and
+  the key-value buckets it reads, writes or creates.
+  `fluxrig scenario permissions` uses it. `bento` declares the events of
+  `ports.events`, `coatcheck` its `bucket` (created and watched in `daemon`
+  mode), and `wasm` the bucket of a `snake://` source.
+- **One Wasm catalog and one keyring for every Mixer.** The signed modules are
+  in the bucket `wasm_catalog` and the trusted vendor keys in `wasm_keys`, both
+  with `snake.replicas` copies, so every Mixer lists the same modules and
+  trusts the same vendors. At startup a Mixer adds each key of
+  `wasm.trusted_keys_dir` that the keyring does not hold. A key that the
+  keyring holds with other bytes, or as revoked, is not changed, and the file
+  is reported with a Warn. A vendor trusted or revoked through one Mixer
+  counts on every Mixer at its next import.
+- **The Wasm keyring in the API and the CLI.** `GET /api/v1/wasm/keys` lists
+  the vendors with the SHA-256 fingerprint of each key, revoked ones included.
+  `PUT /api/v1/wasm/keys/{vendor}` trusts an Ed25519 public key of 32 bytes,
+  or replaces it. `DELETE /api/v1/wasm/keys/{vendor}` revokes the vendor,
+  which stays in the keyring as revoked, so a key file that a Mixer still
+  holds does not add it back. `fluxrig wasm keys list`,
+  `fluxrig wasm keys trust <vendor> <key-file>` and
+  `fluxrig wasm keys revoke <vendor>` call them. `trust` takes the 32-byte
+  public key in a file named `<name>.pub`, or the key file that
+  `fluxrig wasm sign` uses. It refuses a 32-byte file with another name,
+  which can be a private seed. Revoking a vendor stops the imports of its
+  modules: a module already in the catalog keeps its cluster signature, and
+  the Racks still run it.
+
+### Changed
+
+- **A client of NATS notices a silent server in about 15 to 20 seconds.**
+  `snake.ping_interval` (default `5s`) and `snake.max_pings_out` (default 3)
+  set the pings of every connection of a Mixer and of a Rack. Before, the
+  NATS client defaults (a ping every 2 minutes, 2 unanswered) kept a client on
+  a server that crashed or was cut off for minutes, while every request timed
+  out. Both values must be positive.
+- **A message of the guaranteed lane that a consumer sent through a NATS
+  server that died arrives again after 10 seconds, not 30.**
+  `snake.ack_wait` (default `10s`) is how long a guaranteed-lane or durable
+  consumer waits for an acknowledgement before it delivers the message again.
+  Before, it was the JetStream default, 30 seconds. It must be longer than
+  `snake.operation_timeout`, which bounds the processing of one message: a
+  shorter value would deliver every slow message twice, and the Mixer and the
+  Rack refuse it.
+- **A connection event that a reader's consumer sent through a NATS server
+  that died arrives again after `snake.ack_wait`, not after `max_event_age`.**
+  Before, the event came back as old as `max_event_age` and the reader dropped
+  it: a client that connected then got no logon. `max_event_age` of each
+  entry of `ports.events` must now be longer than `snake.ack_wait` (`10s` by
+  default), or the gear does not start. A reader whose consumer loses its
+  leader with a server that dies notices it within about `snake.ack_wait`
+  and pulls again; before, it took about 30 seconds.
+- **A Rack sends the connection events of a gear in batches.** What waits in
+  a gear's event queue leaves in one batch, in order, and the events parked
+  while the bus was down leave the same way. Before, each event waited for
+  the stream to store it before the next one left: across a link with a round
+  trip of about 220 ms to the stream leader, a Rack sent about two events a
+  second, and a gear whose connections came faster fell behind until its
+  events were older than `max_event_age`. `sdk.EventBatchPublisher` is the
+  capability a native gear can use for the same.
+- **A Rack ships its log in batches.** The log shipper sends consecutive
+  lines in one batch, in order, and moves its cursor past what the stream
+  took. Before, it sent one line and waited for the stream before the next:
+  across a link with a round trip of about 220 ms to the stream leader, a
+  busy Rack's log reached the Mixers later and later.
+- **A Wasm import that the bus does not take answers 503**, and nothing is
+  imported. Before, the import succeeded with a Warn and the module stayed on
+  the disk of the Mixer, where no Rack could fetch it. The catalog,
+  `GET /api/v1/wasm/catalog`, lists the modules on the bus, and answers 503
+  when the bus cannot answer.
+- **The status of a module in `GET /api/v1/wasm/catalog` names its vendor**,
+  as the import does: `Trusted: <vendor>` when the vendor signature matches a
+  trusted key, else `Untrusted`. Before, a module with any vendor signature
+  was listed as `Trusted`.
+- **An API request that failed because the cluster could not answer yet
+  answers 503**, not 500 or 400: no Mixer holds the write lease, or JetStream
+  elects a leader or has no stream that answers. The request can be tried
+  again.
+- **A Rack keeps its gears when the Mixer sends again the scenario they run.**
+  A push is delivered at least once, a replaced consumer delivers it again,
+  and a Rack that reconnects gets it again. Before, each copy restarted every
+  gear. An activation still restarts the gears, once per activation, also on
+  a Rack that already runs the scenario: that is how an operator restarts a
+  gear that stopped.
+- **A Rack with no identity keeps sending Hello after its enrollment
+  timeout.** When `rack.enrollment_timeout` (default `15s`) ends with no
+  passport, the Rack sends Hello every `rack.heartbeat_interval` (default
+  `30s`) until a passport arrives, in the same session.
+- **The embedded NATS server writes to the Mixer log.** Its notices, warnings
+  and errors, a refused TLS handshake for example, are logged with
+  `flux.component` `snake.nats`. Before, the embedded server logged nothing.
+- **A Rack no longer purges its messages from the stream when its scenario
+  changes.** The purge never ran: the Rack held the bus through a wrapper that
+  had no purge. A new consumer starts at new messages, so the messages of the
+  previous scenario do not reach the new one.
+
+### Fixed
+
+- **A graceful stop of `io_iso8583` no longer logs `accept error`.** `Drain`
+  closes the listener on purpose, and the accept loop logged an error for each
+  retry until `Stop`.
+- **`Stop` of an `io_iso8583` client is safe to call twice.** The second call
+  panicked.
+- **Telemetry times are kept in UTC on a Mixer whose host is not in UTC.** The
+  store converted each time to the zone of the host, so every stored time was
+  off by the offset of the host, and a query for the last minutes found
+  nothing. The fix applies to telemetry stored from now on.
+- **A NATS permission that the server refuses is logged at ERROR**, with the
+  connection name. The publish or subscribe that caused it returns no error,
+  and a request only times out, so before this the refusal was not in the log.
+- **A Rack uses `telemetry.stream_name` for its telemetry connection.** It
+  used `flux-telemetry` whatever the setting.
+- **A Rack starts a scenario when a sync probe takes longer than 500 ms.**
+  Before its gears start, a Rack sends a probe on each subject it consumes
+  every 500 ms, and waits until its own consumer gets one. When a probe took
+  longer than that, as across a slow link, the Rack never saw that it had
+  arrived, failed the scenario at `rack.convergence_timeout`, and after five
+  attempts left it in the dead letter queue.
+- **A Rack keeps `logging.level` on stdout after it enrolls.** The log on
+  stdout was set to `info` at enrollment, whatever `logging.level`,
+  `logging.debug` or `logging.trace` said. The log file kept the level.
+- **A subscription that is still retrying its first consumer stops when the
+  bus closes.** Before, it waited through its remaining attempts.
+- **A live consumer that is replacing its consumer stops when the bus
+  closes.** The retry loop waited on its own timer and on the consumer, not on
+  the bus, so a close during a replacement retried forever and left a
+  goroutine behind.
+- **A durable subscription is created with a bounded wait and the replica
+  count of its stream.** The create used the process context with no deadline
+  and one replica, whatever `snake.replicas` said.
+- **The consumer that shares Hello and heartbeat across the Mixers takes
+  `snake.replicas` copies.** It was a single replica, so the loss of one NATS
+  server stopped the delivery of both until a new consumer was placed.
+- **One dead NATS server replaces a live consumer once, not twice.** The
+  watcher and the error handler signalled different channels, and the
+  supervisor handled them one after the other.
+- **A guaranteed-lane batch awaits each acknowledgement with its own
+  budget.** One timer of `snake.operation_timeout` covered a batch of up to
+  256 messages, so a slow link turned a healthy batch into a partial send and
+  a full resend.
+- **A publish that a caller cancels is no longer counted as a missing
+  stream.** A caller that goes away says nothing about the server. Every
+  timeout counts, including one where the caller's own deadline expired: when
+  a server is black-holed the socket keeps accepting writes and the client's
+  own ping queues behind them, so the publish timeout is the only signal that
+  arrives.
+- **The failover probe gives up when its own timeout ends, even if the
+  request is stuck.** A request to a black-holed server can sit in a blocked
+  socket write, which the NATS client bounds by its flusher timeout of one
+  minute. In the latam testbed one probe iteration took 70 s, and a Rack cut
+  off from its server moved past the 60 s that gate 1 allows.
+- **A write that cannot be flushed is bounded by `snake.operation_timeout`.**
+  The client default is one minute, so a force-reconnect to a black-holed
+  server waited in the socket write for it. A Rack cut off from its server
+  moved 73 s after the cut in the latam testbed, and gate 1 allows 60.
+- **A dead letter that cannot be written leaves the message for redelivery.**
+  A failed write to the dead letter stream terminated the message anyway, and
+  the only trace was a log line. The bus now counts these failures
+  (`DLQFailures`).
+- **Opening an events reader no longer blocks its own `Close`.** The lock was
+  held during the consumer create with the caller's context, and `Close` waits
+  on the same lock. The create is bounded by `OpenTimeout` (default `30s`) and
+  the reader installs it only if it is still open.
+- **A push to a Rack after enrollment stops when the Mixer shuts down.** The
+  goroutine slept `enrollment.push_delay` and then published with
+  `context.Background()`.
+- **A scenario activation no longer holds the controller lock while it
+  publishes to every Rack.** A reader or an enrollment push waited for the
+  whole fan-out. The delivered registry now also drops old entries.
+- **A lease read, renew or holder lookup is bounded, and the forward plane
+  honours the deadline of its caller.** Before, a stalled bucket held the
+  caller for its own timeout, and a forwarder that had already given up could
+  still apply its write.
+- **A telemetry batch that is taken over is committed once.** The commit path
+  now re-checks the lease between the commit and the acknowledgement, and the
+  contract on `Committer` states that a repeated commit replaces its own files.
+- **A live emission can no longer overtake the parked suffix.** A batch in
+  flight now makes a concurrent emission park, instead of publishing ahead of
+  the items the outbox still holds.
+- **The outbox drain is linear in the size of the queue.** It scanned the held
+  subjects for every candidate on each pass.
+- **`fluxrig-mixer --repair` works on a store with TLS configured.** It dialled
+  the TCP URL of the embedded server, which is `tls://` once a certificate is
+  set, and the handshake failed. The repair now uses the in-process
+  connection.
+- **`/api/v1/control/sim` refuses a gear name that is not one subject token.**
+  The name was interpolated into `flux.ctrl.<gear>`.
+- **`/health` reports `"unavailable"` when it cannot read the lease.** The raw
+  JetStream error is no longer returned by the unauthenticated endpoint.
+- **`/api/v1/config` removes credentials from `snake.url`.** The endpoint
+  serves the configuration, and userinfo in the URL reached every caller.
+- **A testbed failover run is wired into the nightly.** `make
+  test-ha-failover` runs it, and the `ha` job of the nightly calls it.
+
+### Security
+
+- **ISO 8583 closed-set violations no longer log or return the value.** The
+  rejection reason said `carries %q value`; it now says `carries (value
+  withheld)`. The value reached the Warn log, the rejection error and the
+  `error.message` metadata of the error port. ISO 20022 already masked it.
+- **The Mixer warns at startup about telemetry and key exposure.** It warns
+  when the telemetry store is shared, when S3 or OTLP uses plaintext, when the
+  external NATS URL is not TLS, and when a credential or key file is
+  world-readable.
+- **S3 telemetry objects request SSE-S3.** The Mixer sets
+  `x-amz-server-side-encryption: AES256` on each upload; before, the bucket
+  policy was the only encryption.
 
 ## [v0.14.0] - 2026-11-01 {#v0140}
 
@@ -1134,7 +1507,8 @@ The payment-switch release: the **Conductor** transaction switch, a manifest sys
 - **Snake Protocol**: Secure tunneling implementation for Rack-to-Mixer connectivity.
 - **FluxMsg**: Canonical JSON schema for inter-gear communication.
 
-[Unreleased]: https://github.com/jaab-tech/fluxrig/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/jaab-tech/fluxrig/compare/v0.15.0...HEAD
+[v0.15.0]: https://github.com/jaab-tech/fluxrig/releases/tag/v0.15.0
 [v0.14.0]: https://github.com/jaab-tech/fluxrig/releases/tag/v0.14.0
 [v0.13.1]: https://github.com/jaab-tech/fluxrig/releases/tag/v0.13.1
 [v0.13.0]: https://github.com/jaab-tech/fluxrig/releases/tag/v0.13.0

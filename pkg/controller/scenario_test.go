@@ -542,7 +542,10 @@ func TestScenarioController_LoadActiveWithNothingActive(t *testing.T) {
 }
 
 // payloadBus records the scenario bytes each push carries.
-type payloadBus struct{ scenarios [][]byte }
+type payloadBus struct {
+	scenarios [][]byte
+	reapply   []bool
+}
 
 func (b *payloadBus) Publish(_ context.Context, _ string, msg *fluxmsg.FluxMsg) error {
 	p, err := fluxmsg.ParseScenarioPayload(msg.Data)
@@ -550,6 +553,7 @@ func (b *payloadBus) Publish(_ context.Context, _ string, msg *fluxmsg.FluxMsg) 
 		return err
 	}
 	b.scenarios = append(b.scenarios, p.Scenario)
+	b.reapply = append(b.reapply, p.Reapply)
 	return nil
 }
 
@@ -602,6 +606,10 @@ wires:
 	require.NoError(t, restarted.PushActiveToRack(ctx, "rack-1"))
 	require.Len(t, after.scenarios, 1)
 	assert.Equal(t, string(before.scenarios[0]), string(after.scenarios[0]))
+	// An activation asks the Rack to apply it even if it runs it already; the
+	// push of a Rack that connects does not.
+	assert.Equal(t, []bool{true}, before.reapply)
+	assert.Equal(t, []bool{false}, after.reapply)
 }
 
 // Restoring at startup never waits for a Rack: the Mixer cannot answer a

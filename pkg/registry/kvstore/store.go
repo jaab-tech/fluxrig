@@ -23,7 +23,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math"
 	"strings"
 	"sync"
 	"time"
@@ -85,6 +84,9 @@ type Store struct {
 	mu              sync.RWMutex
 	autoAdopt       bool
 	bootstrapSecret string
+	// lease, when set, is the write lease this Mixer must hold to make a
+	// control write. Nil is a single Mixer and writes freely.
+	lease *Lease
 
 	// Heartbeat stats and config are overwritten every heartbeat and mean
 	// nothing after a restart, so each Mixer keeps its own in memory rather
@@ -155,6 +157,30 @@ func entityKey(typeID uint8, id uuid.UUID) string {
 	return fmt.Sprintf("entity.%d.%s", typeID, id)
 }
 
+// SetLease attaches the write lease. When set, a control write is refused
+// unless this Mixer holds the lease. When nil (a single Mixer), every write
+// proceeds as before. Call it before the store serves traffic.
+func (s *Store) SetLease(l *Lease) {
+	s.mu.Lock()
+	s.lease = l
+	s.mu.Unlock()
+}
+
+// requireLease refuses a control write when this Mixer does not hold the
+// write lease. A nil lease (single Mixer) always allows the write.
+func (s *Store) requireLease() error {
+	s.mu.RLock()
+	l := s.lease
+	s.mu.RUnlock()
+	if l == nil {
+		return nil
+	}
+	if !l.Held() {
+		return ErrNotLeaseHolder
+	}
+	return nil
+}
+
 // Names and scenario names are arbitrary text; a key allows only a narrow
 // character set, so they are stored base64url-encoded.
 func nameKey(name string) string {
@@ -193,61 +219,12 @@ func (s *Store) getRecord(ctx context.Context, typeID uint8, id uuid.UUID) (*rec
 }
 
 // encode marshals a value the store built. Every map that came from the wire
-// (a Hello's config, a Snake's attributes) passes through jsonSafe first, and
+// (a Hello's config, a Snake's attributes) passes through registry.JSONSafeMap first, and
 // the store's own types hold only strings, numbers, times and UUIDs, so this
 // cannot fail.
 func encode(v any) []byte {
 	b, _ := json.Marshal(v)
 	return b
-}
-
-// jsonSafe converts what CBOR decoding produces into what JSON can encode:
-// maps keyed by interface{} become maps keyed by string, slices are walked,
-// and NaN or an infinity (which JSON has no form for) becomes null. A value
-// of any other type that JSON refuses becomes its printed form.
-func jsonSafe(v any) any {
-	switch t := v.(type) {
-	case nil, bool, string, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
-		return t
-	case float32:
-		return jsonSafe(float64(t))
-	case float64:
-		if math.IsNaN(t) || math.IsInf(t, 0) {
-			return nil
-		}
-		return t
-	case map[string]any:
-		out := make(map[string]any, len(t))
-		for k, val := range t {
-			out[k] = jsonSafe(val)
-		}
-		return out
-	case map[any]any:
-		out := make(map[string]any, len(t))
-		for k, val := range t {
-			out[fmt.Sprint(k)] = jsonSafe(val)
-		}
-		return out
-	case []any:
-		out := make([]any, len(t))
-		for i, val := range t {
-			out[i] = jsonSafe(val)
-		}
-		return out
-	default:
-		if _, err := json.Marshal(t); err == nil {
-			return t
-		}
-		return fmt.Sprint(t)
-	}
-}
-
-// jsonSafeMap applies jsonSafe to a map, keeping nil as nil.
-func jsonSafeMap(m map[string]any) map[string]any {
-	if m == nil {
-		return nil
-	}
-	return jsonSafe(m).(map[string]any)
 }
 
 // entityID mints an entity ID: a UUID v7 carrying a hint of the MachineID
@@ -386,7 +363,10 @@ func (s *Store) Register(ctx context.Context, machineID uuid.UUID, name, secret,
 // same secret, or registers fresh with the bootstrap secret and receives a
 // new secret of its own: the one time the plaintext leaves the registry.
 func (s *Store) RegisterEntity(ctx context.Context, typeID uint8, machineID uuid.UUID, name, secret, ip string, port int, version string, config, attrs map[string]any, mixerID uuid.UUID) (*registry.Rack, error) {
-	config, attrs = jsonSafeMap(config), jsonSafeMap(attrs)
+	if err := s.requireLease(); err != nil {
+		return nil, err
+	}
+	config, attrs = registry.JSONSafeMap(config), registry.JSONSafeMap(attrs)
 	var out *registry.Rack
 	err := s.retry("register", func() error {
 		var errStep error
@@ -520,8 +500,14 @@ func (s *Store) adopt(ctx context.Context, holder *record, machineID uuid.UUID, 
 // UpsertSelf records the Mixer's own entities (the Mixer, its embedded
 // Snake). They carry no secret and claim no name: they are not Racks, and
 // every Mixer's Snake shares one name.
+//
+// It needs no lease. Each Mixer writes only the records of its own machine
+// ID, so no two Mixers write one record, and the write checks the revision
+// it read. Behind the lease, every Mixer that started without it was
+// missing from the registry, as its heartbeats, which need no lease either,
+// found no entity.
 func (s *Store) UpsertSelf(ctx context.Context, typeID uint8, machineID uuid.UUID, name, ip string, port int, version string, attrs map[string]any) error {
-	attrs = jsonSafeMap(attrs)
+	attrs = registry.JSONSafeMap(attrs)
 	return s.retry("upsert self", func() error {
 		now := s.now()
 		rec, rev, err := s.getRecord(ctx, typeID, machineID)
@@ -546,6 +532,9 @@ func (s *Store) UpsertSelf(ctx context.Context, typeID uint8, machineID uuid.UUI
 }
 
 func (s *Store) Approve(ctx context.Context, id uuid.UUID, newName string) (*registry.Rack, error) {
+	if err := s.requireLease(); err != nil {
+		return nil, err
+	}
 	var out *registry.Rack
 	err := s.retry("approve", func() error {
 		rec, rev, err := s.getRecord(ctx, typeRack, id)
@@ -650,7 +639,7 @@ func (s *Store) HeartbeatEntity(ctx context.Context, typeID uint8, id uuid.UUID,
 	// Sanitized like a record: the API encodes these as JSON, and a map
 	// decoded from CBOR would make that encoding fail for the whole list.
 	s.statsMu.Lock()
-	s.stats[entityKey(typeID, id)] = heartbeatState{stats: jsonSafeMap(stats), config: jsonSafeMap(config)}
+	s.stats[entityKey(typeID, id)] = heartbeatState{stats: registry.JSONSafeMap(stats), config: registry.JSONSafeMap(config)}
 	s.statsMu.Unlock()
 	return nil
 }
@@ -671,6 +660,9 @@ func (s *Store) RemoveByName(ctx context.Context, name string) error {
 }
 
 func (s *Store) RemoveEntity(ctx context.Context, typeID uint8, id uuid.UUID) error {
+	if err := s.requireLease(); err != nil {
+		return err
+	}
 	return s.retry("remove", func() error {
 		rec, rev, err := s.getRecord(ctx, typeID, id)
 		if err != nil {
@@ -693,6 +685,9 @@ func (s *Store) UpdateStatus(ctx context.Context, id uuid.UUID, status string) e
 }
 
 func (s *Store) UpdateStatusEntity(ctx context.Context, typeID uint8, id uuid.UUID, status string) error {
+	if err := s.requireLease(); err != nil {
+		return err
+	}
 	return s.retry("update status", func() error {
 		rec, rev, err := s.getRecord(ctx, typeID, id)
 		if err != nil {
@@ -763,6 +758,9 @@ func (s *Store) ClearScenarioEntities(ctx context.Context) error {
 
 // PutScenario stores a scenario file under name.
 func (s *Store) PutScenario(ctx context.Context, name string, content []byte) error {
+	if err := s.requireLease(); err != nil {
+		return err
+	}
 	if s.cfg.MaxValueSize > 0 && len(content) > s.cfg.MaxValueSize {
 		return fmt.Errorf("%w: %d bytes, limit %d", ErrScenarioTooLarge, len(content), s.cfg.MaxValueSize)
 	}
@@ -797,6 +795,9 @@ func (s *Store) ListScenarios(ctx context.Context) ([]string, error) {
 // SetActive moves the active-scenario pointer, checked against the revision
 // it read.
 func (s *Store) SetActive(ctx context.Context, active registry.ActiveScenario) error {
+	if err := s.requireLease(); err != nil {
+		return err
+	}
 	value := encode(active)
 	if s.cfg.MaxValueSize > 0 && len(value) > s.cfg.MaxValueSize {
 		return fmt.Errorf("%w: the registered active scenario is %d bytes, limit %d", ErrScenarioTooLarge, len(value), s.cfg.MaxValueSize)

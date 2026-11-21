@@ -61,6 +61,7 @@ type Manager struct {
 	gearIDs       map[string]uuid.UUID            // gear -> entityID
 	activeSubs    []bus.Subscription
 	hotSubjects   map[string]chan struct{}
+	eventAckWait  time.Duration
 	lane          *localLane      // the hot lane: wires inside this Rack, through memory
 	busSubjects   map[string]bool // subjects that are also published to the bus; guarded by portsMu
 	trace         bool
@@ -100,6 +101,9 @@ func NewManager(machineID uuid.UUID, name string, b bus.Bus, ig *idgen.IDGenerat
 		outbox:             newOutbox(0, 0),
 	}
 	m.outbox.sendEvent = m.bus.PublishRaw
+	m.outbox.sendEvents = func(ctx context.Context, subject string, msgs []bus.RawMessage) (int, error) {
+		return bus.PublishRawBatch(ctx, m.bus, subject, msgs)
+	}
 	m.closing = make(chan struct{})
 	m.lane = newLocalLane(0, 0, m.logger)
 	return m
@@ -188,6 +192,14 @@ func (m *Manager) bindControlPlane() {
 // SetLaneConfig sets the queue size of each hot lane wire and how long a gear that
 // emits waits for room in a full queue. A value that is not positive selects the
 // default. It applies to the wires made by the next ApplyScenario.
+// SetEventAckWait sets the ack wait of the event readers of the gears it
+// starts from now on (snake.ack_wait).
+func (m *Manager) SetEventAckWait(d time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.eventAckWait = d
+}
+
 func (m *Manager) SetLaneConfig(queueSize int, sendTimeout time.Duration) {
 	m.lane.configure(queueSize, sendTimeout)
 }
@@ -422,6 +434,63 @@ func (m *Manager) publishEvent(ctx context.Context, subject string, data []byte,
 	return nil
 }
 
+// publishEvents sends events of one subject in one batch, or parks them when
+// the bus does not take them, as publishEvent does for one. What the bus did
+// not take is parked in order, behind nothing it took after it: a resend of a
+// stored event is harmless, as each carries its ID.
+func (m *Manager) publishEvents(ctx context.Context, subject string, evs []sdk.RawEvent) error {
+	if len(evs) == 0 {
+		return nil
+	}
+	m.outbox.waitClear(ctx, subject)
+	items := make([]*outboxEvent, len(evs))
+	for i, e := range evs {
+		items[i] = &outboxEvent{data: e.Data, id: e.ID}
+	}
+	// One decision: either everything queues behind the backlog (or a batch
+	// already in flight on this subject), or this batch reserves the direct
+	// send. A concurrent live emission then parks behind the reservation
+	// instead of publishing direct and overtaking the suffix parked below.
+	if !m.outbox.tryDirect(subject) {
+		lost := 0
+		for _, ev := range items {
+			if !m.outbox.parkEvent(subject, ev) {
+				lost++
+			}
+		}
+		m.kickDrain(true)
+		if lost > 0 {
+			return fmt.Errorf("%w: %d event(s)", errOutboxFull, lost)
+		}
+		return nil
+	}
+	msgs := make([]bus.RawMessage, len(evs))
+	for i, e := range evs {
+		msgs[i] = bus.RawMessage{Data: e.Data, ID: e.ID}
+	}
+	sent, err := bus.PublishRawBatch(ctx, m.bus, subject, msgs)
+	m.outbox.endDirect(subject)
+	if err != nil {
+		lost := 0
+		for _, ev := range items[sent:] {
+			if !m.outbox.parkEvent(subject, ev) {
+				lost++
+			}
+		}
+		m.logger().Warn("bus publish failed, parking events for forward on rejoin",
+			"subject", subject, "parked", len(items)-sent-lost, "error", err)
+		m.retryParkedEvents()
+		if lost > 0 {
+			return fmt.Errorf("%w: %d event(s): %w", errOutboxFull, lost, err)
+		}
+		return nil
+	}
+	if m.outbox.len() > 0 {
+		m.kickDrain(true)
+	}
+	return nil
+}
+
 // errOutboxFull reports an event that found no room in the outbox.
 var errOutboxFull = errors.New("outbox full")
 
@@ -474,6 +543,8 @@ type GearContextImpl struct {
 	rackName      string
 	gearDeploy    map[string]string
 	events        func(ctx context.Context, subject string, data []byte, id uuid.UUID) error
+	eventAckWait  time.Duration
+	eventsBatch   func(ctx context.Context, subject string, evs []sdk.RawEvent) error
 }
 
 func (g *GearContextImpl) Context() context.Context { return g.ctx }
@@ -491,6 +562,17 @@ func (g *GearContextImpl) Bus() bus.Bus                         { return g.bus }
 func (g *GearContextImpl) Manager() manager.Manager             { return g.mgr }
 func (g *GearContextImpl) ControlPlane() any                    { return g.ctrl }
 func (g *GearContextImpl) ClusterPublicKey() []byte             { return g.clusterPubKey }
+
+// PublishEvents implements sdk.EventBatchPublisher.
+func (g *GearContextImpl) PublishEvents(ctx context.Context, subject string, evs []sdk.RawEvent) error {
+	if g.eventsBatch == nil {
+		return errors.New("runtime: this context cannot publish events")
+	}
+	return g.eventsBatch(ctx, subject, evs)
+}
+
+// EventAckWait implements sdk.EventAckWaiter.
+func (g *GearContextImpl) EventAckWait() time.Duration { return g.eventAckWait }
 
 // RackName implements sdk.EventProvider.
 func (g *GearContextImpl) RackName() string { return g.rackName }
@@ -539,24 +621,10 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err
 	// 1b. Build Gear Deployment Map (name -> rack) for global wire resolution
 	gearDeploy := deployMap(sc)
 
-	// Which wires stay in this Rack's memory and which subjects also go to the bus.
-	// A scenario whose wires all stay inside the Rack never touches the bus.
-	needsBus := scenarioNeedsBus(sc, m.rackName, gearDeploy)
+	// Which subjects a gear of this Rack emits on also go to the bus.
 	m.portsMu.Lock()
 	m.busSubjects = busEmitSubjects(sc, m.rackName, gearDeploy)
 	m.portsMu.Unlock()
-
-	// Purge this Rack's own stale messages so they cannot interfere with the new
-	// scenario. Scoped to flux.msg.<rack>.> : the stream is shared by every Rack
-	// connected to this Mixer, and purging without a filter wiped every other
-	// Rack's guaranteed-lane traffic along with this one's own.
-	if b := m.bus; b != nil && needsBus {
-		if n, ok := b.(interface {
-			Purge(context.Context, string) error
-		}); ok {
-			_ = n.Purge(ctx, fmt.Sprintf("flux.msg.%s.>", m.rackName))
-		}
-	}
 
 	// 1c. Resolve port termini (static walk over the wire graph) so gears can
 	// bind availability sensing to the right signal source via their context.
@@ -641,6 +709,8 @@ func (m *Manager) ApplyScenario(ctx context.Context, sc *registry.Scenario) (err
 			rackName:      m.rackName,
 			gearDeploy:    gearDeploy,
 			events:        m.publishEvent,
+			eventAckWait:  m.eventAckWait,
+			eventsBatch:   m.publishEvents,
 		}
 
 		// Every gear holds the same control plane. It is bound to the bus connection when
@@ -1058,11 +1128,28 @@ func (m *Manager) waitForConvergence(ctx context.Context) error {
 	emitProbes()
 
 	// 3. Parallel Collector
-	for len(pending) > 0 {
-		// We build the select cases dynamically or use a simple loop with default
-		// Since we have a ticker, we can check channels in each iteration
+	// Each subject's channel is closed by the probe handler; a forwarder per
+	// subject turns that into a case of the select below. Checking them only
+	// when no other case was ready never saw them when a probe publish took
+	// longer than a tick, as across a slow link: a tick was then always due.
+	converged := make(chan string, len(pending))
+	stop := make(chan struct{})
+	defer close(stop)
+	for s, ch := range pending {
+		go func(s string, ch chan struct{}) {
+			select {
+			case <-ch:
+				converged <- s
+			case <-stop:
+			}
+		}(s, ch)
+	}
 
+	for len(pending) > 0 {
 		select {
+		case s := <-converged:
+			delete(pending, s)
+			m.logger().Debug("subject converged (path is hot)", "subject", s)
 		case <-ticker.C:
 			// Re-emit for all still pending
 			emitProbes()
@@ -1074,22 +1161,6 @@ func (m *Manager) waitForConvergence(ctx context.Context) error {
 			return fmt.Errorf("timeout waiting for subject convergence: %v", remaining)
 		case <-ctx.Done():
 			return ctx.Err()
-		default:
-			// Check if any pending subject has converged
-			for s, ch := range pending {
-				select {
-				case <-ch:
-					delete(pending, s)
-					m.logger().Debug("subject converged (path is hot)", "subject", s)
-				default:
-					// still pending
-				}
-			}
-			if len(pending) == 0 {
-				break
-			}
-			// Small sleep to avoid CPU spinning in default case
-			time.Sleep(10 * time.Millisecond)
 		}
 	}
 

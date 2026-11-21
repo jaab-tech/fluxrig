@@ -11,6 +11,9 @@ What this suite proves, on one Mixer and one Rack:
 
 Run it with `make test-robot-conn-events`.
 
+- With two Racks on one host (`two_racks.robot`), a gear that runs on both sees
+  only its own connections, and a reader on the other Rack gets what it missed
+  inside `max_event_age`, and sends no logon past it.
+
 The unit tests of `pkg/events` cover two readers of one event, the Rack in the
-subject, redelivery, and a deleted consumer. A reader on another Rack, and a gear
-that runs on two Racks, need two Racks on one host. They were run by hand.
+subject, redelivery, and a deleted consumer.

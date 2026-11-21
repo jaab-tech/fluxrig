@@ -53,7 +53,8 @@ type SpecUploaded struct {
 //	@Success		201		{object}	SpecUploaded
 //	@Failure		400		{string}	string	"the artefact does not validate"
 //	@Failure		409		{string}	string	"name:tag already names other content"
-//	@Failure		413		{string}	string	"larger than mixer.max_payload_size"
+//	@Failure		413		{string}	string	"larger than mixer.max_payload_size or registry.spec_max_size"
+//	@Failure		503		{string}	string	"no Mixer holds the write lease, or the store is unavailable"
 //	@Router			/specs [post]
 func (s *Server) handleSpecUpload(w http.ResponseWriter, r *http.Request) {
 	if s.specs == nil {
@@ -85,8 +86,16 @@ func (s *Server) handleSpecUpload(w http.ResponseWriter, r *http.Request) {
 	hash, finalName, finalTag, err := s.specs.ImportContent(r.Context(), content, name, tag)
 	if err != nil {
 		status := http.StatusBadRequest
-		if errors.Is(err, manager.ErrVersionExists) {
+		switch {
+		case errors.Is(err, manager.ErrVersionExists):
 			status = http.StatusConflict
+		case errors.Is(err, manager.ErrTooLarge):
+			status = http.StatusRequestEntityTooLarge
+		case retryable(err):
+			// The shared store writes only on the lease holder: during an
+			// election, or on a follower that has not heard from it, the
+			// import is retryable, not invalid.
+			status = http.StatusServiceUnavailable
 		}
 		http.Error(w, err.Error(), status)
 		return

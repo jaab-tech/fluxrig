@@ -24,6 +24,15 @@ var (
 	// ErrNameConflict so the caller can be told to drop its stale identity
 	// and re-provision, rather than treated as a silent hijack attempt.
 	ErrBootstrapSecretMismatch = errors.New("registration denied: invalid or missing bootstrap secret")
+
+	// ErrNotLeaseHolder is returned when a control write is attempted on a
+	// Mixer that does not hold the write lease. It lives here, not in the
+	// store, so the forwarder can recognise it without importing the store.
+	ErrNotLeaseHolder = errors.New("registry: this Mixer does not hold the write lease")
+
+	// ErrTelemetryElsewhere is returned for a telemetry query when the Mixers
+	// send the telemetry to the operator's collector and keep none.
+	ErrTelemetryElsewhere = errors.New("telemetry is sent to the OpenTelemetry collector (observability.storage.type otlp): query it there")
 )
 
 // Rack represents a physical or virtual compute node.

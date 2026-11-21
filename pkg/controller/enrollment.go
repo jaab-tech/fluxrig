@@ -30,12 +30,14 @@ type ScenarioProvider interface {
 
 // EnrollmentController handles Rack registration and heartbeats.
 type EnrollmentController struct {
-	reg             registry.Registry
-	publisher       message.Publisher
-	signer          *pki.ClusterKey
-	scenario        ScenarioProvider
-	mixerID         uuid.UUID // Mixer's fluxEntityID
-	pushDelay       time.Duration
+	reg       registry.Registry
+	publisher message.Publisher
+	signer    *pki.ClusterKey
+	scenario  ScenarioProvider
+	mixerID   uuid.UUID // Mixer's fluxEntityID
+	pushDelay time.Duration
+	// registerTimeout bounds one registry call (register, get, heartbeat).
+	registerTimeout time.Duration
 	processedHellos sync.Map // Deduplication cache: name|MachineID -> time.Time
 	// lastSweep is the unix-nano time of the last pass that removed expired
 	// dedup entries. The keys come from the Hello, so without the sweep a
@@ -49,16 +51,32 @@ type EnrollmentController struct {
 // ignored after one is processed.
 const helloThrottle = 1 * time.Second
 
+// defaultRegisterTimeout bounds one registry call of the enrollment
+// controller (register, get, heartbeat) when the controller was built
+// without one. The registry is a network wait and must not hang a handler
+// forever.
+const defaultRegisterTimeout = 10 * time.Second
+
 func NewEnrollmentController(log *slog.Logger, reg registry.Registry, pub message.Publisher, signer *pki.ClusterKey, mixerID uuid.UUID, pushDelay time.Duration) *EnrollmentController {
 	return &EnrollmentController{
-		reg:       reg,
-		publisher: pub,
-		signer:    signer,
-		mixerID:   mixerID,
-		pushDelay: pushDelay,
-		now:       time.Now,
-		logger:    log,
+		reg:             reg,
+		publisher:       pub,
+		signer:          signer,
+		mixerID:         mixerID,
+		pushDelay:       pushDelay,
+		registerTimeout: defaultRegisterTimeout,
+		now:             time.Now,
+		logger:          log,
 	}
+}
+
+// SetRegisterTimeout bounds one registry call (register, get, heartbeat).
+// Zero or less restores the default.
+func (c *EnrollmentController) SetRegisterTimeout(d time.Duration) {
+	if d <= 0 {
+		d = defaultRegisterTimeout
+	}
+	c.registerTimeout = d
 }
 
 // throttled reports whether a Hello with this key arrived within
@@ -150,7 +168,7 @@ func (c *EnrollmentController) HandleHello(msg *message.Message) ([]*message.Mes
 	}
 
 	// 3. Register
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), c.registerTimeout)
 	defer cancel()
 
 	rack, err := c.reg.Register(ctx, hello.MachineID, hello.Name, hello.Secret, hello.IP, hello.Port, hello.Version, hello.Config, c.mixerID)
@@ -245,12 +263,30 @@ func (c *EnrollmentController) HandleHello(msg *message.Message) ([]*message.Mes
 		// An activation between now and the push reaches the Rack already
 		// (it is active from here on), so the push skips it then.
 		enrolledAt := time.Now()
+		reqCtx := msg.Context()
+		if reqCtx == nil {
+			reqCtx = context.Background()
+		}
 		go func() {
-			// Delay to ensure Rack has subscribed to its scenario topic
+			// Delay to ensure Rack has subscribed to its scenario topic,
+			// but not past the request: a push firing after shutdown
+			// used a Background context that nothing could cancel.
 			if c.pushDelay > 0 {
-				time.Sleep(c.pushDelay)
+				timer := time.NewTimer(c.pushDelay)
+				defer timer.Stop()
+				select {
+				case <-reqCtx.Done():
+					return
+				case <-timer.C:
+				}
+			} else {
+				select {
+				case <-reqCtx.Done():
+					return
+				default:
+				}
 			}
-			if err := c.scenario.PushActiveToRackSince(context.Background(), rack.Name, enrolledAt); err != nil {
+			if err := c.scenario.PushActiveToRackSince(reqCtx, rack.Name, enrolledAt); err != nil {
 				c.logger.Warn("Failed to push active scenario to new rack", "rack", rack.Name, "error", err)
 			}
 		}()
@@ -311,7 +347,9 @@ func (c *EnrollmentController) HandleHeartbeat(msg *message.Message) ([]*message
 	// learned a MachineID (formerly disclosed by the unauthenticated /racks
 	// endpoint) could forge liveness and overwrite that Rack's stats and
 	// config with none of its own.
-	rack, err := c.reg.Get(context.Background(), hb.MachineID)
+	ctx, cancel := context.WithTimeout(context.Background(), c.registerTimeout)
+	defer cancel()
+	rack, err := c.reg.Get(ctx, hb.MachineID)
 	if err != nil {
 		c.logger.Warn("Heartbeat dropped: the Rack is not readable in the registry", "id", hb.MachineID, "error", err)
 		return nil, nil
@@ -323,7 +361,7 @@ func (c *EnrollmentController) HandleHeartbeat(msg *message.Message) ([]*message
 
 	// Update LastSeen
 	c.logger.Debug("Heartbeat", "id", hb.MachineID)
-	if errHB := c.reg.Heartbeat(context.Background(), hb.MachineID, hb.Stats, hb.Config); errHB != nil {
+	if errHB := c.reg.Heartbeat(ctx, hb.MachineID, hb.Stats, hb.Config); errHB != nil {
 		c.logger.Warn("Heartbeat dropped: presence was not recorded", "id", hb.MachineID, "error", errHB)
 		return nil, nil
 	}
@@ -349,8 +387,8 @@ func (c *EnrollmentController) HandleHeartbeat(msg *message.Message) ([]*message
 	}
 
 	// Reply with Status Update via Notification Topic
-	// Racks listen to 'fluxrig.agent.notify.<ID>' for status changes.
-	topic := fmt.Sprintf("flux.agent.notify.%s", hb.MachineID)
+	// Racks listen to their notify subject for status changes.
+	topic := fluxmsg.NotifySubject(rack.Name, hb.MachineID)
 
 	pubMsg := message.NewMessage(watermill.NewUUID(), respBytes)
 	if err := c.publisher.Publish(topic, pubMsg); err != nil {

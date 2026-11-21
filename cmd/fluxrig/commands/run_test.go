@@ -6,6 +6,7 @@ package commands
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -238,5 +239,40 @@ func TestHandleEnrollmentDenial_RemovesPinnedKeyToo(t *testing.T) {
 	}
 	if _, err := os.Stat(pinPath); !os.IsNotExist(err) {
 		t.Errorf("pinned key file still exists after denial: %v", err)
+	}
+}
+
+// The log on stdout keeps the configured level: after enrollment it was
+// always info, and logging.level = "debug" stopped showing anything.
+func TestLogLevel(t *testing.T) {
+	for _, c := range []struct {
+		logging config.LoggingConfig
+		want    string
+	}{
+		{config.LoggingConfig{Level: "debug"}, "debug"},
+		{config.LoggingConfig{Level: "warn"}, "warn"},
+		{config.LoggingConfig{Level: "info", Debug: true}, "debug"},
+		{config.LoggingConfig{Level: "info", Debug: true, Trace: true}, "trace"},
+	} {
+		if got := logLevel(&config.RackConfig{Logging: c.logging}); got != c.want {
+			t.Errorf("%+v: got %q, want %q", c.logging, got, c.want)
+		}
+	}
+}
+
+// A failure that passes once the cluster settles starts the session again;
+// the Rack ended its process on the first of these, a connection a failover
+// closed under the creation of its enrollment consumer.
+func TestTransientBusError(t *testing.T) {
+	lost := fmt.Errorf("failed to create ephemeral consumer for x: %w",
+		fmt.Errorf("bus: replica count of the consumer for x: %w",
+			fmt.Errorf("bus: read stream flux-msg: %w", nats.ErrConnectionClosed)))
+	for _, err := range []error{lost, jetstream.ErrStreamNotFound, nats.ErrNoResponders, context.DeadlineExceeded} {
+		if !transientBusError(err) {
+			t.Errorf("%v: want transient", err)
+		}
+	}
+	if transientBusError(nats.ErrPermissionViolation) {
+		t.Error("a refused permission is not transient")
 	}
 }

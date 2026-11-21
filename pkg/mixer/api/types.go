@@ -21,6 +21,26 @@ type HealthResponse struct {
 	MachineID uuid.UUID `json:"machine_id" example:"019de49b-0000-7000-8000-000000000000"`
 	// EntityID is the unique fluxEntityID of this Mixer.
 	EntityID uuid.UUID `json:"entity_id" example:"019de49b-0000-7000-8000-000000000000"`
+	// Lease reports the write lease of a Mixer cluster. Absent when the lease
+	// is off (a single Mixer).
+	Lease *LeaseStatus `json:"lease,omitempty"`
+}
+
+// LeaseStatus reports which Mixer holds the write lease, as this Mixer reads
+// it from the cluster.
+type LeaseStatus struct {
+	// Holder is the machine_id of the Mixer that holds the lease. Absent when
+	// no Mixer holds it: control writes answer 503 until one does.
+	Holder *uuid.UUID `json:"holder,omitempty" example:"019de49b-0000-7000-8000-000000000000"`
+	// HolderSince is when the holder took the lease.
+	HolderSince *time.Time `json:"holder_since,omitempty"`
+	// Renewed is the holder's last successful renew.
+	Renewed *time.Time `json:"renewed,omitempty"`
+	// Held is true when this Mixer holds the lease and may write.
+	Held bool `json:"held" example:"false"`
+	// Error is "unavailable" when the lease could not be read. The raw cause
+	// is not returned because /health does not require authentication.
+	Error string `json:"error,omitempty"`
 }
 
 // RackResponse represents a Rack in the registry.

@@ -293,6 +293,9 @@ test_TC54_restore_after_ttl() {
     fi
 
     log_info "TEST 2: Sending 'delay:10:long' (TTL 10s)..."
+    # Lines logged before the send cannot hold this key's expiry: skip them
+    # so only the expiry of this send counts.
+    SKIP_LINES=$(wc -l < "$WORK_DIR/rack/logs/rack.log")
     (echo -n "delay:10:long|"; sleep 12) | nc -w 15 127.0.0.1 9180 &
     PID_NC=$!
     
@@ -312,11 +315,15 @@ test_TC54_restore_after_ttl() {
         log_info "TEST 2 CHECK 1 PASS: Key still alive at 5s"
     fi
 
-    # Check at 12s (Should be EXPIRED)
+    # The key expires 10s after the store processes the message. Poll for the
+    # expiry line instead of a fixed sleep: on a loaded runner the timer and
+    # the log flush can land past a fixed deadline. That failed this check
+    # intermittently since 2026-11-09 and on every scheduled run since
+    # 2026-11-14, with no code change in between. Lines logged so far are
+    # skipped so only this key's expiry counts.
     wait $PID_NC
-    sleep 2 # Extra buffer
-    
-    if grep "coat expired" "$WORK_DIR/rack/logs/rack.log" | grep -q "$KEY_B64"; then
+
+    if wait_for_log "$WORK_DIR/rack/logs/rack.log" "coat expired.*$KEY_B64" 30 "$SKIP_LINES"; then
          log_info "TEST 2 CHECK 2 PASS: Key expired eventually"
     else
          log_error "TEST 2 FAIL: Key never expired"

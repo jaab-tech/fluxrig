@@ -62,6 +62,18 @@ func parseEventSources(ctx sdk.GearContext, entries []any) ([]eventSource, error
 		if cfg.MaxEventAge, err = entryDuration(raw, "max_event_age", i); err != nil {
 			return nil, err
 		}
+		// An event sent through a NATS server that died comes back after the
+		// ack wait (snake.ack_wait), and must still be young enough then.
+		if waiter, ok := ctx.(sdk.EventAckWaiter); ok && waiter.EventAckWait() > 0 {
+			cfg.AckWait = waiter.EventAckWait()
+			age := cfg.MaxEventAge
+			if age <= 0 {
+				age = events.DefaultMaxEventAge
+			}
+			if age <= cfg.AckWait {
+				return nil, fmt.Errorf("entry %d: max_event_age (%s) must be longer than snake.ack_wait (%s): an event delivered again after the ack wait would be too old", i, age, cfg.AckWait)
+			}
+		}
 		if cfg.InactiveAfter, err = entryDuration(raw, "consumer_inactive_after", i); err != nil {
 			return nil, err
 		}

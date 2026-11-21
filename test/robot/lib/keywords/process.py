@@ -65,7 +65,10 @@ class ProcessKeywords:
                 for pid in pids:
                     try:
                         os.kill(pid, signal.SIGTERM)
-                    except ProcessLookupError:
+                    except (ProcessLookupError, PermissionError):
+                        # Another tenant's process on a shared host: not ours
+                        # to signal, and the port-based pass below only touches
+                        # what listens on our ports.
                         continue
 
                 # Wait for processes to exit

@@ -60,6 +60,8 @@ type Server struct {
 	readers  atomic.Int64
 	draining atomic.Bool
 	stopOnce sync.Once
+	// acceptDone is closed when the accept loop has returned.
+	acceptDone chan struct{}
 }
 
 // Connection represents an active ISO8583 connection.
@@ -113,6 +115,7 @@ func NewServer(cfg *Config, log *slog.Logger, emit func(*fluxmsg.FluxMsg), idGen
 		emit:        emit,
 		idGen:       idGen,
 		done:        make(chan struct{}),
+		acceptDone:  make(chan struct{}),
 		meter:       meter,
 		msgsIn:      msgsIn,
 		msgsOut:     msgsOut,
@@ -206,7 +209,7 @@ func (s *Server) Start(ctx context.Context) error {
 		l = tls.NewListener(l, conf)
 	}
 	s.listener = l
-	s.log.Info("listening", "addr", s.config.Bind, "tls", s.config.TLS.Enabled)
+	s.log.Info("listening", "addr", s.config.Bind, "bound", l.Addr().String(), "tls", s.config.TLS.Enabled)
 
 	go s.acceptLoop(ctx)
 	s.log.Info("starting tcp server", "addr", s.config.Bind, "max_conns", s.config.MaxConnections)
@@ -214,6 +217,7 @@ func (s *Server) Start(ctx context.Context) error {
 }
 
 func (s *Server) acceptLoop(ctx context.Context) {
+	defer close(s.acceptDone)
 	defer func() { _ = s.listener.Close() }()
 	backoff := 5 * time.Millisecond
 
@@ -226,6 +230,11 @@ func (s *Server) acceptLoop(ctx context.Context) {
 
 		conn, err := s.listener.Accept()
 		if err != nil {
+			// Drain and Stop close the listener on purpose, and nothing will
+			// come from it again.
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
 			if isActive(s.done) {
 				s.log.Error("accept error", "error", err)
 				time.Sleep(backoff)

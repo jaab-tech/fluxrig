@@ -32,6 +32,7 @@ func validTimeouts() *config.RackConfig {
 	cfg.Rack.HeartbeatInterval = "30s"
 	cfg.Snake.InactiveThreshold = "30s"
 	cfg.Snake.DLQPublishTimeout = "5s"
+	cfg.Snake.AckWait = "10s"
 	return cfg
 }
 
@@ -43,6 +44,7 @@ func TestParseRackTimeouts(t *testing.T) {
 	assert.Equal(t, 35*time.Second, got.drain)
 	assert.Equal(t, 5*time.Second, got.convergence)
 	assert.Equal(t, 500*time.Millisecond, got.handshake)
+	assert.Equal(t, 10*time.Second, got.ackWait)
 	assert.Equal(t, 200*time.Millisecond, got.subscriptionRetry)
 	assert.Equal(t, 5*time.Second, got.operation)
 	assert.Equal(t, 500*time.Millisecond, got.initialRetryWait)

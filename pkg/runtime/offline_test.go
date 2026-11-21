@@ -138,6 +138,5 @@ func TestBusRef_WithoutABusFailsWithoutPanicking(t *testing.T) {
 	assert.ErrorIs(t, err, errNoBus)
 	assert.Nil(t, ref.KV())
 	assert.Nil(t, ref.Core())
-	assert.NoError(t, ref.Purge(context.Background(), "flux.msg.test.>"))
 	ref.Close()
 }

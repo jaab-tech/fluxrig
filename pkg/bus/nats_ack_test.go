@@ -6,11 +6,13 @@ package bus
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/fxamacker/cbor/v2"
+	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
@@ -213,4 +215,61 @@ func TestNatsBus_PublishInjectsTraceBeforeMarshal(t *testing.T) {
 	require.NoError(t, cbor.Unmarshal(raw.Data, &stored))
 	assert.Contains(t, stored.Metadata, "traceparent",
 		"the trace context injected before Publish must be in the bytes that were marshaled and sent")
+}
+
+// The consumer of the guaranteed lane takes snake.ack_wait: a message it sent
+// through a server that died comes again after that, not after the 30s the
+// server would choose.
+func TestSubscribe_ConsumerTakesTheAckWait(t *testing.T) {
+	s, err := snake.NewServer(context.Background(), snake.Config{Port: -1, ClusterName: t.Name(), StoreDir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(s.Shutdown)
+	nb := NewNatsBus("flux")
+	require.NoError(t, nb.Connect(s.ClientURL(), ConnectOptions{
+		Name: t.Name(), ConnectTimeout: 5 * time.Second, ReconnectWait: time.Second, AckWait: 7 * time.Second,
+	}))
+	t.Cleanup(nb.Close)
+	nc, err := nats.Connect(s.ClientURL())
+	require.NoError(t, err)
+	t.Cleanup(nc.Close)
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+	_, err = js.CreateStream(context.Background(), jetstream.StreamConfig{Name: "flux", Subjects: []string{"flux.>"}})
+	require.NoError(t, err)
+
+	live, _ := subscribeCollect(t, nb, "flux.ackwait")
+	live.mu.Lock()
+	name := live.name
+	live.mu.Unlock()
+	cons, err := js.Consumer(context.Background(), "flux", name)
+	require.NoError(t, err)
+	require.Equal(t, 7*time.Second, cons.CachedInfo().Config.AckWait)
+}
+
+// A batch is stored whole and in order, and sent again it stores nothing
+// new: each message has its deduplication ID, as from PublishRaw.
+func TestPublishRawBatch_InOrderAndOnce(t *testing.T) {
+	nb, js := newTestStream(t)
+	ctx := context.Background()
+	msgs := make([]RawMessage, 10)
+	for i := range msgs {
+		msgs[i] = RawMessage{Data: []byte(fmt.Sprintf("m%d", i)), ID: uuid.New()}
+	}
+	sent, err := nb.PublishRawBatch(ctx, "flux.batch", msgs)
+	require.NoError(t, err)
+	require.Equal(t, len(msgs), sent)
+	sent, err = nb.PublishRawBatch(ctx, "flux.batch", msgs)
+	require.NoError(t, err)
+	require.Equal(t, len(msgs), sent)
+
+	s, err := js.Stream(ctx, "flux")
+	require.NoError(t, err)
+	info, err := s.Info(ctx)
+	require.NoError(t, err)
+	require.Equal(t, uint64(len(msgs)), info.State.Msgs, "the second batch stored nothing new")
+	for i := range msgs {
+		m, errGet := s.GetMsg(ctx, uint64(i+1))
+		require.NoError(t, errGet)
+		require.Equal(t, fmt.Sprintf("m%d", i), string(m.Data), "the order must be kept")
+	}
 }

@@ -146,3 +146,26 @@ func TestHandleConfig_NeverLeaksBootstrapSecretOrAuthToken(t *testing.T) {
 		t.Errorf("response leaked the bootstrap secret: %s", body)
 	}
 }
+
+func TestHandleConfig_RedactsNATSURLUserInfo(t *testing.T) {
+	cfg := &config.MixerConfig{}
+	cfg.Snake.URL = "tls://rack-user:secret@one.example:4222,tls://mixer:pass@two.example:4222"
+	s := NewServer(&MockRegistry{}, nil, nil, nil, nil, uuid.Nil, uuid.Nil, cfg, nil, nil)
+
+	req := httptest.NewRequest("GET", "/api/v1/config", nil)
+	w := httptest.NewRecorder()
+	s.handleConfig(w, req)
+
+	body := w.Body.String()
+	for _, secret := range []string{"rack-user", "secret", "mixer", "pass"} {
+		if strings.Contains(body, secret) {
+			t.Errorf("response leaked NATS URL userinfo %q: %s", secret, body)
+		}
+	}
+	if !strings.Contains(body, "tls://one.example:4222,tls://two.example:4222") {
+		t.Errorf("response did not preserve NATS server addresses: %s", body)
+	}
+	if cfg.Snake.URL != "tls://rack-user:secret@one.example:4222,tls://mixer:pass@two.example:4222" {
+		t.Errorf("response redaction modified the configured URL: %q", cfg.Snake.URL)
+	}
+}

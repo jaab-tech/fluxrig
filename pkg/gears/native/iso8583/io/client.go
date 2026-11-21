@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"math"
 	"net"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -44,6 +45,7 @@ type Client struct {
 	connEvent connEventFunc
 	// loopDone is closed when the dial loop has returned.
 	loopDone chan struct{}
+	stopOnce sync.Once
 
 	// Metrics
 	meter       metric.Meter
@@ -470,7 +472,7 @@ func (c *Client) Disconnect(connID string) error {
 
 // Stop closes the client connection.
 func (c *Client) Stop() error {
-	close(c.done)
+	c.stopOnce.Do(func() { close(c.done) })
 	conn := c.connPtr.Load()
 	if conn == nil {
 		return nil

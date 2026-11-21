@@ -1,0 +1,41 @@
+# Copyright (c) 2026 JAAB Tech SAS, Uruguay
+# SPDX-License-Identifier: Apache-2.0
+#
+# Three JetStream nodes clustered over routes on a fixed bridge network.
+# Addresses come from HA_NET (default 172.30.99); run.sh sets it.
+name: fluxrig-ha
+
+x-node: &node
+  image: fluxrig-ha-node:local
+  cap_add: [NET_ADMIN]
+  restart: "no"
+
+services:
+  n1:
+    <<: *node
+    container_name: fluxrig-ha-n1
+    command: ["-name", "fluxrig-ha-n1", "-host", "0.0.0.0", "-port", "4222", "-cluster-port", "6222",
+              "-routes", "nats://${HA_NET:-172.30.99}.11:6222,nats://${HA_NET:-172.30.99}.12:6222,nats://${HA_NET:-172.30.99}.13:6222",
+              "-store", "/data"]
+    networks: { hanet: { ipv4_address: "${HA_NET:-172.30.99}.11" } }
+  n2:
+    <<: *node
+    container_name: fluxrig-ha-n2
+    command: ["-name", "fluxrig-ha-n2", "-host", "0.0.0.0", "-port", "4222", "-cluster-port", "6222",
+              "-routes", "nats://${HA_NET:-172.30.99}.11:6222,nats://${HA_NET:-172.30.99}.12:6222,nats://${HA_NET:-172.30.99}.13:6222",
+              "-store", "/data"]
+    networks: { hanet: { ipv4_address: "${HA_NET:-172.30.99}.12" } }
+  n3:
+    <<: *node
+    container_name: fluxrig-ha-n3
+    command: ["-name", "fluxrig-ha-n3", "-host", "0.0.0.0", "-port", "4222", "-cluster-port", "6222",
+              "-routes", "nats://${HA_NET:-172.30.99}.11:6222,nats://${HA_NET:-172.30.99}.12:6222,nats://${HA_NET:-172.30.99}.13:6222",
+              "-store", "/data"]
+    networks: { hanet: { ipv4_address: "${HA_NET:-172.30.99}.13" } }
+
+networks:
+  hanet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: "${HA_NET:-172.30.99}.0/24"

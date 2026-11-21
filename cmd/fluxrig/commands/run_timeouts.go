@@ -33,6 +33,7 @@ type rackTimeouts struct {
 	heartbeat          time.Duration
 	inactiveThreshold  time.Duration
 	dlqPublish         time.Duration
+	ackWait            time.Duration
 }
 
 // The documented defaults from pkg/config's LoadRack, repeated here so a
@@ -55,6 +56,7 @@ const (
 	defaultHeartbeatInterval  = 30 * time.Second
 	defaultInactiveThreshold  = 30 * time.Second
 	defaultDLQPublishTimeout  = 5 * time.Second
+	defaultAckWait            = 10 * time.Second
 )
 
 // parseRackTimeouts reads them, and names the setting that is not a duration.
@@ -142,6 +144,9 @@ func parseRackTimeouts(cfg *config.RackConfig) (rackTimeouts, error) {
 		return out, err
 	}
 	if out.dlqPublish, err = parseTimeout("snake.dlq_publish_timeout", cfg.Snake.DLQPublishTimeout, defaultDLQPublishTimeout); err != nil {
+		return out, err
+	}
+	if out.ackWait, err = parseTimeout("snake.ack_wait", cfg.Snake.AckWait, defaultAckWait); err != nil {
 		return out, err
 	}
 

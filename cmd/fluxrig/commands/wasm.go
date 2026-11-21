@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -159,8 +160,123 @@ var wasmListCmd = &cobra.Command{
 	},
 }
 
+var wasmKeysCmd = &cobra.Command{
+	Use:   "keys",
+	Short: "Manage the vendors every Mixer trusts",
+	Long: `The trusted vendor keys are one keyring on the bus, shared by every Mixer:
+a vendor trusted or revoked through one Mixer is trusted or refused by all.
+A revoked vendor stays in the keyring as revoked, so a key file a Mixer still
+holds in wasm.trusted_keys_dir does not add it back.`,
+}
+
+// wasmKeysRequest sends a keyring request to the Mixer and checks its status.
+func wasmKeysRequest(cmd *cobra.Command, method, path string, body io.Reader, want int) ([]byte, error) {
+	apiURL, _ := cmd.Flags().GetString("api-url")
+	req, err := newAPIRequest(cmd, method, apiURL+"/api/v1/wasm/keys"+path, body)
+	if err != nil {
+		return nil, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/octet-stream")
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	out, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != want {
+		return nil, fmt.Errorf("%s: %s", resp.Status, bytes.TrimSpace(out))
+	}
+	return out, nil
+}
+
+var wasmKeysListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List the vendors of the keyring",
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		out, err := wasmKeysRequest(cmd, http.MethodGet, "", nil, http.StatusOK)
+		if err != nil {
+			return err
+		}
+		var keys []catalog.TrustedKey
+		if err = json.Unmarshal(out, &keys); err != nil {
+			return err
+		}
+		for _, k := range keys {
+			if k.Revoked {
+				fmt.Printf("- %s: revoked\n", k.Vendor)
+			} else {
+				fmt.Printf("- %s: %s\n", k.Vendor, k.Fingerprint)
+			}
+		}
+		return nil
+	},
+}
+
+var wasmKeysTrustCmd = &cobra.Command{
+	Use:   "trust [vendor] [key-file]",
+	Short: "Trust a vendor's public key on every Mixer",
+	Long: `The key file is the vendor's Ed25519 public key, 32 raw bytes in a file
+named <name>.pub, or the key file the vendor signs with (fluxrig wasm sign),
+whose public half is taken.`,
+	Args: cobra.ExactArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		pub, err := trustedPublicKey(args[1])
+		if err != nil {
+			return err
+		}
+		if _, err = wasmKeysRequest(cmd, http.MethodPut, "/"+args[0], bytes.NewReader(pub), http.StatusNoContent); err != nil {
+			return err
+		}
+		fmt.Printf("Every Mixer trusts %s.\n", args[0])
+		return nil
+	},
+}
+
+// trustedPublicKey reads the public key to trust from path. 32 raw bytes are
+// a public key only in a .pub file: wasm sign also takes 32 bytes, as a
+// private seed, and trusting such a file would send the private key to the
+// Mixer, and trust a key no module is signed with.
+func trustedPublicKey(path string) (ed25519.PublicKey, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == ed25519.PublicKeySize {
+		if !strings.HasSuffix(path, ".pub") {
+			return nil, fmt.Errorf("%s has 32 bytes, which can be a private seed: name a public key file <name>.pub, or give the signing key file", path)
+		}
+		return ed25519.PublicKey(data), nil
+	}
+	key, err := pki.LoadClusterKey(path)
+	if err != nil {
+		return nil, fmt.Errorf("%s is neither a 32-byte public key nor a signing key file: %w", path, err)
+	}
+	return key.Public, nil
+}
+
+var wasmKeysRevokeCmd = &cobra.Command{
+	Use:   "revoke [vendor]",
+	Short: "Stop trusting a vendor on every Mixer",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if _, err := wasmKeysRequest(cmd, http.MethodDelete, "/"+args[0], nil, http.StatusNoContent); err != nil {
+			return err
+		}
+		fmt.Printf("No Mixer trusts %s.\n", args[0])
+		return nil
+	},
+}
+
 func init() {
 	rootCmd.AddCommand(wasmCmd)
+	wasmCmd.AddCommand(wasmKeysCmd)
+	for _, c := range []*cobra.Command{wasmKeysListCmd, wasmKeysTrustCmd, wasmKeysRevokeCmd} {
+		wasmKeysCmd.AddCommand(c)
+		c.Flags().String("api-url", "http://localhost:8090", "URL of the Mixer API")
+		addAPITokenFlag(c, false)
+	}
 	wasmCmd.AddCommand(wasmImportCmd)
 	wasmCmd.AddCommand(wasmSignCmd)
 	wasmCmd.AddCommand(wasmListCmd)

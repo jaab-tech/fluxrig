@@ -256,8 +256,11 @@ func createManagedStream(ctx context.Context, js jetstream.JetStream, w Expected
 		Subjects:  w.Subjects,
 		Storage:   jetstream.FileStorage,
 		Retention: jetstream.LimitsPolicy,
-		Replicas:  1,
-		MaxAge:    w.MaxAge,
-		MaxBytes:  w.MaxBytes,
+		// One copy, not the configured count: repair refuses to run against a
+		// clustered store (see mixer.Repair), so it only ever recreates a
+		// stream on a server that is alone.
+		Replicas: 1,
+		MaxAge:   w.MaxAge,
+		MaxBytes: w.MaxBytes,
 	})
 }

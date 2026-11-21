@@ -11,6 +11,10 @@ enrollment_timeout = "10s"
 url = "nats://localhost:4222"
 domain = "flux"
 stream_name = "flux-msg"
+# Below the conn-events scenarios' max_event_age of 8s, and above the 5s
+# operation_timeout default: a redelivery still lands inside the tests' age
+# window, and the max_event_age > ack_wait validation passes.
+ack_wait = "6s"
 
 [logging]
 level = "info"

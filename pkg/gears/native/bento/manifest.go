@@ -17,6 +17,7 @@ func (g *Gear) Manifest() sdk.Manifest {
 		Summary:  "Wraps the Bento stream processor (file, socket, websocket and HTTP I/O, Bloblang mapping) as a gear.",
 		DocSlug:  "bento",
 		Terminus: sdk.TerminusOpaque,
+		BusNeeds: busNeeds,
 		Ports: []sdk.Port{
 			{Name: "in", Dir: sdk.PortIn, Role: "message", Summary: "Message into the Bento pipeline (when an input port is declared)."},
 			{Name: "out.<name>", Dir: sdk.PortOut, Role: "message", Dynamic: true, Summary: "Message out of a declared Bento output port."},
@@ -39,7 +40,7 @@ func (g *Gear) Manifest() sdk.Manifest {
             "properties": {
               "gear": { "type": "string", "description": "the gear whose events to read, as 'gear' (on the Rack it is deployed to, or on this Rack) or 'rack.gear'." },
               "on": { "type": "array", "items": { "type": "string", "enum": ["opened", "closed"] }, "description": "the events to read. Default: both." },
-              "max_event_age": { "type": "string", "pattern": "^[0-9]+(s|ms|m|h)$", "default": "30s", "description": "drop an event older than this, by its time of publication." },
+              "max_event_age": { "type": "string", "pattern": "^[0-9]+(s|ms|m|h)$", "default": "30s", "description": "drop an event older than this, by its time of publication. Must be longer than snake.ack_wait: an event delivered again after the ack wait must still be young enough." },
               "max_deliver": { "type": "integer", "minimum": 1, "default": 5, "description": "deliveries of an event whose pipeline fails." },
               "consumer_inactive_after": { "type": "string", "pattern": "^[0-9]+(s|ms|m|h)$", "default": "1h", "description": "delete the durable consumer of a reader that stayed away for this long." }
             },

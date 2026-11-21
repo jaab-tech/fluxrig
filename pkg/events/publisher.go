@@ -70,17 +70,54 @@ func (p *Publisher) run() {
 	for {
 		select {
 		case ev := <-p.queue:
-			p.send(ev)
+			p.sendQueued(ev)
 		case <-p.stop:
 			for {
 				select {
 				case ev := <-p.queue:
-					p.send(ev)
+					p.sendQueued(ev)
 				default:
 					return
 				}
 			}
 		}
+	}
+}
+
+// publishBatch bounds the events one call sends.
+const publishBatch = 64
+
+// sendQueued sends first and what else waits in the queue, in order. A
+// context that takes a batch gets them in one call: one at a time, each
+// waited for the bus across a slow link, and a gear whose connections came
+// faster than one round trip each fell behind for good.
+func (p *Publisher) sendQueued(first ConnEvent) {
+	batcher, ok := p.provider.(sdk.EventBatchPublisher)
+	if !ok {
+		p.send(first)
+		return
+	}
+	evs := []ConnEvent{first}
+	for len(evs) < publishBatch {
+		select {
+		case ev := <-p.queue:
+			evs = append(evs, ev)
+			continue
+		default:
+		}
+		break
+	}
+	raw := make([]sdk.RawEvent, 0, len(evs))
+	for _, ev := range evs {
+		data, err := json.Marshal(ev)
+		if err != nil {
+			p.log.Warn("connection event dropped, it does not encode", "event", ev.Event, "conn_id", ev.ConnID, "error", err)
+			continue
+		}
+		raw = append(raw, sdk.RawEvent{Data: data, ID: ev.id()})
+	}
+	if err := batcher.PublishEvents(context.Background(), p.subject, raw); err != nil {
+		p.log.Warn("connection events dropped", "events", len(raw), "error", err)
 	}
 }
 

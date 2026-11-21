@@ -42,7 +42,7 @@ func startJetStream(t *testing.T) jetstream.JetStream {
 // delete on a moved revision conflicts, keys filter by prefix.
 func TestJetStreamBucket_Semantics(t *testing.T) {
 	ctx := context.Background()
-	reg, live, err := EnsureBuckets(ctx, startJetStream(t), BucketConfig{
+	reg, live, _, err := EnsureBuckets(ctx, startJetStream(t), BucketConfig{
 		Registry: "reg_test", Liveness: "live_test", MaxValueSize: 256, LivenessTTL: time.Second,
 	})
 	require.NoError(t, err)
@@ -71,6 +71,9 @@ func TestJetStreamBucket_Semantics(t *testing.T) {
 	assert.Empty(t, none)
 
 	require.NoError(t, reg.Delete(ctx, "entity.4.a", rev2))
+	keys, err = reg.Keys(ctx, "entity.4.")
+	require.NoError(t, err)
+	assert.Empty(t, keys, "a deleted key leaves a marker in the stream, and Keys must not list it")
 	_, err = reg.Create(ctx, "entity.4.a", []byte("3"))
 	require.NoError(t, err, "a deleted key can be created again")
 
@@ -93,7 +96,7 @@ func TestJetStreamBucket_Semantics(t *testing.T) {
 // The whole store over real buckets: register, approve, heartbeat, list.
 func TestStore_OverJetStream(t *testing.T) {
 	ctx := context.Background()
-	reg, live, err := EnsureBuckets(ctx, startJetStream(t), BucketConfig{
+	reg, live, _, err := EnsureBuckets(ctx, startJetStream(t), BucketConfig{
 		Registry: "fluxrig_registry", Liveness: "fluxrig_liveness", MaxValueSize: 1 << 20, LivenessTTL: time.Minute,
 	})
 	require.NoError(t, err)

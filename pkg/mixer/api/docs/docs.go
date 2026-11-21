@@ -393,6 +393,12 @@ const docTemplate = `{
                         "schema": {
                             "type": "string"
                         }
+                    },
+                    "503": {
+                        "description": "No Mixer holds the write lease, or the cluster cannot answer yet: retry",
+                        "schema": {
+                            "type": "string"
+                        }
                     }
                 }
             }
@@ -471,7 +477,13 @@ const docTemplate = `{
                         }
                     },
                     "413": {
-                        "description": "larger than mixer.max_payload_size",
+                        "description": "larger than mixer.max_payload_size or registry.spec_max_size",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "503": {
+                        "description": "no Mixer holds the write lease, or the store is unavailable",
                         "schema": {
                             "type": "string"
                         }
@@ -719,7 +731,7 @@ const docTemplate = `{
         },
         "/wasm/catalog": {
             "get": {
-                "description": "Returns the catalog of trusted and available Wasm modules",
+                "description": "Returns the Wasm modules of the shared catalog, the same on every Mixer",
                 "produces": [
                     "application/json"
                 ],
@@ -733,9 +745,14 @@ const docTemplate = `{
                         "schema": {
                             "type": "array",
                             "items": {
-                                "type": "object",
-                                "additionalProperties": true
+                                "$ref": "#/definitions/catalog.WasmMetadata"
                             }
+                        }
+                    },
+                    "503": {
+                        "description": "The catalog store on the bus is not available",
+                        "schema": {
+                            "type": "string"
                         }
                     }
                 }
@@ -778,8 +795,131 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": true
+                            "$ref": "#/definitions/catalog.WasmMetadata"
+                        }
+                    },
+                    "400": {
+                        "description": "The module is refused: no trusted signature, or it fails the sandbox",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "503": {
+                        "description": "The catalog store on the bus did not take the module: nothing was imported",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/wasm/keys": {
+            "get": {
+                "description": "Returns the vendors of the shared keyring, the same on every Mixer, revoked ones included",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "wasm"
+                ],
+                "summary": "List trusted Wasm vendors",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/catalog.TrustedKey"
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "The keyring store on the bus is not available",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/wasm/keys/{vendor}": {
+            "put": {
+                "description": "Adds the vendor's Ed25519 public key (32 raw bytes) to the shared keyring, or replaces it. Every Mixer trusts it at its next import.",
+                "consumes": [
+                    "application/octet-stream"
+                ],
+                "tags": [
+                    "wasm"
+                ],
+                "summary": "Trust a Wasm vendor",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Vendor name: letters, digits, - and _",
+                        "name": "vendor",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Ed25519 public key, 32 bytes",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "type": "integer"
+                            }
+                        }
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "No Content"
+                    },
+                    "400": {
+                        "description": "Invalid vendor name or key",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "503": {
+                        "description": "The keyring store on the bus is not available",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "description": "Stops trusting the vendor on every Mixer. The vendor stays in the keyring as revoked, so a key file a Mixer still holds does not add it back.",
+                "tags": [
+                    "wasm"
+                ],
+                "summary": "Revoke a Wasm vendor",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Vendor name",
+                        "name": "vendor",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "No Content"
+                    },
+                    "400": {
+                        "description": "Invalid vendor name",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "503": {
+                        "description": "The keyring store on the bus is not available",
+                        "schema": {
+                            "type": "string"
                         }
                     }
                 }
@@ -820,6 +960,14 @@ const docTemplate = `{
                     "type": "string",
                     "example": "019de49b-0000-7000-8000-000000000000"
                 },
+                "lease": {
+                    "description": "Lease reports the write lease of a Mixer cluster. Absent when the lease\nis off (a single Mixer).",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/api.LeaseStatus"
+                        }
+                    ]
+                },
                 "machine_id": {
                     "description": "MachineID is the persistent machine ID.",
                     "type": "string",
@@ -834,6 +982,33 @@ const docTemplate = `{
                     "description": "Version of the service.",
                     "type": "string",
                     "example": "0.1.0"
+                }
+            }
+        },
+        "api.LeaseStatus": {
+            "type": "object",
+            "properties": {
+                "error": {
+                    "description": "Error is \"unavailable\" when the lease could not be read. The raw cause\nis not returned because /health does not require authentication.",
+                    "type": "string"
+                },
+                "held": {
+                    "description": "Held is true when this Mixer holds the lease and may write.",
+                    "type": "boolean",
+                    "example": false
+                },
+                "holder": {
+                    "description": "Holder is the machine_id of the Mixer that holds the lease. Absent when\nno Mixer holds it: control writes answer 503 until one does.",
+                    "type": "string",
+                    "example": "019de49b-0000-7000-8000-000000000000"
+                },
+                "holder_since": {
+                    "description": "HolderSince is when the holder took the lease.",
+                    "type": "string"
+                },
+                "renewed": {
+                    "description": "Renewed is the holder's last successful renew.",
+                    "type": "string"
                 }
             }
         },
@@ -1066,6 +1241,36 @@ const docTemplate = `{
                 }
             }
         },
+        "catalog.TrustedKey": {
+            "type": "object",
+            "properties": {
+                "fingerprint": {
+                    "description": "Fingerprint is the SHA-256 of the public key, in hex.",
+                    "type": "string"
+                },
+                "revoked": {
+                    "type": "boolean"
+                },
+                "vendor": {
+                    "type": "string"
+                }
+            }
+        },
+        "catalog.WasmMetadata": {
+            "type": "object",
+            "properties": {
+                "hash": {
+                    "type": "string"
+                },
+                "size_bytes": {
+                    "type": "integer"
+                },
+                "status": {
+                    "description": "\"Trusted: VendorX\" or \"Untrusted\"",
+                    "type": "string"
+                }
+            }
+        },
         "config.ApiConfig": {
             "type": "object",
             "properties": {
@@ -1275,12 +1480,27 @@ const docTemplate = `{
         "config.MixerSettings": {
             "type": "object",
             "properties": {
+                "followInterval": {
+                    "description": "FollowInterval is how often a Mixer that does not hold the write lease\nchecks the active-scenario pointer and reloads it when it changed.",
+                    "type": "string",
+                    "example": "5s"
+                },
+                "forwardTimeout": {
+                    "description": "ForwardTimeout bounds a control write forwarded to the lease holder. It\nmust cover a cross-site round trip plus the holder's own write.",
+                    "type": "string",
+                    "example": "5s"
+                },
                 "maxHops": {
                     "description": "Message Limits",
                     "type": "integer"
                 },
                 "maxPayloadSize": {
                     "type": "integer"
+                },
+                "queueGroup": {
+                    "description": "QueueGroup, when set, makes a Mixer's subscriptions a shared durable\nqueue group: exactly one member handles each message. It is turned on\nautomatically with the write lease, so several Mixers do not each\nprocess the same Hello. Empty keeps every Mixer subscribing alone.",
+                    "type": "string",
+                    "example": "fluxrig-mixers"
                 },
                 "scenarioWaitTimeout": {
                     "description": "ScenarioWaitTimeout is the time to wait for a rack to register when activating a scenario.",
@@ -1289,6 +1509,33 @@ const docTemplate = `{
                 },
                 "startupScenario": {
                     "description": "StartupScenario reference to the scenario to load on startup.",
+                    "type": "string"
+                }
+            }
+        },
+        "config.NATSStorageConfig": {
+            "type": "object",
+            "properties": {
+                "bucket": {
+                    "type": "string",
+                    "example": "fluxrig_telemetry"
+                }
+            }
+        },
+        "config.OTLPStorageConfig": {
+            "type": "object",
+            "properties": {
+                "cafile": {
+                    "description": "CAFile verifies the collector's certificate, when a public CA does not.",
+                    "type": "string"
+                },
+                "endpoint": {
+                    "description": "Endpoint is the collector's base URL; the paths /v1/logs, /v1/metrics\nand /v1/traces are added to it.",
+                    "type": "string",
+                    "example": "https://collector.example:4318"
+                },
+                "headersFile": {
+                    "description": "HeadersFile holds extra request headers, one \"Name: value\" per line,\nsuch as an authorization token.",
                     "type": "string"
                 }
             }
@@ -1308,6 +1555,14 @@ const docTemplate = `{
                     "description": "Enabled master switch for observability features.",
                     "type": "boolean",
                     "example": true
+                },
+                "storage": {
+                    "description": "Storage is where the Mixer keeps telemetry.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/config.StorageConfig"
+                        }
+                    ]
                 },
                 "tier": {
                     "description": "Tier selects the backend (embedded or standard).",
@@ -1420,6 +1675,26 @@ const docTemplate = `{
                     "type": "string",
                     "example": "fluxrig_registry"
                 },
+                "leaseBucket": {
+                    "description": "LeaseBucket names the bucket that holds the lease. It must differ from\nthe registry and liveness buckets.",
+                    "type": "string",
+                    "example": "fluxrig_lease"
+                },
+                "leaseEnabled": {
+                    "description": "LeaseEnabled turns on the write lease: one Mixer holds it and does\nevery control-plane write, so several Mixers never write the registry\nat once. Off by default, which keeps a single Mixer exactly as it was.",
+                    "type": "boolean",
+                    "example": false
+                },
+                "leaseRenew": {
+                    "description": "LeaseRenew is how often the holder renews. It must be well under\nLeaseTTL so an ordinary slow write does not lapse the lease.",
+                    "type": "string",
+                    "example": "10s"
+                },
+                "leaseTTL": {
+                    "description": "LeaseTTL is the lease duration: the bucket's max age, and how long a\nholder may go without a successful renew before it stops writing. Sized\nagainst the slowest election at cross-site latency.",
+                    "type": "string",
+                    "example": "30s"
+                },
                 "livenessBucket": {
                     "description": "LivenessBucket names the presence bucket.",
                     "type": "string",
@@ -1444,6 +1719,16 @@ const docTemplate = `{
                     "description": "Replicas is the replica count of both buckets. A single Mixer holds one\nreplica, so a value above 1 needs as many JetStream servers.",
                     "type": "integer",
                     "example": 1
+                },
+                "specBucket": {
+                    "description": "SpecBucket names the bucket that holds the shared spec store. It is\nused with the lease on: every Mixer of the cluster reads and imports\nspecs there. A single Mixer keeps its local store.",
+                    "type": "string",
+                    "example": "fluxrig_specs"
+                },
+                "specMaxSize": {
+                    "description": "SpecMaxSize is the largest spec in bytes the shared store accepts. It\nis the spec bucket's max value size, so it must not exceed the Snake's\nmax_payload (1 MiB by default).",
+                    "type": "integer",
+                    "example": 1048576
                 },
                 "sweepInterval": {
                     "description": "SweepInterval is how often the Mixer repairs what a crash between two\nregistry writes left behind. It also sweeps once at startup.",
@@ -1472,13 +1757,64 @@ const docTemplate = `{
                 }
             }
         },
+        "config.S3StorageConfig": {
+            "type": "object",
+            "properties": {
+                "accessKeyFile": {
+                    "description": "AccessKeyFile and SecretKeyFile hold the credentials. Empty reads\nAWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.",
+                    "type": "string"
+                },
+                "bucket": {
+                    "type": "string",
+                    "example": "fluxrig-telemetry"
+                },
+                "cafile": {
+                    "description": "CAFile verifies the service's certificate, when a public CA does not.",
+                    "type": "string"
+                },
+                "endpoint": {
+                    "description": "Endpoint is the host and port of the service, without a scheme.",
+                    "type": "string",
+                    "example": "s3.amazonaws.com"
+                },
+                "plaintext": {
+                    "description": "Plaintext talks HTTP instead of HTTPS. Development only.",
+                    "type": "boolean",
+                    "example": false
+                },
+                "prefix": {
+                    "description": "Prefix is put before every object name.",
+                    "type": "string",
+                    "example": "telemetry"
+                },
+                "region": {
+                    "type": "string",
+                    "example": "us-east-1"
+                },
+                "secretKeyFile": {
+                    "type": "string"
+                }
+            }
+        },
         "config.SnakeConfig": {
             "type": "object",
             "properties": {
+                "ackWait": {
+                    "description": "AckWait is how long a consumer of the guaranteed lane, and a durable\none, waits for a message's acknowledgement before it delivers it again.\nA message sent through a NATS server that died arrives that late. It\nmust be longer than OperationTimeout, which bounds the processing of a\nmessage by a gear: shorter, a slow gear gets each message twice.",
+                    "type": "string",
+                    "example": "10s"
+                },
                 "allowNonTLS": {
                     "description": "AllowNonTLS lets a plaintext client connect alongside a TLS one once\nTLSCertFile/TLSKeyFile are set. Mixer-side only: false by default, so\nconfiguring TLS actually requires it instead of just offering it.",
                     "type": "boolean",
                     "example": false
+                },
+                "clientCertFile": {
+                    "description": "ClientCertFile and ClientKeyFile are the certificate this client presents\nto NATS. CredentialsFile is a NATS credentials file, with the permissions\nof this client.",
+                    "type": "string"
+                },
+                "clientKeyFile": {
+                    "type": "string"
                 },
                 "clusterName": {
                     "description": "ClusterName is the JetStream domain the embedded server reports. It is\nalso what a client uses to reach a domain-scoped server.",
@@ -1489,9 +1825,22 @@ const docTemplate = `{
                     "type": "string",
                     "example": "10s"
                 },
+                "consumerMissedHeartbeats": {
+                    "description": "ConsumerMissedHeartbeats is how many heartbeats in a row the consumer\nof a subscription may miss before the Rack replaces it, while the\ncluster still lists it or cannot answer. A heartbeat is due every\noperation_timeout. Rack-side only.",
+                    "type": "integer",
+                    "example": 2
+                },
+                "consumerReplicas": {
+                    "description": "ConsumerReplicas is the replica count of the consumer behind each\nacknowledged subscription (a guaranteed-lane wire, a scenario push).\n0 takes the stream's replica count, so in a cluster the consumer\nsurvives the loss or the partition of a Mixer. 1 keeps one replica,\nlighter on the Mixers. Rack-side only.",
+                    "type": "integer",
+                    "example": 0
+                },
                 "convergenceDelay": {
                     "type": "string",
                     "example": "100ms"
+                },
+                "credentialsFile": {
+                    "type": "string"
                 },
                 "dlqenabled": {
                     "description": "DLQEnabled routes unprocessable messages (decode failure, validation\nfailure, or a handler that failed on every redelivery) to the dead\nletter stream instead of dropping them with only a log line. Off keeps\nthe previous behavior: log and discard.",
@@ -1526,6 +1875,21 @@ const docTemplate = `{
                     "type": "integer",
                     "example": 268435456
                 },
+                "external": {
+                    "description": "External means that url names a NATS cluster the operator runs. A Mixer\nstarts no embedded server, and several Mixers on one cluster give HA. A\nclient verifies the host of the URL and not the domain, on a Mixer and on\na Rack.",
+                    "type": "boolean",
+                    "example": false
+                },
+                "failoverAfter": {
+                    "description": "FailoverAfter is how many JetStream publishes in a row may find no\nstream (a timeout or no responders) before a Rack drops its Mixer and\nreconnects to another one in snake.url. A Mixer cut off from its cluster\nkeeps the Rack's connection open while every publish through it fails.\n0 disables it. Rack-side only.",
+                    "type": "integer",
+                    "example": 2
+                },
+                "formTimeout": {
+                    "description": "FormTimeout is how long a Mixer on an external NATS waits for it to\nanswer, and for a replicated stream to become placeable, before it gives\nup starting. Generous by default: an operator restarting a NATS cluster\nbrings its servers up one after another.",
+                    "type": "string",
+                    "example": "2m"
+                },
                 "inactiveThreshold": {
                     "type": "string",
                     "example": "30s"
@@ -1554,6 +1918,10 @@ const docTemplate = `{
                     "type": "string",
                     "example": "0s"
                 },
+                "maxPingsOut": {
+                    "type": "integer",
+                    "example": 3
+                },
                 "offlineRetryInterval": {
                     "type": "string",
                     "example": "5s"
@@ -1566,6 +1934,11 @@ const docTemplate = `{
                     "type": "string",
                     "example": "5s"
                 },
+                "pingInterval": {
+                    "description": "PingInterval and MaxPingsOut decide how fast a client of NATS, a Mixer\nor a Rack, notices a server that went silent: after MaxPingsOut\nunanswered pings sent PingInterval apart it reconnects to another\nserver. A server that dies without closing its connections (a crash, a\ncut link) is noticed only so, and until then every request on the\nconnection times out.",
+                    "type": "string",
+                    "example": "5s"
+                },
                 "port": {
                     "type": "integer",
                     "example": 4222
@@ -1573,6 +1946,11 @@ const docTemplate = `{
                 "reconnectWait": {
                     "type": "string",
                     "example": "1s"
+                },
+                "replicas": {
+                    "description": "Replicas is how many copies of every stream and bucket the Mixer\nprovisions. The embedded server runs alone and holds one, so more than\n1 needs snake.external, on a NATS cluster with at least that many servers.",
+                    "type": "integer",
+                    "example": 1
                 },
                 "rootCAFile": {
                     "type": "string"
@@ -1639,6 +2017,40 @@ const docTemplate = `{
                 "url": {
                     "type": "string",
                     "example": "nats://localhost:4222"
+                }
+            }
+        },
+        "config.StorageConfig": {
+            "type": "object",
+            "properties": {
+                "batchInterval": {
+                    "description": "BatchInterval is how often the lease holder commits a batch: it writes\none file of each kind to s3 or nats, or sends one export to otlp. The\nother Mixers see the telemetry up to the last batch. Each Mixer keeps\nthe files it writes or fetches for a query under store.dir/telemetry,\nunder the same retention as local files.",
+                    "type": "string",
+                    "example": "15s"
+                },
+                "commitTimeout": {
+                    "description": "CommitTimeout bounds one upload or export of a batch. A batch that does\nnot make it is tried again, and stays unconfirmed until it does.",
+                    "type": "string",
+                    "example": "30s"
+                },
+                "nats": {
+                    "$ref": "#/definitions/config.NATSStorageConfig"
+                },
+                "otlp": {
+                    "$ref": "#/definitions/config.OTLPStorageConfig"
+                },
+                "s3": {
+                    "description": "S3, NATS and OTLP configure their type.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/config.S3StorageConfig"
+                        }
+                    ]
+                },
+                "type": {
+                    "description": "Type is local, s3, nats or otlp.",
+                    "type": "string",
+                    "example": "local"
                 }
             }
         },

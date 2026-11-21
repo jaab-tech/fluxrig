@@ -254,3 +254,24 @@ func TestEventInput_FailedEmissionDeliversTheEventAgain(t *testing.T) {
 		"attempts: %d", emitter.tries())
 	assert.Equal(t, 2, emitter.tries())
 }
+
+// ackWaitContext is a Rack context that also gives snake.ack_wait.
+type ackWaitContext struct {
+	*rackContext
+	ackWait time.Duration
+}
+
+func (c *ackWaitContext) EventAckWait() time.Duration { return c.ackWait }
+
+// A reader takes snake.ack_wait, so an event sent through a NATS server that
+// died comes back inside its age. An age that leaves no room for it is
+// refused.
+func TestEventSources_TakeTheAckWait(t *testing.T) {
+	ctx := &ackWaitContext{rackContext: newRackContext("r", nil), ackWait: 10 * time.Second}
+	sources, err := parseEventSources(ctx, []any{map[string]any{"gear": "g"}})
+	require.NoError(t, err)
+	assert.Equal(t, 10*time.Second, sources[0].config.AckWait)
+
+	_, err = parseEventSources(ctx, []any{map[string]any{"gear": "g", "max_event_age": "10s"}})
+	require.ErrorContains(t, err, "snake.ack_wait")
+}

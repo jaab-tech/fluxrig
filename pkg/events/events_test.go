@@ -7,8 +7,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,6 +20,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/jaab-tech/fluxrig/pkg/sdk"
 	"github.com/jaab-tech/fluxrig/pkg/snake"
 )
 
@@ -350,4 +353,78 @@ func TestReader_WithoutAConnectionReportsIt(t *testing.T) {
 	require.ErrorIs(t, r.Open(context.Background()), ErrNotConnected)
 	_, err := r.Next(context.Background())
 	require.ErrorIs(t, err, ErrNotConnected)
+}
+
+// The ack wait leaves room for a redelivery inside the age of an event; one
+// that does not falls back to the age.
+func TestReader_AckWait(t *testing.T) {
+	for _, c := range []struct{ ack, age, want time.Duration }{
+		{10 * time.Second, 30 * time.Second, 10 * time.Second},
+		{0, 30 * time.Second, 30 * time.Second},
+		{30 * time.Second, 30 * time.Second, 30 * time.Second},
+	} {
+		r := NewReader(ReaderConfig{AckWait: c.ack, MaxEventAge: c.age})
+		if got := r.ackWait(); got != c.want {
+			t.Errorf("ack %s age %s: got %s, want %s", c.ack, c.age, got, c.want)
+		}
+	}
+}
+
+// slowProvider costs one round trip per call, as a publish to a stream
+// leader across a slow link does, whether the call carries one event or a
+// batch. batch turns the batch capability on.
+type slowProvider struct {
+	fakeProvider
+	rtt   time.Duration
+	calls atomic.Int32
+}
+
+func (s *slowProvider) PublishEvent(ctx context.Context, subject string, data []byte, id uuid.UUID) error {
+	s.calls.Add(1)
+	time.Sleep(s.rtt) // the simulated round trip
+	return s.fakeProvider.PublishEvent(ctx, subject, data, id)
+}
+
+type batchingProvider struct{ *slowProvider }
+
+func (b batchingProvider) PublishEvents(ctx context.Context, subject string, evs []sdk.RawEvent) error {
+	b.calls.Add(1)
+	time.Sleep(b.rtt) // one round trip for the whole batch
+	for _, e := range evs {
+		if err := b.fakeProvider.PublishEvent(ctx, subject, e.Data, e.ID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// A gear whose connections come faster than one round trip each: sent one at
+// a time its events fell behind for good; in batches they keep up, in order.
+func TestPublisher_BatchesKeepUpWithASlowLink(t *testing.T) {
+	const n = 20
+	run := func(provider sdk.EventProvider) time.Duration {
+		p := NewPublisher(provider, "server_io", 0, discard())
+		start := time.Now()
+		for i := 0; i < n; i++ {
+			p.Publish(ConnEvent{Event: Opened, ConnID: fmt.Sprintf("c%02d", i)})
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		require.NoError(t, p.Close(ctx))
+		return time.Since(start)
+	}
+	single := &slowProvider{rtt: 200 * time.Millisecond}
+	oneByOne := run(single)
+	batched := &slowProvider{rtt: 200 * time.Millisecond}
+	inBatches := run(batchingProvider{batched})
+
+	assert.GreaterOrEqual(t, oneByOne, n*200*time.Millisecond, "one at a time costs a round trip per event")
+	assert.Less(t, inBatches, oneByOne/4, "batches must not cost a round trip per event")
+	assert.Less(t, batched.calls.Load(), int32(n), "events were sent one per call")
+	got := batched.events()
+	require.Len(t, got, n)
+	for i, ev := range got {
+		assert.Equal(t, fmt.Sprintf("c%02d", i), ev.ConnID, "the order must be kept")
+	}
+	t.Logf("%d events: one at a time %s, in %d batches %s", n, oneByOne.Round(time.Millisecond), batched.calls.Load(), inBatches.Round(time.Millisecond))
 }

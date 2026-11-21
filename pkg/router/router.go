@@ -42,16 +42,78 @@ func NewRouter(logger watermill.LoggerAdapter) (*RouterWrapper, error) {
 	return &RouterWrapper{Router: r}, nil
 }
 
-// ConfigureJetStream sets up NATS JetStream Publisher and Subscriber.
-// url: NATS URL (e.g. "nats://localhost:4222")
+// JetStreamSetup describes the streams and the connection ConfigureJetStream
+// works with. It is a struct rather than a parameter list because the list had
+// grown to eleven, with adjacent strings and bools that were easy to swap
+// silently.
+type JetStreamSetup struct {
+	// URL is the NATS URL, for example "nats://localhost:4222". Domain is the
+	// JetStream domain, and RootCA the authority for a TLS connection.
+	URL     string
+	Domain  string
+	RootCA  string
+	Durable bool
 
-func (r *RouterWrapper) ConfigureJetStream(url string, domain string, durable bool, rootCA string, businessStream string, businessSubjects []string, telemetryStream string, telemetrySubjects []string, businessMaxAgeStr string, telemetryMaxAgeStr string, logger watermill.LoggerAdapter) error {
+	// The two streams this router provisions, with their subjects and their
+	// max age. An empty max age means no limit.
+	BusinessStream    string
+	BusinessSubjects  []string
+	BusinessMaxAge    string
+	TelemetryStream   string
+	TelemetrySubjects []string
+	TelemetryMaxAge   string
+
+	// Replicas is how many copies of each stream to keep. Zero or one is a
+	// single copy; more needs a cluster of at least that many members.
+	Replicas int
+
+	// QueueGroup, when set, makes this Mixer's subscriptions a shared durable
+	// queue group: exactly one member handles each message. Empty keeps every
+	// Mixer subscribing on its own, which is right for a single Mixer and for
+	// topics every Mixer must see.
+	QueueGroup string
+
+	// AckWait is how long the queue group's consumer waits for a message's
+	// acknowledgement before it delivers the message again, to another member
+	// or the same one: a message pushed to a Mixer that was cut off comes
+	// back after it (snake.ack_wait). Zero keeps the server default.
+	AckWait time.Duration
+
+	// FormTimeout bounds how long stream creation keeps retrying while a
+	// cluster forms. Zero takes defaultStreamFormTimeout.
+	FormTimeout time.Duration
+
+	// ClientOptions secures every connection of the router, when NATS is
+	// external. The embedded server takes RootCA alone.
+	ClientOptions []nats.Option
+}
+
+// defaultStreamFormTimeout matches the Snake's own default form timeout
+// (snake.form_timeout).
+const defaultStreamFormTimeout = 2 * time.Minute
+
+// formRetryWait is the pause between two attempts to create a stream or a
+// subscription while the cluster forms.
+const formRetryWait = time.Second
+
+// ConfigureJetStream sets up the NATS JetStream Publisher and Subscriber, and
+// provisions the two streams they use.
+func (r *RouterWrapper) ConfigureJetStream(setup JetStreamSetup, logger watermill.LoggerAdapter) error {
+	url, domain, rootCA, durable := setup.URL, setup.Domain, setup.RootCA, setup.Durable
+	businessStream, businessSubjects := setup.BusinessStream, setup.BusinessSubjects
+	telemetryStream, telemetrySubjects := setup.TelemetryStream, setup.TelemetrySubjects
+	businessMaxAgeStr, telemetryMaxAgeStr := setup.BusinessMaxAge, setup.TelemetryMaxAge
+	replicas := setup.Replicas
+	if replicas < 1 {
+		replicas = 1
+	}
 	// 1. Manually Ensure Stream Exists using V2 SDK
 	connOpts := []nats.Option{}
 	if rootCA != "" {
 		connOpts = append(connOpts, nats.RootCAs(rootCA))
 	}
 
+	connOpts = append(connOpts, setup.ClientOptions...)
 	nc, err := nats.Connect(url, connOpts...)
 	if err != nil {
 		return err
@@ -65,7 +127,14 @@ func (r *RouterWrapper) ConfigureJetStream(url string, domain string, durable bo
 		return fmt.Errorf("failed to initialize jetstream: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// The context bounds the whole retry window below. It was a fixed 10s,
+	// which the first 10s attempt used up, so the retry never ran.
+	formTimeout := setup.FormTimeout
+	if formTimeout <= 0 {
+		formTimeout = defaultStreamFormTimeout
+	}
+	streamDeadline := time.Now().Add(formTimeout)
+	ctx, cancel := context.WithDeadline(context.Background(), streamDeadline)
 	defer cancel()
 
 	// Parse custom max age configuration
@@ -111,21 +180,47 @@ func (r *RouterWrapper) ConfigureJetStream(url string, domain string, durable bo
 	}
 
 	// 2. Create/Update Streams
+	//
+	// Placing a stream's replicas needs one member per replica, and on a fresh
+	// cluster the last member may still be starting, so a single short attempt
+	// fails where a retry succeeds. The window matches the Snake's stream
+	// provisioning, which already retries for the same reason. Without this, a
+	// three-Mixer cluster starting at once died on "failed to create/update
+	// stream flux-telemetry: context deadline exceeded", which the phase-6
+	// testbed caught.
+	const streamAttemptTimeout = 10 * time.Second
 	for name, subjects := range streams {
-		logger.Info("Configuring JetStream Stream", watermill.LogFields{
-			"stream":   name,
-			"subjects": subjects,
-		})
-		_, err = js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-			Name:      name,
-			Subjects:  subjects,
-			Retention: jetstream.LimitsPolicy,
-			Storage:   jetstream.FileStorage,
-			MaxAge:    maxAges[name],
-			Replicas:  1,
-		})
-		if err != nil {
-			return fmt.Errorf("failed to create/update stream %s: %w", name, err)
+		var lastErr error
+		for attempt := 1; ; attempt++ {
+			logger.Info("Configuring JetStream Stream", watermill.LogFields{
+				"stream":   name,
+				"subjects": subjects,
+				"attempt":  attempt,
+			})
+			actx, cancel := context.WithTimeout(ctx, streamAttemptTimeout)
+			_, lastErr = js.CreateOrUpdateStream(actx, jetstream.StreamConfig{
+				Name:      name,
+				Subjects:  subjects,
+				Retention: jetstream.LimitsPolicy,
+				Storage:   jetstream.FileStorage,
+				MaxAge:    maxAges[name],
+				Replicas:  replicas,
+			})
+			cancel()
+			if lastErr == nil {
+				break
+			}
+			if time.Now().After(streamDeadline) {
+				return fmt.Errorf("failed to create/update stream %s: %w", name, lastErr)
+			}
+			logger.Info("Stream creation is waiting for the cluster", watermill.LogFields{
+				"stream": name, "attempt": attempt, "error": lastErr,
+			})
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("failed to create/update stream %s: %w", name, ctx.Err())
+			case <-time.After(formRetryWait):
+			}
 		}
 	}
 
@@ -146,23 +241,22 @@ func (r *RouterWrapper) ConfigureJetStream(url string, domain string, durable bo
 	if rootCA != "" {
 		natsOpts = append(natsOpts, nats.RootCAs(rootCA))
 	}
+	natsOpts = append(natsOpts, setup.ClientOptions...)
 
 	subscribeOpts := []nats.SubOpt{}
-	if durable {
-		// [PROD] Durable Mode: Resumes from last acked message. Zero data loss.
-		// Note: We don't specify a global Durable name here because it would cause
-		// "subject does not match consumer" errors for multiple subscriptions.
-		// Watermill will handle consumer creation.
-		logger.Info("NATS Consumer Mode: DURABLE (DeliverLastPerSubject)", nil)
-		subscribeOpts = append(subscribeOpts,
-			nats.DeliverLastPerSubject(),
-		)
-	} else {
-		// [DEV] Ephemeral Mode: Only get the latest state per subject
-		logger.Info("NATS Consumer Mode: EPHEMERAL (DeliverLastPerSubject)", nil)
-		subscribeOpts = append(subscribeOpts,
-			nats.DeliverLastPerSubject(),
-		)
+	// DeliverLastPerSubject delivers only the latest message per subject and
+	// then stops. It is right for a single-process reader that wants current
+	// state, but it cannot back a SHARED durable queue group across a cluster:
+	// one durable name over several subjects on one stream is rejected with
+	// "subject does not match consumer", which the phase-6 testbed caught.
+	// So a queue-grouped subscriber uses a plain ack-based durable instead.
+	if setup.QueueGroup == "" {
+		if durable {
+			logger.Info("NATS Consumer Mode: DURABLE (DeliverLastPerSubject)", nil)
+		} else {
+			logger.Info("NATS Consumer Mode: EPHEMERAL (DeliverLastPerSubject)", nil)
+		}
+		subscribeOpts = append(subscribeOpts, nats.DeliverLastPerSubject())
 	}
 
 	jsConfig := watermillNats.JetStreamConfig{
@@ -188,16 +282,29 @@ func (r *RouterWrapper) ConfigureJetStream(url string, domain string, durable bo
 		return err
 	}
 
+	if setup.QueueGroup != "" {
+		// A shared durable queue group: one member handles each message, and
+		// the consumer survives a member leaving. The durable name must be
+		// UNIQUE PER TOPIC: one durable name over two subjects on one stream
+		// makes the second subscribe fail with "subject does not match
+		// consumer", which the phase-6 testbed caught. Derive it from the
+		// prefix plus the topic, sanitized to a valid NATS token. This must be
+		// set on jsConfig BEFORE it is copied into subCfg below.
+		jsConfig.DurablePrefix = setup.QueueGroup
+		jsConfig.DurableCalculator = queueDurableName
+	}
+
 	// Subscriber (Reads from NATS Consumer -> Watermill handlers)
-	sub, err := watermillNats.NewSubscriber(
-		watermillNats.SubscriberConfig{
-			URL:         url,
-			Unmarshaler: RawNATSMarshaler{}, // Passthrough for FluxMsg (CBOR)
-			JetStream:   jsConfig,
-			NatsOptions: natsOpts,
-		},
-		logger,
-	)
+	subCfg := watermillNats.SubscriberConfig{
+		URL:         url,
+		Unmarshaler: RawNATSMarshaler{}, // Passthrough for FluxMsg (CBOR)
+		JetStream:   jsConfig,
+		NatsOptions: natsOpts,
+	}
+	if setup.QueueGroup != "" {
+		subCfg.QueueGroupPrefix = setup.QueueGroup
+	}
+	sub, err := watermillNats.NewSubscriber(subCfg, logger)
 	if err != nil {
 		return err
 	}
@@ -213,6 +320,14 @@ func (r *RouterWrapper) ConfigureJetStream(url string, domain string, durable bo
 
 	r.Pub = pub
 	r.Sub = sub
+	if setup.QueueGroup != "" {
+		// The shared consumers are created here, not by nats.go, so no
+		// member's shutdown deletes them (see queueConsumerSubscriber).
+		r.Sub = &queueConsumerSubscriber{
+			Subscriber: sub, nc: ncPersistent, group: setup.QueueGroup, timeout: streamAttemptTimeout,
+			formTimeout: formTimeout, retryWait: formRetryWait, ackWait: setup.AckWait, replicas: replicas, logger: logger,
+		}
+	}
 	r.NC = ncPersistent
 	return nil
 }

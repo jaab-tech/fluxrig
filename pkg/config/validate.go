@@ -25,6 +25,8 @@ var durationSuffixes = []string{
 	"_age",
 	"_duration",
 	"_ttl",
+	"_renew",
+	"period",
 }
 
 // knownAliasPrefixes lists the exact dotted prefixes a file may set that are
