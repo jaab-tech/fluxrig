@@ -99,6 +99,8 @@ type IngestConfig struct {
 type EnrollmentConfig struct {
 	// PushDelay is the time to wait before pushing state to a newly enrolled Rack.
 	PushDelay string `koanf:"push_delay" example:"1s"`
+	// PushTimeout bounds the push of the active scenario that follows an enrollment.
+	PushTimeout string `koanf:"push_timeout" example:"10s"`
 	// AutoAdopt, if true, will automatically mark newly enrolled Racks as 'active'.
 	// If false (default), new Racks start as 'pending'.
 	AutoAdopt bool `koanf:"auto_adopt" example:"false"`
@@ -355,6 +357,7 @@ func LoadMixer(path string) (*MixerConfig, error) {
 	_ = k.Set("observability.embedded.rotation.check_interval", "1h")
 	_ = k.Set("observability.embedded.rotation.max_age_days", 30)
 	_ = k.Set("enrollment.push_delay", "1s")
+	_ = k.Set("enrollment.push_timeout", "10s")
 	_ = k.Set("enrollment.auto_adopt", false)
 	_ = k.Set("enrollment.bootstrap_secret", "fluxrig")
 

@@ -542,6 +542,9 @@ func (a *App) Run(ctx context.Context) error {
 	// 7. Controller Initialization
 	pushDelay, _ := time.ParseDuration(a.cfg.Enrollment.PushDelay)
 	enrollCtrl := controller.NewEnrollmentController(a.log, regAny, r.Pub, clusterKey, mixerState.MachineID, pushDelay)
+	pushTimeout, _ := time.ParseDuration(a.cfg.Enrollment.PushTimeout)
+	enrollCtrl.SetPushTimeout(pushTimeout)
+	enrollCtrl.SetPushContext(ctx)
 	enrollCtrl.RegisterRoutes(r)
 
 	// Scenario Controller

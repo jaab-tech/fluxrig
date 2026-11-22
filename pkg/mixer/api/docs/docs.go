@@ -1368,6 +1368,11 @@ const docTemplate = `{
                     "description": "PushDelay is the time to wait before pushing state to a newly enrolled Rack.",
                     "type": "string",
                     "example": "1s"
+                },
+                "pushTimeout": {
+                    "description": "PushTimeout bounds the push of the active scenario that follows an enrollment.",
+                    "type": "string",
+                    "example": "10s"
                 }
             }
         },

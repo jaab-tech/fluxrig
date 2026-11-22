@@ -77,56 +77,84 @@ func testEnrollment(t *testing.T, pushDelay time.Duration) (*EnrollmentControlle
 	return ctrl, gate
 }
 
-// A push must not fire after the request ends: the delay waits on the
-// request context, so shutting down (or any cancellation) during the delay
-// drops the push instead of running it on a Background context nothing can
-// cancel.
-func TestEnrollmentController_PushSkippedWhenTheRequestEnds(t *testing.T) {
-	ctrl, gate := testEnrollment(t, 100*time.Millisecond)
+// waitForPush polls until the gate saw n pushes or the deadline passes.
+func waitForPush(gate *scenarioGate, n int, within time.Duration) bool {
+	deadline := time.Now().Add(within)
+	for gate.count() < n && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	return gate.count() >= n
+}
 
-	msg := helloMsg(t, "test-rack", "nonce-1")
+// handleLikeTheSubscriber hands msg to HandleHello the way the NATS
+// subscriber does: the message context ends as soon as the handler returns.
+func handleLikeTheSubscriber(t *testing.T, ctrl *EnrollmentController, msg *message.Message) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	msg.SetContext(ctx)
-	cancel() // the request ends before the delay passes
-
 	_, err := ctrl.HandleHello(msg)
+	cancel()
 	if err != nil {
 		t.Fatalf("HandleHello failed: %v", err)
-	}
-	time.Sleep(500 * time.Millisecond)
-	if got := gate.count(); got != 0 {
-		t.Fatalf("the push fired after the request ended: %d calls", got)
 	}
 }
 
-// While the request lives the push still runs, on the request's context.
-func TestEnrollmentController_PushRunsOnTheRequestContext(t *testing.T) {
+// The push after an enrollment runs although the message context ended when
+// the handler returned. A Rack that restarts gets the active scenario from it.
+func TestEnrollmentController_PushOutlivesTheMessage(t *testing.T) {
 	ctrl, gate := testEnrollment(t, 20*time.Millisecond)
 
-	msg := helloMsg(t, "test-rack", "nonce-2")
-	reqCtx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	msg.SetContext(reqCtx)
+	handleLikeTheSubscriber(t, ctrl, helloMsg(t, "test-rack", "nonce-1"))
 
-	_, err := ctrl.HandleHello(msg)
-	if err != nil {
-		t.Fatalf("HandleHello failed: %v", err)
+	if !waitForPush(gate, 1, 5*time.Second) {
+		t.Fatal("the push did not run after the message context ended")
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for gate.count() == 0 && time.Now().Before(deadline) {
-		time.Sleep(20 * time.Millisecond)
-	}
-	if gate.count() != 1 {
-		t.Fatal("the push did not run while the request lived")
+}
+
+// The push is bounded by the push timeout, and runs within the lifetime of
+// the Mixer.
+func TestEnrollmentController_PushIsBounded(t *testing.T) {
+	ctrl, gate := testEnrollment(t, 0)
+	lifetime, stop := context.WithCancel(context.Background())
+	defer stop()
+	ctrl.SetPushContext(lifetime)
+	ctrl.SetPushTimeout(time.Minute)
+
+	handleLikeTheSubscriber(t, ctrl, helloMsg(t, "test-rack", "nonce-2"))
+
+	if !waitForPush(gate, 1, 5*time.Second) {
+		t.Fatal("the push did not run")
 	}
 	gate.mu.Lock()
-	defer gate.mu.Unlock()
-	if gate.ctxs[0] == context.Background() {
-		t.Fatal("the push ran on a detached context instead of the request's")
+	ctx := gate.ctxs[0]
+	gate.mu.Unlock()
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("the push has no deadline")
 	}
+	if left := time.Until(deadline); left > time.Minute || left < 50*time.Second {
+		t.Fatalf("the push deadline is %v away, want about the push timeout of 1m", left)
+	}
+	stop()
 	select {
-	case <-gate.ctxs[0].Done():
-		t.Fatal("the push context ended before the request did")
-	default:
+	case <-ctx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("stopping the Mixer did not cancel the push")
+	}
+}
+
+// A push that still waits for its delay when the Mixer stops is dropped.
+func TestEnrollmentController_PushSkippedWhenTheMixerStops(t *testing.T) {
+	delay := 100 * time.Millisecond
+	ctrl, gate := testEnrollment(t, delay)
+	lifetime, stop := context.WithCancel(context.Background())
+	ctrl.SetPushContext(lifetime)
+
+	handleLikeTheSubscriber(t, ctrl, helloMsg(t, "test-rack", "nonce-3"))
+	stop() // the Mixer stops before the delay passes
+
+	// Absence can only be observed over a window: five times the delay.
+	if waitForPush(gate, 1, 5*delay) {
+		t.Fatalf("the push fired after the Mixer stopped: %d calls", gate.count())
 	}
 }
