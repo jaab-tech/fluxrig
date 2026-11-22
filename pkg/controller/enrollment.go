@@ -38,6 +38,10 @@ type EnrollmentController struct {
 	pushDelay time.Duration
 	// registerTimeout bounds one registry call (register, get, heartbeat).
 	registerTimeout time.Duration
+	// pushCtx is the lifetime of the pushes that follow an enrollment. It
+	// ends when the Mixer stops. pushTimeout bounds one push.
+	pushCtx         context.Context
+	pushTimeout     time.Duration
 	processedHellos sync.Map // Deduplication cache: name|MachineID -> time.Time
 	// lastSweep is the unix-nano time of the last pass that removed expired
 	// dedup entries. The keys come from the Hello, so without the sweep a
@@ -57,6 +61,10 @@ const helloThrottle = 1 * time.Second
 // forever.
 const defaultRegisterTimeout = 10 * time.Second
 
+// defaultPushTimeout bounds the push of the active scenario that follows an
+// enrollment when the controller was built without one.
+const defaultPushTimeout = 10 * time.Second
+
 func NewEnrollmentController(log *slog.Logger, reg registry.Registry, pub message.Publisher, signer *pki.ClusterKey, mixerID uuid.UUID, pushDelay time.Duration) *EnrollmentController {
 	return &EnrollmentController{
 		reg:             reg,
@@ -65,6 +73,8 @@ func NewEnrollmentController(log *slog.Logger, reg registry.Registry, pub messag
 		mixerID:         mixerID,
 		pushDelay:       pushDelay,
 		registerTimeout: defaultRegisterTimeout,
+		pushCtx:         context.Background(),
+		pushTimeout:     defaultPushTimeout,
 		now:             time.Now,
 		logger:          log,
 	}
@@ -77,6 +87,25 @@ func (c *EnrollmentController) SetRegisterTimeout(d time.Duration) {
 		d = defaultRegisterTimeout
 	}
 	c.registerTimeout = d
+}
+
+// SetPushContext sets the lifetime of the pushes that follow an enrollment.
+// When ctx ends, a push that still waits for its delay is dropped and a push
+// in flight is cancelled. Pass the context that ends when the Mixer stops.
+func (c *EnrollmentController) SetPushContext(ctx context.Context) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	c.pushCtx = ctx
+}
+
+// SetPushTimeout bounds one push of the active scenario after an enrollment.
+// Zero or less restores the default.
+func (c *EnrollmentController) SetPushTimeout(d time.Duration) {
+	if d <= 0 {
+		d = defaultPushTimeout
+	}
+	c.pushTimeout = d
 }
 
 // throttled reports whether a Hello with this key arrived within
@@ -263,30 +292,26 @@ func (c *EnrollmentController) HandleHello(msg *message.Message) ([]*message.Mes
 		// An activation between now and the push reaches the Rack already
 		// (it is active from here on), so the push skips it then.
 		enrolledAt := time.Now()
-		reqCtx := msg.Context()
-		if reqCtx == nil {
-			reqCtx = context.Background()
-		}
+		// The push outlives the Hello. The subscriber cancels the message
+		// context as soon as this handler returns, so the push waits on
+		// the lifetime of the Mixer instead, and pushTimeout bounds it.
+		lifetime := c.pushCtx
 		go func() {
-			// Delay to ensure Rack has subscribed to its scenario topic,
-			// but not past the request: a push firing after shutdown
-			// used a Background context that nothing could cancel.
+			// Delay to ensure Rack has subscribed to its scenario topic.
 			if c.pushDelay > 0 {
 				timer := time.NewTimer(c.pushDelay)
 				defer timer.Stop()
 				select {
-				case <-reqCtx.Done():
+				case <-lifetime.Done():
 					return
 				case <-timer.C:
 				}
-			} else {
-				select {
-				case <-reqCtx.Done():
-					return
-				default:
-				}
+			} else if lifetime.Err() != nil {
+				return
 			}
-			if err := c.scenario.PushActiveToRackSince(reqCtx, rack.Name, enrolledAt); err != nil {
+			pushCtx, cancel := context.WithTimeout(lifetime, c.pushTimeout)
+			defer cancel()
+			if err := c.scenario.PushActiveToRackSince(pushCtx, rack.Name, enrolledAt); err != nil {
 				c.logger.Warn("Failed to push active scenario to new rack", "rack", rack.Name, "error", err)
 			}
 		}()

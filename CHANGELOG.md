@@ -18,7 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 | Version | Date | Status | Summary |
 | :--- | :--- | :--- | :--- |
-| [v0.15.0](#v0150) | 2026-11-21 | Delivered |  |
+| [v0.15.1](#v0151) | 2026-11-21 | Delivered | A Rack that enrolls again gets the active scenario from the Mixer, which v0.15.0 dropped, and `enrollment.push_timeout` bounds that push |
+| [v0.15.0](#v0150) | 2026-11-21 | Delivered | Several Mixers share one control plane on an operator-run NATS cluster, with a write lease, shared telemetry and per-Rack permissions. Faster failover detection, batched event and log shipping, and a hardened API and Wasm surface |
 | [v0.14.0](#v0140) | 2026-11-01 | Delivered | A server can greet a client that sent nothing, through durable connection events, a misspelt gear option is refused, a late reply can reach the new connection of its peer, and the Wasm gear refuses an unsigned catalog module and applies its memory limit |
 | [v0.13.1](#v0131) | 2026-10-25 | Delivered | Go 1.26.10 and x/net v0.60.0 close 23 reachable vulnerabilities, an approved Rack gets the active scenario, `fluxrig check` reports a bad configuration and answers in seconds, dead letter publishes and file wire sources are bounded, and a server reply carries the swapped TPDU |
 | [v0.13.0](#v0130) | 2026-10-20 | Delivered | ISO 20022 support: an ISO 8583 network bridges to the RTP rail, specs and lookup data upload to the Mixer, the registry lives on the bus, and a Rack parks messages while the bus is down |
@@ -30,6 +31,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 | [v0.7.1](#v071) | 2026-08-10 | Delivered | ISO 8583 TLV length hardening |
 | [v0.7.0](#v070) | 2026-08-01 | Delivered | Payment switch: Conductor gear, gear manifests, ISO 8583 TLS |
 
+
+## [v0.15.1] - 2026-11-21 {#v0151}
+
+### Added
+
+- **`enrollment.push_timeout`** (default `10s`) bounds the push of the active
+  scenario that follows an enrollment.
+
+### Fixed
+
+- **A Rack that enrolls again gets the active scenario from the Mixer.** In
+  v0.15.0 the push that follows a Hello was dropped every time, with nothing
+  in the log: a Rack that restarted ran the copy of the scenario it had saved,
+  and a Rack that was down when a scenario was activated did not get it when
+  it came back. An approval still pushed the scenario. The push now runs
+  until the Mixer stops, bounded by `enrollment.push_timeout`.
 
 ## [v0.15.0] - 2026-11-21 {#v0150}
 
@@ -54,345 +71,140 @@ and every Rack together.
 
 - **Mixer HA on an external NATS.** With `snake.external = true` (default
   `false`) the Mixer starts no embedded NATS and uses the NATS cluster at
-  `snake.url`, a comma-separated list, that the operator runs. Several Mixers
-  on one cluster give HA: every Mixer serves the API, and the Racks talk to
-  NATS directly. `snake.replicas` (default 1) is how many copies of each stream
-  and bucket the Mixer provisions. More than 1 needs `snake.external`, and the
-  Mixer warns below 3. `snake.external` needs `registry.lease_enabled`. The
-  default stays the embedded NATS with one Mixer, as in v0.14. Set
-  `snake.external = true` on the Racks too: a Rack then checks the host of the
-  URL in the server certificate, not `snake.domain`, and it leaves the
-  ephemeral consumer of an ended subscription to `snake.inactive_threshold`
-  (default `30s`) instead of deleting it. The operator keeps the NATS store,
-  its encryption at rest included, and `fluxrig-mixer --repair` refuses to run
-  against an external NATS.
-- **Client certificates and credentials for NATS.** A Mixer or a Rack presents
-  `snake.client_cert_file` and `snake.client_key_file` to a NATS server that
-  asks for a client certificate. Set both or neither. `snake.credentials_file`
-  is a NATS credentials file, with the user and the permissions the operator
-  gave that client. `snake.root_ca_file` verifies the server, as before.
-- **A Mixer checks the external NATS before it starts.** It needs NATS 2.15.0
-  or later, JetStream for its account and, when `snake.replicas` is more than
-  1, a cluster. Each of these fails the start at once, with the reason. A NATS
-  that does not answer yet, a stream that cannot be placed yet and a bucket
-  that cannot be created yet are tried again for `snake.form_timeout` (default
-  `2m`), so the Mixers can start while the cluster forms.
+  `snake.url` that the operator runs. Several Mixers on one cluster give HA.
+  Every Mixer serves the API, and the Racks talk to NATS directly.
+  `snake.replicas` (default 1) sets the copies of each stream and bucket. More
+  than 1 needs `snake.external`, and the Mixer warns below 3. At startup the
+  Mixer needs NATS 2.15.0 or later with JetStream, and a cluster when replicas
+  exceed 1. A NATS, stream or bucket that is not ready yet is tried again for
+  `snake.form_timeout` (default `2m`). The default stays one Mixer on the
+  embedded NATS, as in v0.14. The operator keeps the NATS store and its
+  encryption at rest.
 - **The write lease.** With `registry.lease_enabled` (default `false`) one
-  Mixer holds a lease and does every control write: enrollment, approval,
-  removal, status, scenario import and activation, spec import. A Mixer that
-  does not hold it forwards each control write to the holder over NATS, and
-  waits for the answer up to `mixer.forward_timeout` (default `5s`). Reads are
-  served by every Mixer from the registry they share. When no Mixer holds the
-  lease, for example during an election, a control write answers 503 and can
-  be tried again. The lease lives in `registry.lease_bucket` (default
-  `fluxrig_lease`), expires after `registry.lease_ttl` (default `30s`) without
-  a renew, and the holder renews it every `registry.lease_renew` (default
-  `10s`), which must be at most half of the TTL. The registry, liveness, lease
-  and spec buckets take `registry.replicas` (default 1), not `snake.replicas`.
-  Every Mixer must hold the same cluster key (`store.cluster_key_file`): with
-  the lease on, a Mixer whose key differs from the one the cluster recorded
-  refuses to start.
-- **`/health` names the lease holder.** With the lease on, the answer has a
-  `lease` object: `held` for this Mixer, `holder` with the machine ID of the
-  holder, `holder_since`, `renewed`, and `error` when the lease could not be
-  read. The read is bounded by `mixer.forward_timeout`.
-- **Lease metrics.** With the lease on, the Mixer exports
-  `flux.mixer.lease.held` (1 on the holder, else 0) and
-  `flux.mixer.lease.transitions`, by event (`acquired`, `lost`, `released`),
-  through the telemetry stream, the way a Rack exports its metrics, unless
-  `telemetry.disabled` is set.
-- **A Mixer that does not hold the lease follows the active scenario.** It
-  reads the active-scenario pointer every `mixer.follow_interval` (default
-  `5s`) and reloads the scenario when it changed, so every Mixer reports the
-  same one.
-- **One Mixer handles each Hello and heartbeat.** With the lease on, the
-  subscriptions of the Mixers to the Hello and heartbeat subjects form a
-  durable queue group named `mixer.queue_group` (default `fluxrig-mixers`).
-  Each consumer is named after the group and the subject, and stays when a
-  Mixer stops. An empty value makes every Mixer handle every message. Without
-  the lease the setting has no effect.
-- **The spec store on the bus.** With the lease on, the Mixers share one spec
-  store in `registry.spec_bucket` (default `fluxrig_specs`). A spec uploaded
-  through any Mixer goes to the holder and is pushed by every Mixer. A spec
-  larger than `registry.spec_max_size` (default 1048576 bytes) answers 413.
-  The value must not exceed the max payload of the NATS server. The first
-  Mixer of the cluster to hold the lease copies its local spec store into the
-  bucket, once. A version that the bucket holds with other bytes, or that is
-  too large, is skipped and logged. After that the local store of a Mixer is
-  not used.
+  Mixer holds a lease and does every control write. The others forward each
+  control write to the holder and wait up to `mixer.forward_timeout` (default
+  `5s`). Reads run on every Mixer. With no holder, a control write answers 503
+  and can be tried again. The lease expires after `registry.lease_ttl`
+  (default `30s`) without a renew, and the holder renews every
+  `registry.lease_renew` (default `10s`), at most half of the TTL. Every Mixer
+  must share the cluster key. A Mixer that does not hold the lease still
+  follows the active scenario, polling it every `mixer.follow_interval`
+  (default `5s`), and shares one queue group for Hello and heartbeats so each
+  message is handled once.
+- **Lease visibility.** With the lease on, `/health` names the holder
+  (`holder`, `holder_since`, `renewed`, `held`) and the Mixer exports
+  `flux.mixer.lease.held` and `flux.mixer.lease.transitions`.
+- **One spec store and one Wasm catalog for every Mixer.** Specs live in
+  `registry.spec_bucket`, keyrings in `wasm_keys`: a spec or key trusted
+  through one Mixer counts on every Mixer. The keyring is in the API
+  (`GET /api/v1/wasm/keys`, trust and revoke by vendor) and in the CLI
+  (`fluxrig wasm keys list`, `trust`, `revoke`).
 - **Telemetry storage for several Mixers.** `observability.storage.type`
-  (default `local`) is where the Mixer keeps the telemetry of the Racks.
-  `local` keeps it on the disk of each Mixer, as before: with several Mixers
-  each one has its own copy, which misses what arrived while it was down, and
-  the Mixer warns about it. `s3`, `nats` and `otlp` need
-  `registry.lease_enabled`: the holder is the only Mixer that reads the
-  telemetry stream, and it confirms each batch only once the store has it, so
-  a new holder goes on from the last confirmed batch. The holder commits a
-  batch every `observability.storage.batch_interval` (default `15s`), and one
-  commit is bounded by `observability.storage.commit_timeout` (default `30s`).
-  A batch that fails is tried again. Every Mixer keeps the live metrics of
-  each Rack.
-  - `s3` writes Parquet files to `observability.storage.s3.bucket` at
-    `observability.storage.s3.endpoint` (host and port, no scheme), under
-    `observability.storage.s3.prefix` (default `telemetry`), in
-    `observability.storage.s3.region`. The Mixer creates the bucket when it
-    does not exist. `observability.storage.s3.access_key_file` and
-    `observability.storage.s3.secret_key_file` hold the credentials; without
-    them the Mixer reads `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`.
-    `observability.storage.s3.ca_file` verifies the service, and
-    `observability.storage.s3.plaintext` (default `false`) uses HTTP, for
-    development.
-  - `nats` writes the same files to the object store
-    `observability.storage.nats.bucket` (default `fluxrig_telemetry`), with an
-    index in `<bucket>_index`, both with `snake.replicas` copies.
-  - With `s3` and `nats`, a batch that is committed again replaces its own
-    files, so no record is kept twice. Every Mixer answers telemetry queries:
-    it fetches the files a query needs into `store.dir/telemetry`, under the
-    same retention as local files, and sees the telemetry up to the last
-    batch. The holder removes the shared files that are older than the
-    retention.
-  - `otlp` sends each batch as OTLP over HTTP, with JSON bodies, to the
-    collector at `observability.storage.otlp.endpoint`, which gets the paths
-    `/v1/logs`, `/v1/metrics` and `/v1/traces`.
-    `observability.storage.otlp.ca_file` verifies the collector, and
-    `observability.storage.otlp.headers_file` holds extra request headers,
-    one `Name: value` per line. The Mixers keep no telemetry, so the telemetry
-    queries of the API answer 501. A holder that stops after the collector
-    took a batch and before the stream had the confirmation leaves that batch
-    to the next holder, which sends it again: with OTLP that one batch can
-    arrive twice.
-- **A Rack moves to another NATS server when its server has no stream.**
-  After `snake.failover_after` (default 2) JetStream publishes in a row that
-  find no stream, or JetStream requests in a row that a server answers with no
-  JetStream, the Rack reconnects to another server of `snake.url`. A server
-  cut off from its cluster keeps the connection open while every publish
-  through it fails. 0 turns it off.
-- **The consumer of a Rack subscription is replaced when it is lost.** A
-  guaranteed-lane wire and a scenario push read through a consumer that lives
-  on one server. When the consumer is gone, or misses
-  `snake.consumer_missed_heartbeats` (default 2) heartbeats in a row, the Rack
-  creates a new one and resumes at the first message it had not settled. A
-  message can arrive twice across the change. A heartbeat is due every
-  `snake.operation_timeout` (default `5s`). `snake.consumer_replicas` (default
-  0) is the replica count of each consumer: 0 takes the replica count of the
-  stream, read again at each creation. A creation that cannot read it fails
-  and is tried again, so a consumer is never created with one replica by
-  accident. 1 keeps one replica, lighter on NATS.
-- **Each Rack has its own reply inbox, `_INBOX_<rack>`.** A NATS user for a
-  Rack can then be limited to `_INBOX_<rack>.>` and read only its own replies.
-  The Mixer keeps `_INBOX`.
-- **A Rack waits for streams that no Mixer has provisioned yet.** On an
-  external NATS a Rack can start before any Mixer. When its enrollment
-  subscription finds no stream, or JetStream cannot answer yet, the Rack
-  starts its session again instead of exiting.
-- **`fluxrig scenario permissions`** writes one NATS user for each Rack of one
-  or more scenario files, limited to the subjects that Rack uses: its own
-  messages, events and notifications, the wires it consumes, the events its
-  gears read and the buckets they use. Paste the users into the authorization
-  block of the external NATS. With several scenarios, each Rack gets what all
-  of them need. `--rack` names the Racks (default: the Racks the gears are
-  deployed to; a gear with no Rack needs `--rack`), `--user` is the NATS user
-  of a Rack with `{rack}` for its name (default `{rack}`), and `--config` reads
-  the subject names from a Rack configuration (default: the Rack defaults).
-  Generate the users again when a scenario changes.
-- **Gear manifests declare what a gear does on the bus besides its wires.**
-  `BusNeeds` in `sdk.Manifest` lists the connection events a gear reads and
-  the key-value buckets it reads, writes or creates.
-  `fluxrig scenario permissions` uses it. `bento` declares the events of
-  `ports.events`, `coatcheck` its `bucket` (created and watched in `daemon`
-  mode), and `wasm` the bucket of a `snake://` source.
-- **One Wasm catalog and one keyring for every Mixer.** The signed modules are
-  in the bucket `wasm_catalog` and the trusted vendor keys in `wasm_keys`, both
-  with `snake.replicas` copies, so every Mixer lists the same modules and
-  trusts the same vendors. At startup a Mixer adds each key of
-  `wasm.trusted_keys_dir` that the keyring does not hold. A key that the
-  keyring holds with other bytes, or as revoked, is not changed, and the file
-  is reported with a Warn. A vendor trusted or revoked through one Mixer
-  counts on every Mixer at its next import.
-- **The Wasm keyring in the API and the CLI.** `GET /api/v1/wasm/keys` lists
-  the vendors with the SHA-256 fingerprint of each key, revoked ones included.
-  `PUT /api/v1/wasm/keys/{vendor}` trusts an Ed25519 public key of 32 bytes,
-  or replaces it. `DELETE /api/v1/wasm/keys/{vendor}` revokes the vendor,
-  which stays in the keyring as revoked, so a key file that a Mixer still
-  holds does not add it back. `fluxrig wasm keys list`,
-  `fluxrig wasm keys trust <vendor> <key-file>` and
-  `fluxrig wasm keys revoke <vendor>` call them. `trust` takes the 32-byte
-  public key in a file named `<name>.pub`, or the key file that
-  `fluxrig wasm sign` uses. It refuses a 32-byte file with another name,
-  which can be a private seed. Revoking a vendor stops the imports of its
-  modules: a module already in the catalog keeps its cluster signature, and
-  the Racks still run it.
+  (default `local`) can be `s3`, `nats` or `otlp`, all needing the lease. Only
+  the holder reads the telemetry stream and confirms each batch once the store
+  has it, so a new holder continues from the last confirmed batch. The holder
+  commits a batch every `observability.storage.batch_interval` (default `15s`).
+  With `otlp` the Mixers keep no telemetry (queries answer 501) and one batch
+  can arrive twice.
+- **A Rack survives its server.** After `snake.failover_after` (default 2)
+  publishes that find no stream, the Rack reconnects to another server of
+  `snake.url`. A lost subscription consumer is replaced and resumes at the
+  first unsettled message, with at most one duplicate. Each Rack has its own
+  reply inbox, `_INBOX_<rack>`, and a Rack that starts before any Mixer waits
+  for streams instead of exiting.
+- **`fluxrig scenario permissions` writes one NATS user per Rack**, limited to
+  the subjects that Rack uses. Gear manifests declare the rest in
+  `sdk.Manifest.BusNeeds` (events read, buckets used), which the command
+  reads. Generate the users again when a scenario changes.
+- **Client certificates and credentials for NATS.** A Mixer or a Rack presents
+  `snake.client_cert_file` with `snake.client_key_file`, or a
+  `snake.credentials_file`. Set both certificate files or neither.
 
 ### Changed
 
 - **A client of NATS notices a silent server in about 15 to 20 seconds.**
   `snake.ping_interval` (default `5s`) and `snake.max_pings_out` (default 3)
-  set the pings of every connection of a Mixer and of a Rack. Before, the
-  NATS client defaults (a ping every 2 minutes, 2 unanswered) kept a client on
-  a server that crashed or was cut off for minutes, while every request timed
-  out. Both values must be positive.
+  set the pings of every connection. Before, the client defaults (a ping every
+  2 minutes, 2 unanswered) kept a client on a crashed or cut server for
+  minutes. Both values must be positive.
 - **A message of the guaranteed lane that a consumer sent through a NATS
   server that died arrives again after 10 seconds, not 30.**
   `snake.ack_wait` (default `10s`) is how long a guaranteed-lane or durable
   consumer waits for an acknowledgement before it delivers the message again.
   Before, it was the JetStream default, 30 seconds. It must be longer than
-  `snake.operation_timeout`, which bounds the processing of one message: a
-  shorter value would deliver every slow message twice, and the Mixer and the
-  Rack refuse it.
+  `snake.operation_timeout`: a shorter value would deliver every slow message
+  twice, and the Mixer and the Rack refuse it.
 - **A connection event that a reader's consumer sent through a NATS server
   that died arrives again after `snake.ack_wait`, not after `max_event_age`.**
   Before, the event came back as old as `max_event_age` and the reader dropped
-  it: a client that connected then got no logon. `max_event_age` of each
-  entry of `ports.events` must now be longer than `snake.ack_wait` (`10s` by
-  default), or the gear does not start. A reader whose consumer loses its
-  leader with a server that dies notices it within about `snake.ack_wait`
-  and pulls again; before, it took about 30 seconds.
-- **A Rack sends the connection events of a gear in batches.** What waits in
-  a gear's event queue leaves in one batch, in order, and the events parked
-  while the bus was down leave the same way. Before, each event waited for
-  the stream to store it before the next one left: across a link with a round
-  trip of about 220 ms to the stream leader, a Rack sent about two events a
-  second, and a gear whose connections came faster fell behind until its
-  events were older than `max_event_age`. `sdk.EventBatchPublisher` is the
-  capability a native gear can use for the same.
-- **A Rack ships its log in batches.** The log shipper sends consecutive
-  lines in one batch, in order, and moves its cursor past what the stream
-  took. Before, it sent one line and waited for the stream before the next:
-  across a link with a round trip of about 220 ms to the stream leader, a
-  busy Rack's log reached the Mixers later and later.
+  it, so a connecting client got no logon. `max_event_age` of each entry of
+  `ports.events` must now be longer than `snake.ack_wait` (`10s` by default),
+  or the gear does not start.
+- **A Rack sends the connection events and ships its log in batches.** What
+  waits in a gear's event queue leaves in one batch, in order, and the log
+  shipper sends consecutive lines in one batch too. Before, each item waited
+  for the stream before the next one: across a link with a round trip of about
+  220 ms to the stream leader, a busy Rack fell behind. `sdk.EventBatchPublisher`
+  is the capability a native gear can use for the same.
 - **A Wasm import that the bus does not take answers 503**, and nothing is
   imported. Before, the import succeeded with a Warn and the module stayed on
-  the disk of the Mixer, where no Rack could fetch it. The catalog,
-  `GET /api/v1/wasm/catalog`, lists the modules on the bus, and answers 503
-  when the bus cannot answer.
-- **The status of a module in `GET /api/v1/wasm/catalog` names its vendor**,
-  as the import does: `Trusted: <vendor>` when the vendor signature matches a
-  trusted key, else `Untrusted`. Before, a module with any vendor signature
-  was listed as `Trusted`.
+  the Mixer's disk, where no Rack could fetch it. The catalog
+  `GET /api/v1/wasm/catalog` answers 503 when the bus cannot answer, and the
+  status of a module names its vendor (`Trusted: <vendor>`, else `Untrusted`).
 - **An API request that failed because the cluster could not answer yet
   answers 503**, not 500 or 400: no Mixer holds the write lease, or JetStream
   elects a leader or has no stream that answers. The request can be tried
   again.
 - **A Rack keeps its gears when the Mixer sends again the scenario they run.**
-  A push is delivered at least once, a replaced consumer delivers it again,
-  and a Rack that reconnects gets it again. Before, each copy restarted every
-  gear. An activation still restarts the gears, once per activation, also on
-  a Rack that already runs the scenario: that is how an operator restarts a
-  gear that stopped.
-- **A Rack with no identity keeps sending Hello after its enrollment
-  timeout.** When `rack.enrollment_timeout` (default `15s`) ends with no
-  passport, the Rack sends Hello every `rack.heartbeat_interval` (default
-  `30s`) until a passport arrives, in the same session.
-- **The embedded NATS server writes to the Mixer log.** Its notices, warnings
-  and errors, a refused TLS handshake for example, are logged with
-  `flux.component` `snake.nats`. Before, the embedded server logged nothing.
-- **A Rack no longer purges its messages from the stream when its scenario
-  changes.** The purge never ran: the Rack held the bus through a wrapper that
-  had no purge. A new consumer starts at new messages, so the messages of the
-  previous scenario do not reach the new one.
+  Before, each copy restarted every gear. An activation still restarts the
+  gears, once per activation. A Rack with no identity keeps sending Hello
+  after `rack.enrollment_timeout` (default `15s`) until a passport arrives.
+  The embedded NATS server now logs to the Mixer log, and a Rack no longer
+  purges its messages from the stream when its scenario changes.
 
 ### Fixed
 
-- **A graceful stop of `io_iso8583` no longer logs `accept error`.** `Drain`
-  closes the listener on purpose, and the accept loop logged an error for each
-  retry until `Stop`.
-- **`Stop` of an `io_iso8583` client is safe to call twice.** The second call
-  panicked.
-- **Telemetry times are kept in UTC on a Mixer whose host is not in UTC.** The
-  store converted each time to the zone of the host, so every stored time was
-  off by the offset of the host, and a query for the last minutes found
-  nothing. The fix applies to telemetry stored from now on.
-- **A NATS permission that the server refuses is logged at ERROR**, with the
-  connection name. The publish or subscribe that caused it returns no error,
-  and a request only times out, so before this the refusal was not in the log.
-- **A Rack uses `telemetry.stream_name` for its telemetry connection.** It
-  used `flux-telemetry` whatever the setting.
+- **A graceful stop of `io_iso8583` logs no `accept error`, and `Stop` is safe
+  to call twice.** The accept loop logged an error for each retry until
+  `Stop`, and the second `Stop` panicked.
+- **Telemetry keeps UTC on a Mixer whose host is not in UTC**, uses
+  `telemetry.stream_name` for its connection (it used `flux-telemetry`),
+  and keeps `logging.level` on stdout after enrollment. A refused NATS
+  permission is now logged at ERROR with the connection name.
 - **A Rack starts a scenario when a sync probe takes longer than 500 ms.**
-  Before its gears start, a Rack sends a probe on each subject it consumes
-  every 500 ms, and waits until its own consumer gets one. When a probe took
-  longer than that, as across a slow link, the Rack never saw that it had
-  arrived, failed the scenario at `rack.convergence_timeout`, and after five
-  attempts left it in the dead letter queue.
-- **A Rack keeps `logging.level` on stdout after it enrolls.** The log on
-  stdout was set to `info` at enrollment, whatever `logging.level`,
-  `logging.debug` or `logging.trace` said. The log file kept the level.
-- **A subscription that is still retrying its first consumer stops when the
-  bus closes.** Before, it waited through its remaining attempts.
-- **A live consumer that is replacing its consumer stops when the bus
-  closes.** The retry loop waited on its own timer and on the consumer, not on
-  the bus, so a close during a replacement retried forever and left a
-  goroutine behind.
-- **A durable subscription is created with a bounded wait and the replica
-  count of its stream.** The create used the process context with no deadline
-  and one replica, whatever `snake.replicas` said.
-- **The consumer that shares Hello and heartbeat across the Mixers takes
-  `snake.replicas` copies.** It was a single replica, so the loss of one NATS
-  server stopped the delivery of both until a new consumer was placed.
-- **One dead NATS server replaces a live consumer once, not twice.** The
-  watcher and the error handler signalled different channels, and the
-  supervisor handled them one after the other.
-- **A guaranteed-lane batch awaits each acknowledgement with its own
-  budget.** One timer of `snake.operation_timeout` covered a batch of up to
-  256 messages, so a slow link turned a healthy batch into a partial send and
-  a full resend.
-- **A publish that a caller cancels is no longer counted as a missing
-  stream.** A caller that goes away says nothing about the server. Every
-  timeout counts, including one where the caller's own deadline expired: when
-  a server is black-holed the socket keeps accepting writes and the client's
-  own ping queues behind them, so the publish timeout is the only signal that
-  arrives.
-- **The failover probe gives up when its own timeout ends, even if the
-  request is stuck.** A request to a black-holed server can sit in a blocked
-  socket write, which the NATS client bounds by its flusher timeout of one
-  minute. In the latam testbed one probe iteration took 70 s, and a Rack cut
-  off from its server moved past the 60 s that gate 1 allows.
-- **A write that cannot be flushed is bounded by `snake.operation_timeout`.**
-  The client default is one minute, so a force-reconnect to a black-holed
-  server waited in the socket write for it. A Rack cut off from its server
-  moved 73 s after the cut in the latam testbed, and gate 1 allows 60.
-- **A dead letter that cannot be written leaves the message for redelivery.**
-  A failed write to the dead letter stream terminated the message anyway, and
-  the only trace was a log line. The bus now counts these failures
-  (`DLQFailures`).
-- **Opening an events reader no longer blocks its own `Close`.** The lock was
-  held during the consumer create with the caller's context, and `Close` waits
-  on the same lock. The create is bounded by `OpenTimeout` (default `30s`) and
-  the reader installs it only if it is still open.
-- **A push to a Rack after enrollment stops when the Mixer shuts down.** The
-  goroutine slept `enrollment.push_delay` and then published with
-  `context.Background()`.
-- **A scenario activation no longer holds the controller lock while it
-  publishes to every Rack.** A reader or an enrollment push waited for the
-  whole fan-out. The delivered registry now also drops old entries.
-- **A lease read, renew or holder lookup is bounded, and the forward plane
-  honours the deadline of its caller.** Before, a stalled bucket held the
-  caller for its own timeout, and a forwarder that had already given up could
-  still apply its write.
-- **A telemetry batch that is taken over is committed once.** The commit path
-  now re-checks the lease between the commit and the acknowledgement, and the
-  contract on `Committer` states that a repeated commit replaces its own files.
-- **A live emission can no longer overtake the parked suffix.** A batch in
-  flight now makes a concurrent emission park, instead of publishing ahead of
-  the items the outbox still holds.
-- **The outbox drain is linear in the size of the queue.** It scanned the held
-  subjects for every candidate on each pass.
-- **`fluxrig-mixer --repair` works on a store with TLS configured.** It dialled
-  the TCP URL of the embedded server, which is `tls://` once a certificate is
-  set, and the handshake failed. The repair now uses the in-process
-  connection.
-- **`/api/v1/control/sim` refuses a gear name that is not one subject token.**
-  The name was interpolated into `flux.ctrl.<gear>`.
-- **`/health` reports `"unavailable"` when it cannot read the lease.** The raw
-  JetStream error is no longer returned by the unauthenticated endpoint.
-- **`/api/v1/config` removes credentials from `snake.url`.** The endpoint
-  serves the configuration, and userinfo in the URL reached every caller.
-- **A testbed failover run is wired into the nightly.** `make
-  test-ha-failover` runs it, and the `ha` job of the nightly calls it.
-
+  Before, the Rack never saw that its probe had arrived, failed the scenario
+  at `rack.convergence_timeout`, and after five attempts left it in the dead
+  letter queue.
+- **Subscriptions and replaced consumers stop with the bus.** A durable
+  subscription is created with a bounded wait and the replica count of its
+  stream, and the consumer that shares Hello and heartbeat across the Mixers
+  takes `snake.replicas` copies. One dead NATS server replaces a live consumer
+  once, not twice, and a guaranteed-lane batch awaits each acknowledgement
+  with its own budget instead of one timer for the whole batch.
+- **Failover counts what the server did.** A publish a caller cancels is no
+  longer counted as a missing stream, while every timeout counts, including
+  one where the caller's own deadline expired. The failover probe gives up
+  when its own timeout ends even if the request is stuck, and a write that
+  cannot be flushed is bounded by `snake.operation_timeout` instead of the
+  client's one-minute default.
+- **A poison message is routed to the dead letter queue once**, a write to
+  that stream that fails leaves the message for redelivery (counted as
+  `DLQFailures`), and opening an events reader no longer blocks its own
+  `Close`.
+- **Shutdown paths stop cleanly.** A push to a Rack after enrollment stops
+  when the Mixer shuts down, a scenario activation no longer holds the
+  controller lock while it publishes to every Rack, a stalled lease read,
+  renew or holder lookup is bounded, a telemetry batch taken over is committed
+  once, a live emission cannot overtake the parked suffix, and the outbox
+  drain is linear in the queue size. `fluxrig-mixer --repair` works with a
+  store with TLS configured, `/api/v1/control/sim` refuses a gear name that
+  is not one subject token, `/health` reports `"unavailable"` when it cannot
+  read the lease, `/api/v1/config` removes credentials from `snake.url`, and a
+  testbed failover run is wired into the nightly.
 ### Security
 
 - **ISO 8583 closed-set violations no longer log or return the value.** The
-  rejection reason said `carries %q value`; it now says `carries (value
+  rejection reason said `carries %q value`. It now says `carries (value
   withheld)`. The value reached the Warn log, the rejection error and the
   `error.message` metadata of the error port. ISO 20022 already masked it.
 - **The Mixer warns at startup about telemetry and key exposure.** It warns
@@ -400,7 +212,7 @@ and every Rack together.
   external NATS URL is not TLS, and when a credential or key file is
   world-readable.
 - **S3 telemetry objects request SSE-S3.** The Mixer sets
-  `x-amz-server-side-encryption: AES256` on each upload; before, the bucket
+  `x-amz-server-side-encryption: AES256` on each upload. Before, the bucket
   policy was the only encryption.
 
 ## [v0.14.0] - 2026-11-01 {#v0140}
@@ -415,703 +227,91 @@ and every Rack together.
 - **A Wasm module from `snake://` with no valid cluster signature does not run.**
 - **`snake.stream_subjects` must not include `flux.evt.>`.**
 
-### Added
-
-- **Durable connection events.** `io_iso8583` publishes `opened` and `closed`,
-  in server mode and in client mode, on `flux.evt.conn.<rack>.<gear>`. A
-  `closed` event has a `reason`: `peer_closed`, `idle_timeout`, `read_error`,
-  `invalid_frame`, `closed_by_command` or `stopped`. A `bento` gear reads them
-  through `ports.events`, and each event gives one message with the `conn.id`
-  of the connection, so a server can send a logon to a client that sent nothing
-  (`examples/scenarios/iso8583_server_logon.yaml`). Several gears can read the
-  same events. A reader that was down gets what it missed, inside
-  `max_event_age` (default `30s`), and an event that fails is delivered again,
-  up to `max_deliver` (default 5). A socket never waits for the bus: the events
-  of a gear go through a bounded queue (`event_queue_size`, default 1024). When
-  the bus does not answer, an event waits in the Rack outbox, and a full outbox
-  drops it with a Warn. The events need a Mixer: the stream is there, also for
-  two gears on one Rack. `publish_events` (default `true`) turns them off. The
-  Mixer provisions the stream `flux-events`, with `snake.events_max_age`
-  (default `1h`) and `snake.events_max_bytes` (default 256 MiB). **A
-  `snake.stream_subjects` that includes `flux.evt.>` collides with this stream.**
-  Native gears read the events with `pkg/events`.
-- **`io_iso8583` `on_missing_connection`** (server mode, default `drop`) sets
-  what the server does with a reply whose connection no longer exists, for
-  example because the peer dropped the link and reconnected before the reply was
-  ready. `drop` refuses the reply, as before. `same_remote_ip` sends it on the
-  newest active connection from the remote IP of the request. `same_listener`
-  sends it on the newest active connection of the server. A reply for a live
-  connection is never redirected. Behind a NAT or a concentrator that shares one
-  IP between several terminals, `same_remote_ip` can send a reply to another
-  terminal of that IP. Client mode needs no such option: a client writes every
-  message on its current connection.
-- **`io_iso8583` `stop_timeout`** (default `5s`) bounds how long the gear waits,
-  when it stops, for its connection handlers to finish and for their events to
-  leave. `0s` does not wait.
-- **The conductor logs why a message leaves on the error port.** `no_key`,
-  `no_route` and `no_destination` write a Warn. `timeout` and `unmatched_reply`
-  write a Debug, because they grow with the traffic. The line has the reason,
-  the flux id, the connection and, where known, the route, the destination or the
-  missing field. It never has the value of the correlation key.
-
 ### Changed
 
-- **A gear configuration with a key that the gear does not declare is
-  refused.** Before, a misspelt option was ignored and the default stayed in
-  force. This applies at the top level and in every nested object that the
-  schema describes with properties. The Mixer refuses the scenario when it is
-  imported, a dry run included, with a 400 that names the gear and the key. A
-  Rack refuses it when it applies the scenario. The key `labels` stays allowed
-  at the top level. A gear whose configuration is free-form sets
-  `additionalProperties: true` in its schema. **A scenario that used an
-  undeclared key now fails to import. Remove the key.** Known case: `name` in
-  the configuration of `codec_iso8583`, which nothing reads. The schemas of the
-  conductor and of `io_tcp` now declare `valet.max_in_flight` and `tags`, which
-  they read or accepted without listing them.
-- **The Wasm gear applies `memory_limit_pages`, and its default is now 256 pages
-  (16 MiB).** Before, the option had no effect and a module could grow to 4 GiB.
-  The old default of 16 pages was below what a module with a 1 MiB stack
-  declares, so it never could apply. **A module that declares more memory than
-  the limit no longer loads. A scenario that sets `memory_limit_pages: 16` now
-  fails with such a module. Raise the value or remove the key.**
+- **BREAKING: the reference ISO 8583 spec packs a standard bitmap.** It packed one 128-bit bitmap on every message and never set bit 1, so a peer that follows ISO 8583 read the second half as data. The spec now declares an 8-byte primary bitmap, and a secondary bitmap only when a field above 64 is present, announced by bit 1. The spec's version is now `3.0.0`: a Mixer that already holds `v2.2.0` keeps serving the old layout under that name. Upload the spec and change each `v2.2.0` reference to `v3.0.0`. Reported by [Galih Lasahido](https://github.com/galihlasahido).
+- **BREAKING: the Mixer refuses to start without its API.** With no `api.auth_token`, or an API port that is in use, it used to report ready with no management API. It now exits with code 1 before it reports ready, and an API that stops later stops the Mixer. Set `api.auth_token`, or `api.auth_disabled_dangerously = true` for a test.
+- **A gear configuration with a key that the gear does not declare is refused.** Before, a misspelt option was ignored and the default stayed in force. This applies at the top level and in every nested object the schema describes with properties. The Mixer refuses the scenario on import, a dry run included, with a 400 naming the gear and the key. A Rack refuses it when it applies the scenario. The key `labels` stays allowed at the top level. Free-form gears declare `additionalProperties: true`. **A scenario using an undeclared key now fails to import. Remove the key.** Known case: `name` in `codec_iso8583`, which nothing reads. The conductor and `io_tcp` schemas now declare `valet.max_in_flight` and `tags`.
+- **The Wasm gear applies `memory_limit_pages`, default now 256 pages (16 MiB).** Before, the option had no effect and a module could grow to 4 GiB. The old 16-page default sat below what a module with a 1 MiB stack declares. **An over-limit module no longer loads. A scenario pinning `memory_limit_pages: 16` fails with such a module. Raise the value or remove the key.**
+
+### Added
+
+- **Durable connection events.** `io_iso8583` publishes `opened` and `closed`, in server mode and in client mode, on `flux.evt.conn.<rack>.<gear>`. A `closed` event carries a `reason`: `peer_closed`, `idle_timeout`, `read_error`, `invalid_frame`, `closed_by_command`. A `bento` gear reads them through `ports.events`. Each event arrives as one message with the `conn.id`, so a server can send a logon to a silent client. Several gears can read the same events. A reader that was down receives what it missed inside `max_event_age` (default `30s`). A failing event is redelivered up to `max_deliver` (default 5). A socket never waits for the bus. Each gear's events pass through a bounded queue (`event_queue_size`, default 1024). When the bus is down, an event waits in the Rack outbox. A full outbox drops it with a Warn. The events need a Mixer, also for two gears on one Rack. `publish_events` (default `true`) turns them off. The Mixer provisions the `flux-events` stream, with `snake.events_max_age` (default `1h`) and `snake.events_max_bytes` (default 256 MiB). **A `snake.stream_subjects` that includes `flux.evt.>` collides with this stream.** Native gears read the events with `pkg/events`.
+- **`io_iso8583` reply handling and conductor observability.** `on_missing_connection` (server mode, default `drop`) sets what the server does with a reply whose connection is gone. `drop` refuses the reply, as before. `same_remote_ip` sends it on the newest active connection from the request's remote IP. `same_listener` sends it on the newest active connection of the server. A reply for a live connection is never redirected. Behind a NAT or concentrator sharing one IP, `same_remote_ip` can reach another terminal of that IP. Client mode needs no such option. `stop_timeout` (default `5s`) bounds shutdown waits for connection handlers and their events. `0s` does not wait. The conductor logs why a message leaves on the error port. `no_key`, `no_route` and `no_destination` write a Warn. `timeout` and `unmatched_reply` write a Debug. Each line has the reason, the flux id and the connection. It adds the route, destination or missing field where known. It never carries the correlation key value.
 
 ### Fixed
 
-- **A Rack refuses a Wasm module from the catalog that it cannot verify.** A
-  `snake://` module with no cluster signature ran with a warning, and it ran
-  with no warning when the Rack had no key to check it. Both now fail when the
-  gear starts. A module from a `file://` path can still run unsigned, for
-  development.
-- **The Wasm gear decodes the reply of a module before it frees the reply.** A
-  guest allocator that writes into a freed block made the message fail to
-  decode.
-- **The Wasm gear frees the input of a dropped message**, and of a message that
-  fails. Before, each one left its block allocated in the module. A module that
-  returns its input block has that block freed once, not twice. An `alloc` that
-  returns a null pointer is now an error, and the host no longer writes the
-  message at address 0.
-
-- **`io_iso8583` stops its connection handlers before Stop returns.** A handler
-  that was inside the emit of a frame ran its cleanup (the connection count, the
-  metrics, the removal from the table) after Stop had returned, and in a
-  redeploy against the next scenario.
-- **A graceful stop of a Rack with connected `io_iso8583` peers ends when the
-  connections stop reading.** `Drain` waited for the connections to close, and
-  they closed only at `Stop`, which comes after `Drain`. So the stop always took
-  the whole `rack.drain_timeout` (35 s by default) and logged an incomplete
-  drain, even with nothing pending. The sockets now stay open for replies until
-  `Stop`. A handler that was busy when the drain began now stops reading too.
-  `Stop` is safe to call twice.
-- **The Mixer records every gear, port and wire of a scenario in its topology
-  registry.** A unique index on `(machine_id, type_id)` kept one row of each
-  kind per machine, so each import logged `entity name already exists` for every
-  gear, port and wire after the first. Migration 3 drops the index when the
-  Mixer starts. The data is kept.
-
+- **Wasm module trust and guest memory handling.** A Rack refuses a catalog Wasm module it cannot verify. A `snake://` module with no cluster signature ran with a warning, and ran silently when the Rack had no key. Both now fail at gear start. A `file://` module can still run unsigned for development. The gear decodes a reply before freeing it. The gear frees the input of a dropped or failed message. A returned input block is freed once, not twice. A null-returning `alloc` is now an error. The host no longer writes a message at address 0.
+- **`io_iso8583` shutdown and scenario topology.** Connection handlers stop before Stop returns. A graceful Rack stop ends when connections stop reading. Sockets stay open for replies until `Stop`. A handler that was busy stops reading too. `Stop` is twice-safe. The Mixer records every gear, port and wire in its topology registry. A unique index on `(machine_id, type_id)` kept one row per kind per machine and logged `entity name already exists` for the rest. Migration 3 drops the index on Mixer start. The data is kept.
 ## [v0.13.1] - 2026-10-25 {#v0131}
 
 ### Added
 
-- **`snake.dlq_publish_timeout`** (default `5s`, Rack and Mixer) bounds how
-  long one dead letter publish waits for the server. Before, it had only the
-  client's default.
-- **`fluxrig check --timeout`** (default `5s`) bounds each network check to
-  one attempt. A zero or negative value uses the default.
-- **`api.approval_push_timeout`** (default `10s`) bounds the push of the
-  active scenario to a Rack that an operator approves.
+- **New timeouts.** `snake.dlq_publish_timeout` (default `5s`, Rack and Mixer) bounds how long one dead letter publish waits for the server. Before, it had only the client's default. `fluxrig check --timeout` (default `5s`) bounds each network check to one attempt. A zero or negative value uses the default. `api.approval_push_timeout` (default `10s`) bounds the push of the active scenario to a Rack that an operator approves.
 
 ### Fixed
 
-- **A Rack approved after an activation gets the active scenario.** A
-  pending Rack was not a target of the activation or of the push after its
-  enrollment, so after approval it ran no global gear until something else
-  pushed. Approval now pushes the active scenario to it once. The push does
-  not stop when the client that asked for the approval disconnects.
-- **`iso8583-tool -mode decode` keeps the declared width** of a fixed-length
-  field, as `codec_iso8583` does since v0.13.0. STAN `000001` printed as `1`.
-- **`fluxrig check -c` reports a configuration that does not load.** It
-  ignored the error, so a misspelled key or a bad duration passed the check
-  while the Rack or Mixer refused to start.
-- **`fluxrig check` answers in seconds when the bus is down.** It went
-  through the bus client's reconnect loop, about 50 seconds.
-- **A file `wire.source` cannot leave the spec's directory through a
-  symlink.** The read goes through `os.Root` on that directory.
-- **`io_iso8583` `tpdu_swap` now does what it documents.** With `tpdu_enabled`,
-  `preserve_headers` and a 5 byte TPDU, a server reply now carries the TPDU with
-  its destination and source addresses exchanged (`60 DDDD SSSS` becomes
-  `60 SSSS DDDD`). Before, the option was never read and the reply carried the
-  request's TPDU unchanged. Set `tpdu_swap: false` to keep the old behavior. Contributed by [Galih Lasahido](https://github.com/galihlasahido).
-- **`io_iso8583` client mode keeps a preserved binary header valid.** The header
-  is stored hex-encoded in `iso8583.raw_header`, as in server mode. A header with
-  bytes of 0x80 or above made the message fail validation. Contributed by [Galih Lasahido](https://github.com/galihlasahido).
-- **The `payment_switch_two_regions` example loads and declines correctly.**
-  The decline builders set `root.mti` and `root."39"`, which the encoder does
-  not read, so no valid response was produced. They now set the metadata key
-  `iso8583.mti` and the field `iso8583.field.39`. The `ports` declaration of the
-  builders moved under `config`, where the gear reads it. At gear level the
-  scenario failed to load. Contributed by [Galih Lasahido](https://github.com/galihlasahido).
+- **A Rack approved after an activation gets the active scenario.** A pending Rack was not a target of the activation or of the push after its enrollment, so after approval it ran no global gear until something else pushed. Approval now pushes the active scenario to it once. The push does not stop when the client that asked for the approval disconnects.
+- **`fluxrig check` is strict and fast.** `fluxrig check -c` reports a configuration that does not load. Before, it ignored the error, so a misspelled key or a bad duration passed while the Rack or Mixer refused to start. `fluxrig check` answers in seconds when the bus is down. Before, it went through the bus client's reconnect loop, about 50 seconds.
+- **ISO 8583 fixes.** `iso8583-tool -mode decode` keeps the declared width of a fixed-length field, as `codec_iso8583` does since v0.13.0. STAN `000001` printed as `1`. `io_iso8583` `tpdu_swap` now does what it documents. With `tpdu_enabled`, `preserve_headers` and a 5 byte TPDU, a server reply now carries the TPDU with its destination and source addresses exchanged (`60 DDDD SSSS` becomes `60 SSSS DDDD`). Before, the option was never read and the reply carried the request's TPDU unchanged. Set `tpdu_swap: false` to keep the old behavior. Contributed by [Galih Lasahido](https://github.com/galihlasahido). `io_iso8583` client mode keeps a preserved binary header valid. The header is stored hex-encoded in `iso8583.raw_header`, as in server mode. A header with bytes of 0x80 or above made the message fail validation. Contributed by [Galih Lasahido](https://github.com/galihlasahido). The `payment_switch_two_regions` example loads and declines correctly. The decline builders set `root.mti` and `root."39"`, which the encoder does not read, so no valid response was produced. They now set the metadata key `iso8583.mti` and the field `iso8583.field.39`. The `ports` declaration of the builders moved under `config`, where the gear reads it. Contributed by [Galih Lasahido](https://github.com/galihlasahido).
+- **A file `wire.source` cannot leave the spec's directory through a symlink.** The read goes through `os.Root` on that directory.
 
 ### Security
 
-- **Built with Go 1.26.10 and `golang.org/x/net` v0.60.0.** The build used Go
-  1.26.4 and `x/net` v0.59.0. `govulncheck` found 23 known vulnerabilities
-  that the code can reach: 18 in the Go standard library (`net/http`,
-  `html/template`, `crypto/tls`, `os` and others, fixed between Go 1.26.5 and
-  1.26.10) and 5 in `x/net`. It finds none now. A binary built from this
-  release is not affected. A binary built from an earlier release, or one you
-  build with an older Go, still is.
-
+- **Built with Go 1.26.10 and `golang.org/x/net` v0.60.0.** `govulncheck` found 23 known vulnerabilities that the code can reach: 18 in the Go standard library and 5 in `x/net`. It finds none now. A binary built from this release is not affected. A binary built from an earlier release, or one you build with an older Go, still is.
 ## [v0.13.0] - 2026-10-20 {#v0130}
 
 **Before upgrading,** follow [Upgrading fluxrig: from v0.12 to v0.13](https://fluxrig.org/docs/reference/operations/upgrading#v012-to-v013). It gives the steps in order. The BREAKING entries below explain each change.
 
 ### Added
 
-- **ISO 20022 support: the `codec_iso20022` and `translate` gears.** A
-  scenario can now bridge an ISO 8583 terminal network to the RTP network of
-  The Clearing House. `codec_iso20022` converts `pacs.008.001.08` and
-  `pacs.002.001.10` to structured fields and back, driven by an ISO 20022
-  protocol spec. `translate` maps the fields of one spec to another, as a
-  translation spec says. See the
-  [ISO 20022 codec](https://fluxrig.org/docs/reference/gears/codec-iso20022),
-  the [translate gear](https://fluxrig.org/docs/reference/gears/translate) and
-  the [bridge tutorial](https://fluxrig.org/docs/tutorials/iso8583_iso20022_bridge),
-  which `make test-robot-billpay` runs.
-- **Upload a spec or lookup data to the Mixer.** `POST /api/v1/specs`, and
-  `fluxrig spec import --api`, file an artefact in the Mixer's spec store.
-  The Mixer checks it with the loader of its kind (ISO 8583, ISO 20022,
-  translation, or data) and refuses one that a Rack cannot load. A
-  translation spec must name artefacts that the store already holds. The
-  body is bounded by `mixer.max_payload_size`. A `name:tag` that already
-  names other content gets `409`.
-- **A scenario carries what its translation specs name.** The Mixer sends a
-  Rack the specs that its gears name and, for a translation spec, its
-  protocol specs and its lookup records too. A Rack then runs a translation
-  with none of its files.
-- **`fluxrig scenario import --api --activate`** activates the scenario after
-  the import. The API supported it, but the command could not ask for it.
-- **`fluxrig gears doc --write --skip-types`.** Names the gear types another
-  binary documents (the enterprise gears, refreshed by `fluxrig-ent`). Their
-  reference blocks are left as they are and listed, instead of failing the
-  run. `make gear-docs` skips `sim_source` and `sim_responder`.
-- **`iso8583-tool` sends a bill payment.** New auth flags: `-auth-proc-code`,
-  `-auth-amount`, `-auth-currency`, `-auth-merchant-id` and `-auth-rrn`
-  (`auto` derives the RRN from the date and the STAN). `-auth-report` is
-  also written for a single transaction.
-- **Conductor overload shedding (`valet.max_in_flight`).** The number of open
-  tickets a Conductor holds is now bounded. A stuck destination used to
-  accumulate tickets in RAM until each timed out; past the bound a new request
-  is shed on the error port with `error.reason=overloaded` instead. The default
-  is `0` (unbounded), so existing scenarios are unchanged. A retransmission of
-  an already-open key and a replay of a retained outcome are never shed: the
-  bound stops new work, not duplicates of work already accepted.
-- **Offline store-and-forward.** A gear emission to a bus-bound subject
-  while the bus is down is now parked in a bounded in-memory outbox instead
-  of failing the message. When the bus returns, the outbox drains.
-  `rack.outbox_max_messages` (10000) caps it; when full the oldest entry is
-  dropped and counted, and the emitting gear is never blocked.
-  `rack.outbox_order` sets the drain order. With `subject` (the default), a
-  message never reaches the bus ahead of an older one on the same subject: a
-  reversal parked after its authorization arrives after it, and a live
-  emission on a subject that still has parked messages queues behind them.
-  While the bus is up and the outbox drains, such an emission first waits
-  up to `rack.outbox_backpressure_timeout` (1s) for that backlog to clear
-  and then goes straight to the bus, so the emitting gear slows to the
-  drain's pace instead of filling the outbox until the cap drops messages.
-  With the bus down nothing waits. `0s` turns the wait off.
-  With `none`, the drain forwards whatever the bus takes, as it takes it.
-  A message is dropped only when the bus marks it as one it can never
-  accept (it fails validation, cannot be encoded, or exceeds the payload
-  limit). Any other refusal keeps it parked, so a dead bus never eats the
-  queue, however many rejoins fail. `rack.outbox_drain_retries` (3) is how
-  many more times the drain tries a refused message before it moves on. A
-  drain starts on rejoin and on the first emission the bus accepts, so a
-  reconnect inside the bus connection also empties the outbox.
-  Metrics: `flux.outbox.parked/drained/dropped`
-  and `flux.outbox.depth`. Memory only: a restart with a non-empty outbox
-  loses it, and the reference says so.
-- **`fluxrig-mixer --repair`.** A corrupt stream no longer leaves the
-  operator with only "move the directory away". With the Mixer stopped, the
-  mode starts the embedded server without provisioning, diagnoses each
-  managed stream (healthy, drifted, absent, unreadable), and reports. Drift
-  is fixed by updating the stream config and an absent stream is created;
-  both lose nothing. An unreadable stream blocks with exit 1 and names
-  `--force`, which recreates it and reports exactly what was discarded.
-  Boot failures name the mode as the next step. There is still no automatic
-  repair at boot, on purpose.
-- **Telemetry retention sweep.** The Mixer now starts the retention janitor
-  at boot. It deletes Parquet telemetry files older than
-  `observability.embedded.retention_days` (30 days by default), once at
-  startup and then every `observability.embedded.rotation.check_interval`
-  (1 hour by default). Before this, nothing removed old telemetry and the
-  Parquet tree grew without bound. The sweep deletes `.parquet` files only:
-  rows in the DuckDB `telemetry_*` tables are not removed.
-- `observability.embedded.rotation.check_interval` and
-  `observability.embedded.rotation.max_age_days` are now read. `max_age_days`
-  is the fallback when `retention_days` is not positive.
-- `snake.cluster_name` and `snake.store_dir` are now read. Both were already
-  fields of the embedded server's own configuration but had no key on the
-  config struct, so setting them had no effect. `store_dir` empty keeps the
-  default, a `snake` directory under `store.dir`.
-- **Dead letter queue.** A message no consumer can process is now kept
-  instead of dropped. The Mixer provisions a `flux-dlq` stream, and the bus
-  republishes the message there when its payload does not decode, fails
-  validation, or the handler fails on every redelivery. The original bytes
-  are stored unchanged with the failure context in headers, so an operator
-  can find the message, fix the cause, and replay it. Keys:
-  `snake.dlq_enabled` (default true), `snake.dlq_subject` (default
-  `flux.dlq`), `snake.dlq_max_age` (default 720h).
+- **ISO 20022 support.** New gears `codec_iso20022` (pacs.008/pacs.002, driven by a protocol spec) and `translate` (field maps between specs), plus the bridge tutorial, which `make test-robot-billpay` runs.
+- **Mixer spec store and scenario delivery.** `POST /api/v1/specs` and `fluxrig spec import --api` file an artefact that the Mixer checks with its kind's loader. The Mixer sends each Rack the specs its gears name, so a Rack runs a translation with none of its files. `fluxrig scenario import --api --activate` activates after the import.
+- **Delivery resilience.** Conductor overload shedding sheds on the error port past `valet.max_in_flight` (default `0`, unbounded). An offline outbox parks bus-bound emissions in memory (`rack.outbox_max_messages`, 10000 by default) and drains on rejoin. A restart with a non-empty outbox loses it. A dead letter queue keeps a message no consumer can process in the `flux-dlq` stream instead of dropping it.
+- **Operator tooling and housekeeping.** `fluxrig-mixer --repair` diagnoses a managed stream (healthy, drifted, absent, unreadable) and fixes or recreates it, reporting what was discarded. A telemetry retention sweep deletes old Parquet files. `fluxrig gears doc --write --skip-types` leaves gears undocumented, and `iso8583-tool` sends a bill payment with new auth flags.
 
 ### Changed
 
-- **BREAKING: the reference ISO 8583 spec packs a standard bitmap.**
-  `examples/specs/iso8583-v87-ascii.yaml` packed one 128-bit bitmap on
-  every message and never set bit 1. A peer that follows ISO 8583 reads 16
-  hex characters of primary bitmap, so it read the second half as data,
-  and its own messages did not unpack. The spec now declares an 8-byte
-  primary bitmap: 16 hex characters, and a secondary bitmap only when a
-  field above 64 is present, announced by bit 1. A peer that was built
-  against the old layout must change with it. The spec's version is now
-  `3.0.0`, because the store keeps every version unchanged: a Mixer that
-  already holds `iso8583-v87-ascii:v2.2.0` keeps serving the old layout
-  under that name. Upload `examples/specs/iso8583-v87-ascii.yaml` and change
-  each `iso8583-v87-ascii:v2.2.0` reference to `iso8583-v87-ascii:v3.0.0`.
-  Reported by [Galih Lasahido](https://github.com/galihlasahido).
-- **BREAKING: the Mixer refuses to start without its API.** With no
-  `api.auth_token`, or an API port that is in use, the Mixer used to report
-  ready, enroll Racks and deploy its startup scenario with no management API.
-  Nobody could manage it or upload to it. It now exits with code 1 before it
-  reports ready, and an API that stops later stops the Mixer. Set
-  `api.auth_token`, or `api.auth_disabled_dangerously = true` for a test.
-- **`on_error: reject` emits on an `error` port.** `codec_iso8583`,
-  `codec_iso20022` and `translate` send a rejected message out of their
-  `error` port, with `error.reason`, `error.gear` and `error.message`, so a
-  scenario can answer the sender. Before, `codec_iso8583` returned the error
-  to the runtime, which logged it and dropped the message. An unwired
-  `error` port still drops it. On the guaranteed lane a rejected message is
-  now acknowledged, not redelivered to the dead letter queue.
-- **BREAKING: the registry lives on the bus.** Rack records, the name index,
-  scenario files and the active-scenario pointer now live in a JetStream
-  key-value bucket (`registry.bucket`, default `fluxrig_registry`), not in
-  the Mixer's DuckDB file or under `store.dir/scenarios`. Every write is
-  checked against the revision it read, so two Hellos that claim one name
-  can no longer both succeed. Nothing is migrated:
-  - Every Rack enrolls again on its own: the empty registry denies its old
-    identity, and the Rack drops it and enrolls with the bootstrap secret.
-    It comes back with a new MachineID and waits in `pending` unless
-    `enrollment.auto_adopt` is on. Approve each Rack again.
-  - Import each scenario again, then activate it.
-  - Upgrade every Rack before the Mixer. The Mixer stores only a hash of a
-    Rack's secret, so only the first passport carries the secret. A Rack
-    keeps it in a file beside its passport (`base.state_file` with a
-    `.secret` suffix). A Rack of this version works under an earlier Mixer.
-    A Rack of an earlier version under this Mixer reads the next passport's
-    empty secret as its own and stops authenticating.
-  - The upgrade deletes the old Rack, Mixer and Snake rows from DuckDB,
-    plaintext secrets included.
-- **Every pull request needs an issue, and community pull requests target
-  `dev`.** `CONTRIBUTING.md` states the rule, a pull request template asks
-  for `Closes #<issue>`, and a check fails a community pull request that
-  references no issue or that does not target `dev`.
-- **Robot runs keep their workspaces under the run root they print.** Each
-  suite works in `<run root>/work/<suite directory>`, and `run.sh` keeps the
-  newest 10 run roots under `/tmp/fluxrig` (`FLUXRIG_ROBOT_KEEP_RUNS`, `0`
-  keeps all). A run root that a run still uses is never removed.
-- **A restarted Mixer restores its active scenario.** It reads the
-  scenario from the registry at startup, as it was registered and sent, and
-  reports it. It pushes nothing on its own. A Rack that enrolls or rejoins
-  receives the scenario byte for byte as before, so a Rack that already runs
-  it keeps its gears. `--scenario` still overrides. The restore never waits
-  for a Rack: startup is not held up by one that is gone.
-- **Presence is separate from status.** A heartbeat now records presence in
-  a second bucket (`registry.liveness_bucket`) whose entries expire after
-  `registry.liveness_ttl` (90s, three heartbeat intervals). The API reports
-  `online` for each Rack. A Rack that stops sending heartbeats shows as not
-  online; its status (`pending`, `active`, `inactive`) does not change.
-- **New `[registry]` section.** `bucket`, `liveness_bucket`, `replicas` (1),
-  `max_value_size` (1 MiB, headers included; bounds a
-  scenario file), `liveness_ttl` (90s) and `write_retries` (3).
-- **The registry repairs what a crash between two writes leaves behind.**
-  At startup and every `registry.sweep_interval` (10m), the Mixer deletes a
-  Rack record that never finished registering (no name points at it, so its
-  secret never reached a Rack), completes or rolls back a rename that
-  stopped halfway, and deletes a name key whose entity is gone. A record
-  younger than `registry.orphan_min_age` (5m) is left alone: it may still be
-  in progress. A failure to mint an ID is now an error. It no longer
-  produces a record with the nil ID.
-
-- **A configuration with a stray or misspelled key now refuses to start.**
-  The load reports the key instead of ignoring it. A key that mapped to no
-  setting used to be dropped silently, so the process ran with a default the
-  operator meant to override and nothing said so. The Rack's `rack.bus.*`
-  and legacy `bus.*` aliases, `store.state_file`, `store.scenario_file` and
-  the Mixer's `mixer.mixer_name` are read by the loader and stay accepted.
-  Config files in this repository were corrected where they carried keys no
-  setting reads.
-- **A duration that does not parse now refuses to start, and names the
-  field.** Durations were parsed where they were used, often with the error
-  ignored, so a typo such as `operation_timeout = "5 seconds"` became zero:
-  the timer it bounds fired immediately, or panicked a ticker.
-- **`idgen.RandomSuffix` returns an error again instead of a placeholder.**
-  It returned the constant `"0000"` when the entropy source failed, so a
-  caller received a plausible, wrong suffix with no signal. The signature is
-  now `RandomSuffix(n int) (string, error)`. It has no caller in this
-  repository; the change affects an external user of the exported symbol.
+- **BREAKING: the reference ISO 8583 spec packs a standard bitmap.** `examples/specs/iso8583-v87-ascii.yaml` packed one 128-bit bitmap on every message and never set bit 1. A peer that follows ISO 8583 reads 16 hex characters of primary bitmap, so it read the second half as data, and its own messages did not unpack. The spec now declares an 8-byte primary bitmap, and a secondary bitmap only when a field above 64 is present, announced by bit 1. A peer that was built against the old layout must change with it. The spec's version is now `3.0.0`: a Mixer that already holds `iso8583-v87-ascii:v2.2.0` keeps serving the old layout under that name. Upload the spec and change each `v2.2.0` reference to `v3.0.0`. Reported by [Galih Lasahido](https://github.com/galihlasahido).
+- **BREAKING: the Mixer refuses to start without its API.** With no `api.auth_token`, or an API port that is in use, the Mixer used to report ready with no management API. It now exits with code 1 before it reports ready, and an API that stops later stops the Mixer. Set `api.auth_token`, or `api.auth_disabled_dangerously = true` for a test.
+- **BREAKING: the registry lives on the bus.** Rack records, the name index, scenario files and the active-scenario pointer now live in a JetStream key-value bucket (`registry.bucket`, default `fluxrig_registry`), not in the Mixer's DuckDB file. Every write is checked against the revision it read, so two Hellos that claim one name can no longer both succeed. Nothing is migrated. Each Rack enrolls again on its own (it waits in `pending` unless `enrollment.auto_adopt` is on, approve each one), import each scenario and activate it, and upgrade every Rack before the Mixer. A Rack of an earlier version under this Mixer stops authenticating. A Rack of this version works under an earlier Mixer.
+- **`on_error: reject` emits on an `error` port.** `codec_iso8583`, `codec_iso20022` and `translate` send a rejected message out of their `error` port, so a scenario can answer the sender. An unwired `error` port still drops it.
+- **Registry lifecycle.** A restarted Mixer restores its active scenario and reports it, pushing nothing on its own. Presence is separate from status, in a liveness bucket with 90 s expiry. New `[registry]` section: `bucket`, `liveness_bucket`, `replicas` (1), `max_value_size` (1 MiB), `liveness_ttl` (90s), `write_retries` (3), `sweep_interval` (10m). A configuration with a stray or misspelled key now refuses to start and names it. Every pull request needs an issue, and community pull requests target `dev`. Robot runs keep their workspaces under the run root they print.
 
 ### Fixed
 
-- **The roaming example writes its correlation entry before the
-  authorization moves on.** `examples/scenarios/roaming_enrichment.yaml`
-  forwarded each authorization before its correlation entry was written
-  (`await_store: false`), but that entry carries the connection the reply
-  must go back to. An authorizer that answered in a few milliseconds beat
-  the write: the reply found no entry and was lost, or, when a trace number
-  repeated on the same terminal within the entry's TTL, found the older
-  entry and was written to the other request's connection. The store now
-  completes before the request moves on (`await_store: true`), so a write
-  that fails now fails the authorization. The correlation key must still be
-  unique among the requests in flight: two at once with the same key share
-  one entry. Copy this change into a scenario derived from the example.
-- **`coatcheck` bounds the awaited store write.** `store_timeout` (default
-  `5s`) now limits every store write. Before, it applied only to the detached
-  write (`await_store: false`), and the awaited write could wait without a
-  bound.
-- **`codec_iso8583` decodes a fixed-length field at its declared width.**
-  The library strips a field's padding when it unpacks, so DE 11 `000042`
-  decoded as `42`, an all-zero DE 3 as `0`, and the MTI in `Data` as `200`.
-  The wire re-encoded correctly, but `Data` and every alias carried the
-  trimmed value, so a rule or a translation that compared the fixed-width
-  value saw a different string. A fixed-length text field (String or
-  Numeric) with a padder now decodes at the width the wire carried. A
-  variable-length field, and a Binary or Hex field, is unchanged. Reported by [Galih Lasahido](https://github.com/galihlasahido).
-- **A scenario with global gears reaches the Racks that are already
-  enrolled.** Activation pushed a scenario only to the Racks it names, in
-  `racks:` or in a gear's `deploy:`. A gear with no `deploy` target reached
-  a Rack only if that Rack enrolled after the activation, so activating such
-  a scenario on a running fleet reached no Rack. Activation now pushes it to
-  every active Rack. The push that follows an enrollment skips a Rack that
-  the activation has already reached, so its gears do not restart twice.
-- **A Rack with a new `state_dir` can enroll.** The Rack pinned the Mixer key
-  before its state directory existed, so its first enrollment failed with
-  "pin mixer key: no such file or directory" and the Rack stopped.
-- **The Conductor routes to an `io_tcp` client.** A Conductor port is
-  available only after the I/O gear at its end reports `conn.up`, and only
-  `io_iso8583` reported it. A route that ended at an `io_tcp` client failed
-  every request with `no_destination`. The `io_tcp` client now publishes its
-  link state.
-- **A spec imported while the Mixer runs is sent with the next scenario.**
-  The Mixer opened its spec store twice, and each instance kept its own
-  index, so the scenario controller did not see what the API stored until a
-  restart.
-- **`iso8583-tool` packs the reference v87 spec.** DE 3 of that spec has no
-  encoding of its own, and the tool packed it with the spec as compiled, so
-  every auth request that carried DE 3 panicked. The tool now makes the
-  spec nil-safe as the codec does (`sdl.MakeNilSafe`). It also reads a fixed
-  field with its padding, so an MTI reads `0210`, not `210`, and compares
-  with `-auth-expect-mti`.
-- **The Mixer's Hello throttle no longer grows without bound.** It kept one
-  entry for every Rack name and machine ID it had ever seen. A Hello carries
-  its name unverified, so a stream of distinct names grew the Mixer's memory
-  for as long as it ran. Expired entries are now removed at most once per
-  throttle window.
-
-- **The raw bus subscription path now records receive metrics, and the bus
-  byte counters are no longer empty.** `SubscribeRaw` (used by the Coat Check
-  daemon) delegated with no instrumentation, so its consumed messages were
-  invisible to `flux.nats.messages_received`. `flux.nats.bytes_received` and
-  `flux.nats.bytes_published` were declared and never incremented; both are
-  now recorded where the payload size is in hand (the raw paths), so the byte
-  series reports real values instead of reading as a system that is not
-  reporting.
-- **A fully qualified `urn:flux:<kind>:<name>:<tag>` reference now resolves.**
-  `Load` split a reference at its last colon by hand, so a
-  `urn:flux:spec:visa:latest` reference read the name as `urn:flux:spec:visa`
-  and looked up the wrong artifact. A single parser now owns both the short
-  `name:tag` form (unchanged) and the reserved scheme, and rejects the
-  malformed cases instead of resolving them wrongly.
-- **A Coat Check entry now carries its own TTL, so it expires without the
-  daemon.** The bucket was created with `max_ttl` as its bucket-wide TTL, so
-  every key lived that long whatever the message asked for: a key whose
-  `meta.coatcheck.ttl` was 30 seconds still sat for `max_ttl` (5 minutes), and
-  a slow or crashed daemon extended that to `max_ttl` past the crash. The
-  store now writes each entry with the TTL its message resolved to (the
-  override, else `default_ttl`, capped at `max_ttl`), and the bucket opts
-  into per-message TTL. The daemon still emits the timeout event; the storage
-  expiry no longer depends on it being alive. An existing bucket keeps the
-  entries already in it; the change applies to new writes.
-- **Concurrent spec imports no longer lose a version.** A CLI and a Mixer
-  share one `index.json`, and both did read-modify-write on it, so the second
-  writer overwrote the first writer's entry with its stale in-memory copy. The
-  artifact's bytes stayed in the store but became unreachable by name. An
-  import now takes a cross-process lock on `index.lock`, re-reads the file,
-  merges its entry into what is on disk, and replaces the file atomically, so a
-  reader never sees a torn index either.
+- **Store and codec correctness.** The roaming example writes its correlation entry before the authorization moves on. `coatcheck` bounds the awaited store write by `store_timeout` (default `5s`). `codec_iso8583` decodes a fixed-length text field at the width the wire carried. `iso8583-tool` packs the reference spec nil-safe and reads fixed fields with their padding.
+- **Scenario and enrollment delivery.** Activation pushes a scenario with global gears to every active Rack, and a spec imported while the Mixer runs goes out with the next scenario. A Rack with a new `state_dir` can enroll, and the Conductor routes to an `io_tcp` client. The Mixer's Hello throttle no longer grows without bound.
+- **Bus, references and metrics.** The raw bus subscription path now records receive metrics. A fully qualified `urn:flux:<kind>:<name>:<tag>` reference now resolves. A Coat Check entry now carries its own TTL, so it expires without the daemon. Concurrent spec imports no longer lose a version.
+- **Small hardening.** The registry repairs what a crash between two writes leaves behind. A duration that does not parse now refuses to start and names the field. `idgen.RandomSuffix` returns an error again instead of a placeholder.
 ## [v0.12.0] - 2026-09-28 {#v0120}
 
 **Before upgrading.** Most of the changes below are self-resolving once
 both sides run the new version, or a one-time config change. One is not:
-it is permanent and needs a manual, per-row fix. Look for **"Permanent,
-needs a manual fix"** below and act on it first.
+it is permanent and needs a manual fix. Look for **"Permanent, needs a manual fix"** below and act on it first.
 
-- **A coatcheck or conductor correlation key built from more than one field
-  now joins them differently, and an entry stored under the old key is
-  unreadable until it expires.** Key parts used to be joined with a fixed
-  separator (`_` in coatcheck, the conductor's own `\x1f`) that a field's own
-  bytes (a PAN, a Track2 blob, binary PIN/MAC/EMV data) could themselves
-  contain, making two different sets of parts collide on the same key. Parts
-  are now joined unambiguously (length-prefixed), so a value stored by an
-  older version is not found by this one; it is not lost, just unreachable
-  until its `coatcheck.ttl` passes and a fresh one is written under the new
-  key.
-- **`coatcheck restore`'s `on_missing` now defaults to `error`, not
-  `forward`.** An unset `on_missing` used to forward the reply on as if
-  nothing were missing, silently sending a PAN-stripped (or otherwise
-  incomplete) reply onward. A scenario that relied on the old default must
-  now set `on_missing: forward` explicitly. An unrecognized value is now
-  also an error, where it used to behave like `forward` too.
-- **`io_tcp` in client mode now applies configured framing to outbound
-  writes.** It used to write `RawPayload` straight to the socket with no
-  framing at all, while server mode framed correctly; a client-mode
-  connection to a peer expecting the configured framing (length-prefix,
-  delimiter, fixed-length) now sends properly framed bytes where it
-  previously sent raw, unframed ones.
-- **`io_tcp`'s `idle_timeout` (default 60s) is now actually enforced.** It
-  was parsed and defaulted but never applied to the connection; a
-  connection idle past it is now closed. A long-lived but genuinely idle
-  connection that relied on this never firing needs `idle_timeout` raised
-  or set to `0` to disable it.
-- **A conductor reply's origin stamp must now look like a peer identifier
-  (letters, digits, `-`, `_`, up to 128 characters), and can optionally be
-  checked against a `known_origins` allowlist.** The origin arrives in the
-  request's own metadata, sender-controlled, and used to be built directly
-  into a wire port name with no validation; a mesh whose peer names happen
-  to use another character will need renaming, and setting `known_origins`
-  is opt-in for narrowing further. A rejected origin now emits on the error
-  port with the new reason `invalid_origin`, so a consumer that switches on
-  `error.reason` needs to account for it alongside the existing values.
-- **The Mixer's management API now requires authentication, and refuses to
-  start without it.** Every route but `/api/v1/health` now requires
-  `Authorization: Bearer <api.auth_token>`, compared in constant time. Set
-  `api.auth_token` before upgrading, or the Mixer will not start; the
-  explicit opt-out is `api.auth_disabled_dangerously = true`, which logs a
-  warning on every start and is not recommended.
-- **A Rack's heartbeat is now authenticated against its own registered
-  secret, and is silently dropped if it does not match.** Before, any caller
-  who learned a Rack's `machine_id` (previously readable from the
-  unauthenticated `/racks` endpoint above) could forge its liveness and
-  overwrite its stats and config with none of its own. Upgrade the Mixer
-  and its Racks together, or close together: a Rack still on the previous
-  binary sends no `secret` in its heartbeat and every one of its heartbeats
-  will be rejected until it is upgraded too.
-- **Permanent, needs a manual fix: a registry row with an empty stored
-  secret can no longer heartbeat or re-register.** Upgrading the Rack does
-  not fix it, and there is no automatic migration: an empty secret never
-  matches anything, by design, on either side. Find affected rows with a
-  direct query against the Mixer's registry store (`store.database_file`,
-  `flux.duckdb` by default): `duckdb flux.duckdb "SELECT machine_id, name
-  FROM registry WHERE type_id = 4 AND (secret IS NULL OR secret = '');"`.
-  For each row returned, `admin racks remove <machine_id>` and let it
-  re-enroll as a fresh Zero-Config identity; this version issues it a real
-  secret on the way back.
-- **A brand-new Rack identity must now present the shared bootstrap secret
-  on its first Hello.** It used to be accepted with an empty secret
-  regardless of what was already on file for that name, which let a second
-  caller claim an existing Rack's identity. `rack.bootstrap_secret` is a new
-  Rack-side setting (default `"fluxrig"`, matching the Mixer's
-  `enrollment.bootstrap_secret` default) so Zero-Config enrollment keeps
-  working unconfigured; set both to a non-default, matching value for
-  anything beyond a trial deployment. A Rack whose registration was removed
-  (`admin racks remove`) and that still holds a stale Passport now gets an
-  explicit "denied" reply and re-provisions as fresh Zero-Config, instead of
-  retrying silently forever.
-- **Importing or activating a scenario no longer promotes a `pending` Rack
-  it names to `active`.** That promotion used to happen as a side effect of
-  the import; approving a Rack is now only ever the operator's own
-  deliberate action (`admin racks activate`). A scenario that names a
-  still-`pending` Rack now fails to find it (a timeout, with a clear error)
-  instead of silently activating it first.
-- **A scenario activation no longer purges every Rack's traffic on the shared
-  bus stream.** It used to call a blanket purge of the whole `flux-msg` stream
-  whenever it needed the bus, discarding every other Rack's queued
-  guaranteed-lane messages along with the activating Rack's own. It now purges
-  only that Rack's own subjects.
-- **A guaranteed-lane message is now acked only after its handler succeeds,
-  and a failed handler gets up to 5 redeliveries before JetStream gives up on
-  it.** It used to ack immediately on receipt, before decoding or handling —
-  any failure after that point (a panic further down the call chain, a
-  downstream publish error) silently lost the message while looking like a
-  success. A message that fails every one of its 5 attempts is now dropped
-  after the last one, the same outcome as before, but only after retrying.
-  The retry count isn't config-exposed yet.
-- **Applying a new scenario or shutting down now waits up to 5 seconds for
-  the hot lane to drain before tearing it down.** It used to unsubscribe
-  immediately, dropping whatever was still queued. A teardown that used to be
-  instant can now take up to 5 seconds; this timeout isn't config-exposed
-  yet.
-- **A Rack timeout or interval set to `0s` (or a negative value) now silently
-  falls back to its documented default instead of misbehaving.** Depending on
-  the setting, `0s` used to fire instantly on every message, panic a ticker
-  on startup, or block a connection attempt forever. Six settings that were
-  previously parsed ad hoc with the parse error discarded outright
-  (`snake.connect_timeout`, `snake.reconnect_wait`,
-  `rack.enrollment_timeout`, `rack.enrollment_interval`,
-  `rack.heartbeat_interval`, `snake.inactive_threshold`) now go through the
-  same validation as the rest and fail loudly on a genuine typo instead of
-  silently reading as zero. `snake.initial_retry_wait`,
-  `snake.initial_retry_attempts`, `snake.offline_start_timeout`,
-  `snake.offline_retry_interval` and `rack.lane_send_timeout` are unchanged:
-  `0`/`0s` is their documented sentinel for "use the built-in default" or
-  "disabled", not a mistake to clamp.
-- **Two `pkg/bus` Go signatures changed, for anyone building against this
-  package directly rather than through a scenario.** `bus.Handler` now
-  returns `error` (the ack-after-success fix above is what a returned error
-  drives); `NatsBus.Purge` now takes a `subject string` parameter (the
-  scoped-purge fix above), where it used to take none.
-- **Environment-variable overrides that previously matched nothing now
-  take effect.** The Mixer's env mapper had no per-section handling at
-  all, so a multi-word field (`FLUXRIG_SNAKE_STREAM_MAX_BYTES` and
-  similar) silently changed nothing; the Rack's mapper was missing a
-  `telemetry_` entry, so every `FLUXRIG_TELEMETRY_*` multi-word field did
-  the same. Both are fixed. If you were relying on the Mixer or Rack
-  ignoring one of these env vars, it will not ignore it anymore — check
-  your deployment's environment before upgrading. A list-valued field
-  (`stream_subjects`) set via env var now actually splits on commas too;
-  it previously became a single, wrong entry.
-- **`fluxrig admin racks remove/suspend/activate/shutdown` now prompt for
-  confirmation.** Pass `--force` (`-f`) in a script or any other
-  non-interactive caller. Without a terminal attached and without
-  `--force`, the command now aborts instead of hanging or proceeding.
-- **An entity ID minted before a Rack has a machine ID (Zero-Config,
-  before enrollment assigns one) now carries different bits in its
-  machine-hint region.** It used to be zero-filled from the Nil machine
-  ID; it is now `uuid.NewV7`'s own random bytes, left alone instead of
-  overwritten. IDs already issued by an earlier version are unaffected;
-  this only changes what a not-yet-enrolled Rack mints from this version
-  on.
-- **`idgen.IDGenerator.NewEntityID` now panics if `uuid.NewV7` fails,
-  instead of silently minting an ID from a zero UUID.** `NextEntityID`
-  (the entry point most of the codebase actually calls — scenario apply,
-  gear/port/session IDs, the Mixer's own entity ID) is a thin wrapper
-  around it and inherits the same panic. The rest of `idgen` is
-  unaffected. `NewV7`'s only failure mode is the entropy source itself
-  (`crypto/rand`) failing, which is fatal for the rest of the process
-  too; this is a new crash path, intentionally fail-fast rather than
-  issuing an ID that was never really a V7 UUID.
-- **A Rack now pins the Mixer's signing key the first time it accepts a
-  passport, and rejects any later passport signed by a different key.**
-  Before, the key embedded in the passport itself was trusted for every
-  verification, so a self-signed envelope on disk would have verified.
-  Nothing to do for an already-enrolled Rack: the pin is taken from the
-  first cached passport it already has.
-- **The Snake now refuses a plaintext connection once TLS certs are
-  configured, unless `snake.allow_non_tls` is set.** It used to accept
-  plaintext alongside TLS whenever certs were present, with no way to
-  turn that off.
-- **A KV bucket the Mixer provisions (currently only `wasm_catalog`) is
-  now capped** (`snake.kv_max_bytes`, `snake.kv_max_value_size`,
-  `snake.kv_ttl`; defaults 1 GiB / 1 MiB / no expiry). An existing bucket
-  picks up a changed limit on the next start, the same way a stream
-  already does.
-- **`archiver_buffer` is now actually flushed to Parquet under
-  `<data_dir>/messages/`.** A bug in how a wire ID was read back
-  (`store/duckdb`) meant every flush silently failed and the buffer was
-  never drained; expect real disk growth there that a prior version
-  never produced, and expect old, unflushed rows to appear once on the
-  first start of this version.
-- **Scenario activation that reaches no target Rack now answers `202
-  Accepted`, not `500`.** The scenario is genuinely active either way; a
-  Rack that enrolls afterwards still receives it. A caller that treated
-  any non-200 as a hard failure needs to accept 202 as success too.
+- **Correlation keys are joined unambiguously now, and `coatcheck restore` refuses more.** Coatcheck and conductor key parts used length-ambiguous joins that field bytes (PAN, Track2, binary PIN/MAC/EMV data) could themselves contain. Parts are now length-prefixed. Entries stored by an older version are unreachable, not lost, until their `coatcheck.ttl` passes. `on_missing` now defaults to `error`, not `forward`. Scenarios relying on the old default must set `on_missing: forward`. An unrecognized value is now an error too.
+- **`io_tcp` framing and idleness changed.** Client mode now applies configured framing to outbound writes, while server mode framed already. The scanner buffer now fits the largest message the framing allows (up to ~1MB), not `bufio.Scanner`'s ~64KiB default. `idle_timeout` (default 60s) is now enforced. Genuinely idle long-lived connections need it raised or `0` to disable.
+- **Conductor reply origins are validated.** The origin stamp must look like a peer identifier (letters, digits, `-`, `_`, up to 128 characters). It was built into a wire port name unvalidated from sender-controlled metadata. Meshes using other characters need renaming. `known_origins` is an opt-in allowlist. Rejections emit `invalid_origin` on the error port alongside existing `error.reason` values.
+- **Management and heartbeat paths require secrets.** Every Mixer API route but `/api/v1/health` needs `Authorization: Bearer <api.auth_token>`, compared in constant time. Set `api.auth_token` first, or the Mixer will not start. The opt-out is `api.auth_disabled_dangerously = true`, with a warning on every start. Rack heartbeats authenticate against the registered secret and drop on mismatch. Upgrade Mixer and Racks together. A previous Rack sends no `secret` and is rejected until upgraded.
+- **Rack identity is pinned and must be repaired by hand where empty.** Permanent, needs a manual fix: a registry row with an empty stored secret can no longer heartbeat or re-register. Upgrading the Rack does not fix it. An empty secret never matches, by design, on either side. Find affected rows with a direct query against the Mixer's registry store (`store.database_file`, `flux.duckdb` by default): `duckdb flux.duckdb "SELECT machine_id, name FROM registry WHERE type_id = 4 AND (secret IS NULL OR secret = '');"`. For each row returned, `admin racks remove <machine_id>` and let it re-enroll as a fresh Zero-Config identity. This version issues it a real secret on the way back.
+- **The guaranteed lane is reliable now.** Activation purges only that Rack's own subjects, not the whole `flux-msg` stream. Messages are acked only after handler success. Failed handlers get up to 5 redeliveries before drop. Undecodable messages are terminated (`Term`), not acked. Teardown waits up to 5 seconds for the hot lane to drain. Neither retry count nor timeout is config-exposed. Emitting gears get `runtime.ErrLaneClosed` on mid-send teardown instead of bare `nil`. Multi-port emissions clone the message before setting `FluxID` and appending a hop. The clone covers `Path` only. OTel context is injected before serialization. `bus.Handler` now returns `error`. `NatsBus.Purge` now takes a `subject string`.
+- **Timeouts, environment, CLI, IDs and transport defaults changed.** A `0s` or negative Rack timeout or interval now falls back to its documented default. This covers `snake.connect_timeout`, `snake.reconnect_wait`, `rack.enrollment_timeout`, `rack.enrollment_interval`, `rack.heartbeat_interval` and `snake.inactive_threshold`. Genuine typos now fail loudly. `snake.initial_retry_wait`, `snake.initial_retry_attempts`, `snake.offline_start_timeout`, `snake.offline_retry_interval` and `rack.lane_send_timeout` are unchanged. Mixer env mapping now handles multi-word fields like `FLUXRIG_SNAKE_STREAM_MAX_BYTES`. Rack mapping handles `FLUXRIG_TELEMETRY_*`. List-valued `stream_subjects` from env now split on commas. `fluxrig admin racks remove/suspend/activate/shutdown` now prompt. Scripts must pass `--force` (`-f`). Pre-enrollment entity IDs keep `uuid.NewV7` random bytes in the machine-hint region instead of Nil zero-fill. `idgen.IDGenerator.NewEntityID` now panics if `uuid.NewV7` fails. `NextEntityID` inherits it. The Snake now refuses plaintext connections once TLS certs exist unless `snake.allow_non_tls` is set.
 
 ### Added
 
-- `conductor`: `known_origins`, an optional allowlist of peer Conductor
-  names a reply's origin stamp must match.
-- `conductor`: new `error.reason` value `invalid_origin`, emitted when a
-  reply's origin stamp fails the format check or the `known_origins`
-  allowlist.
-- `api.auth_token`, `api.auth_disabled_dangerously`: gate the management
-  API. See "Before upgrading".
-- `rack.bootstrap_secret`: the shared secret a Rack presents on its first
-  Hello. See "Before upgrading".
-- `test/e2e/20_security_regression`: standalone coverage for the
-  auth/secret-redaction behavior above, without needing the full
-  regression sweep.
-- `runtime.ErrLaneClosed`: returned to an emitting gear when the hot lane's
-  subscription was unsubscribed while the message was still on its way to
-  the queue. A bare `nil` used to be returned instead, which counted as a
-  successful delivery to a wire that was actually torn down mid-send.
-- `snake.tls_ca_file` / `snake.tls_verify`: wires the mTLS client-cert
-  verification that already existed in code but had no config surface.
+- Secrets are never serialized and are compared safely. `Secret`, `BootstrapSecret` and `AuthToken` carry `json:"-"` and `cbor:"-"` in registry and config structs. All comparisons (API token, bootstrap, heartbeat) go through one constant-time helper (`security.SecretsEqual`).
 
 ### Fixed
 
-- `io_tcp` (client and server): the scanner buffer is now sized to accept
-  the largest message the configured framing allows (up to ~1MB), instead
-  of `bufio.Scanner`'s ~64KiB default; a message near or above that size
-  used to fail to scan.
-- `coatcheck`'s per-message TTL override (`Metadata["coatcheck.ttl"]`) is
-  now honored regardless of `include_values`. It was only decoded and
-  applied when `include_values` was set (default `false`), so a scenario
-  relying on the override without also asking for full values had it
-  silently ignored in favor of `default_ttl`.
-- The TTL override itself is now always carried into the daemon's stored
-  partial clone. It previously survived only when the override's field
-  happened to also be listed in `value_fields`, which nothing documents
-  and no scenario configuring `value_fields` for an unrelated reason would
-  think to do — so the fix above had nothing to read for most callers
-  until this one landed too.
-- `iso8583.unknown_tags`, once preserved, is now actually reachable through
-  `Get("iso8583.unknown_tags")` (and coatcheck's `key_fields`/
-  `value_fields`, which resolve through the same helper). It was stored as
-  a flat key containing a literal dot, which every dotted-path reader in
-  the codebase resolves as nested maps, not a flat string — so the lookup
-  a downstream gear would actually make could never find it.
-- `Secret`, `BootstrapSecret` and `AuthToken` are never serialized
-  (`json:"-"`, and explicitly `cbor:"-"` alongside it) anywhere they appear
-  in a registry record or config struct — protecting every API handler and
-  wire payload that touches one, present or future, rather than each call
-  site remembering to redact it.
-- All secret comparisons (API token, re-registration bootstrap secret,
-  heartbeat secret) go through one constant-time helper
-  (`security.SecretsEqual`), closing a timing side-channel that a
-  byte-by-byte `==` comparison leaves open. It started as three
-  independent, identical copies of the same function across three
-  packages; consolidated into one shared implementation so a future fix
-  or audit only has one place to look.
-- A fresh registration now issues a unique, `crypto/rand`-generated secret
-  instead of persisting the caller's bootstrap secret as the new identity's
-  own secret; every Zero-Config Rack sharing the same default bootstrap
-  secret could otherwise let a second caller adopt an already-enrolled
-  name later.
-- The enrollment reply topic is now built from a sanitized name and nonce
-  on both the success and denial paths, closing a subject-injection path a
-  `.` or a NATS wildcard in either field used to open.
-- An undecodable or otherwise invalid message on the bus is now explicitly
-  terminated (`Term`) instead of acked; it never redelivered either way, but
-  it no longer looks identical to a message a handler actually processed.
-- The OTel trace context is now injected before a message is serialized, so
-  it actually reaches the wire; it used to be injected after serialization
-  and was silently dropped.
-- A gear emitting the same message to more than one port, or retrying an
-  emission with the message it still holds, no longer races on it: the
-  message is cloned before its `FluxID` is set and a hop appended. The clone
-  covers `Path` only — `Data` and `Metadata` are not deep-copied and can
-  still be mutated by a concurrent emission sharing the original message.
-- Telemetry dials for the deferred telemetry bus connections now carry
-  the same TLS posture (`insecure_skip_verify`) as the main bus dial;
-  they previously carried `root_ca_file` only.
-- Telemetry: a bad row no longer aborts the rest of its batch; a
-  nil-entity metric is now logged instead of dropped silently; `Stop()`
-  flushes once, guarded against being called twice.
-- `pkg/store/duckdb`: `Migrate()` is now safe under concurrent access
-  (in-process and cross-process); `FlushTelemetry`/`FlushArchiverBuffer`
-  use bound query parameters instead of formatting values into SQL text.
-
+- **Coatcheck TTLs and tag lookup.** The per-message TTL override (`Metadata["coatcheck.ttl"]`) applies regardless of `include_values`. The override always reaches the daemon's stored partial clone. Coatcheck entries expire by their own resolved TTL (override, else `default_ttl`, capped at `max_ttl`), not by bucket `max_ttl`. `iso8583.unknown_tags` resolves through `Get("iso8583.unknown_tags")` and coatcheck `key_fields`/`value_fields`.
+- **Telemetry and storage.** Deferred telemetry dials carry the main dial's TLS posture (`insecure_skip_verify`). A bad telemetry row no longer aborts its batch. Nil-entity metrics are logged, not silently dropped. `pkg/store/duckdb` `Migrate()` is safe concurrently in-process and cross-process. `FlushTelemetry`/`FlushArchiverBuffer` use bound parameters, not formatted SQL. Concurrent spec imports take `index.lock` on `index.json`, merge into on-disk `index.json` and replace it atomically.
+- **Provisioning and activation answers.** Mixer-provisioned KV buckets (currently only `wasm_catalog`) honor `snake.kv_max_bytes`, `snake.kv_max_value_size` and `snake.kv_ttl` (defaults 1 GiB / 1 MiB / no expiry). `archiver_buffer` now flushes to Parquet under `<data_dir>/messages/`. Old unflushed rows appear once on first start. Scenario activation with no target Rack now answers `202 Accepted`, not `500`.
+- **Small hardening.** `io_tcp` accepts the largest message its framing allows instead of failing past 64 KiB. A fresh registration issues a unique random secret, and the enrollment reply topic is sanitized. An undecodable message on the bus is explicitly terminated. OTel trace context is injected before serialization. A standalone security regression suite covers auth and secret redaction, and mTLS client-cert verification gets config surface (`snake.tls_ca_file`, `snake.tls_verify`).
 ## [v0.11.0] - 2026-09-24 {#v0110}
 
-**Before upgrading.** Four changes alter what a running deployment does, and one of
-them cannot be undone by installing the old binary.
+**Before upgrading.** Four changes alter what a running deployment does, and one
+cannot be undone by installing the old binary.
 
 - **The Mixer's message store is encrypted on the first start of this version, and
   an older Mixer cannot read it.** Copy the `snake` directory of the Mixer's store
@@ -1120,184 +320,43 @@ them cannot be undone by installing the old binary.
   print the derived key with `fluxrig keys store-key` and keep it as
   `snake.store_old_key_file`. To use a key of your own, set `snake.store_key_file`.
 - **The bus now keeps a message for 24 hours and a stream up to 1 GiB**
-  (`snake.stream_max_age`, `snake.stream_max_bytes`). It had no limit. Raise them if a
-  consumer needs older messages.
+  (`snake.stream_max_age`, `snake.stream_max_bytes`). It had no limit. Raise them if
+  a consumer needs older messages.
 - **A wire inside one Rack is delivered through memory, at most once.** A message
   still queued when the Rack process ends is lost, where the bus stored it. Ask for
   `lane: "guaranteed"` on a wire that needs the message stored. An emission that no
   wire consumes is no longer published to the bus, so anything outside the scenario
   that listened for it on the bus stops receiving it.
-- **The `io_tcp` server gear and the Bento input gear no longer write the payload of a
-  message to the log at INFO.** A procedure that read card data or payloads from those
-  logs stops finding them. TRACE writes it with card numbers masked.
+- **The `io_tcp` server gear and the Bento input gear no longer write the payload
+  of a message to the log at INFO.** A procedure that read card data or payloads
+  from those logs stops finding them. TRACE writes it with card numbers masked.
 - **A message the `io_tcp` server gear cannot route unambiguously is now refused
   instead of guessed at or silently queued.** A message naming a `conn.id` whose
   connection has disconnected used to be queued for whoever connected next, which
-  could hand it to the wrong client; it now returns an error. A message naming no
+  could hand it to the wrong client. It now returns an error. A message naming no
   `conn.id` while several connections are active used to go to "the first" one,
-  arbitrarily; it now returns an error too. A message naming none with exactly one
+  arbitrarily. It now returns an error too. A message naming none with exactly one
   connection active, or none at all, is unaffected.
 - **`Activate` now fails when a scenario's deploy pins reach no Rack at all**, not
-  only when one names a Rack that was never enrolled. A `deploy:` pin not listed
+  only when one names a Rack that was never enrolled. A `deploy` pin not listed
   under the scenario's own `racks:` section used to compute zero push targets and
-  report success anyway; the scenario stays the Mixer's active one either way, and
-  a Rack that enrolls afterwards still receives it.
+  report success anyway, while the scenario stays the Mixer's active one either
+  way, and a Rack that enrolls afterwards still receives it.
 - **The simulator control endpoints (`POST /api/v1/control/sim/{start,stop,rate,reset}`)
   now answer 503, naming the gear, when nothing acknowledges the command**, instead
   of 200 as soon as NATS accepted the publish. `api.control_confirm_timeout`
-  (default `2s`) bounds how long it waits.
+  (default `2s`) bounds how long it waits for a gear acknowledgement.
 
 ### Added
-- `gears.RegisterExtension`: a module outside this repository adds gears to the
-  gear factory. Its binary registers them before the factory is built, and the
-  engine never imports that module. The Mixer command line moved to
-  `cmd/fluxrig-mixer/mixercmd`, so another module can build a Mixer whose gear
-  catalog lists those gears too.
-- The Robot runner takes a suite directory given as an absolute path, and
-  `FLUXRIG_BIN_DIR` points the suites at another set of binaries. The e2e helpers
-  (`test/e2e/utils/e2e_utils.sh`) honor `FLUXRIG_BIN_DIR` too. A suite or an e2e test
-  kept in another repository runs on this tooling and exercises the binaries built
-  there.
-- A Rack keeps its own copy of the last scenario it applied, and resumes it at
-  start without waiting for the Mixer to send it again (`base.scenario_file`,
-  `scenario.flux` beside its passport, mode `0600`; empty keeps no copy). When the
-  Mixer then sends the same scenario the gears keep running instead of
-  restarting. A copy projected for another Rack is ignored. A Rack that starts
-  with the bus unreachable starts it on its own when none of its wires uses the
-  bus, and keeps a scenario that does waiting for the bus, whole, saying so in its
-  log.
-
-- **Wires have a lane.** A wire says `lane: "hot"` or `lane: "guaranteed"`. A hot
-  wire carries its messages through the Rack's memory: nothing is stored and
-  nothing reaches the Mixer. A guaranteed wire goes over the bus, which stores each
-  message before the gear is told it was accepted. A wire that names none is hot
-  when both gears run on one Rack and guaranteed between Racks. A hot wire between
-  Racks is rejected at import. A Rack now keeps running the flows that stay inside
-  it while the Mixer is away. `rack.lane_queue_size` (1024) and
-  `rack.lane_send_timeout` (5s) bound each hot wire, and a graceful stop delivers
-  what is queued.
-- **The Mixer encrypts its message store at rest.** On by default, with a key
-  derived from the cluster key, or with a key file the operator provides
-  (`snake.store_encryption`, `store_cipher`, `store_key_file`, `store_old_key_file`).
-  It covers every message, stream and key-value bucket of the bus. An existing store
-  is converted on the first start with no message lost, a store that was encrypted
-  does not open without its key, and `fluxrig keys store-key` prints the derived key
-  for a rotation. A copy of the store directory or a backup no longer shows a
-  message. The Mixer, and a client of the bus, still see clear data.
-- `snake.stream_max_age` (24h) and `snake.stream_max_bytes` (1 GiB) bound the
-  streams of the bus, which had no limit.
-- A log payload is masked at TRACE: card numbers written as digits keep their first
-  six and last four digits.
-
-- **A Rack starts without the Mixer.** With a Passport and a saved scenario whose
-  wires all stay inside the Rack, it runs the scenario on its own and serves
-  traffic. When the Mixer returns the Rack joins it without stopping the gears: a
-  client that was connected stays connected, and the gears are not started again.
-  Scenarios that use the bus wait for it. Until it is bound, the gears'
-  control plane carries commands in memory between the gears of the Rack (a link
-  that goes down, a connection to close), and once the Rack has joined it also
-  carries the Mixer's commands to gears that were already running. A Manager can
-  change the bus under its running gears (`Manager.SetBus`).
-- `io_tcp` gains `max_buffered_messages` (default `1000`): the cap on outbound
-  messages queued when nothing is connected yet, or a message names no `conn.id`.
-  It was an unconfigurable, hardcoded 1000 before. The oldest is dropped past the
-  cap, now counted on `flux.gear.messages_dropped`.
-- `api.control_confirm_timeout` (default `2s`): how long a simulator control
-  command waits for a gear to acknowledge receiving it before the request answers
-  that nobody is listening.
-
-### Changed
-- **A wire inside one Rack no longer goes through the bus by default.** It goes
-  through memory, delivered at most once and in order: a message still queued when
-  the Rack process ends is lost, where the bus stored it. Nothing of a hot wire is
-  stored, so a card number on one is no longer written to the Mixer's disk. A
-  scenario that needs the message stored asks for `lane: "guaranteed"` on that wire.
-  An emission that no wire consumes is dropped and no longer published to the bus.
-- The `io_tcp` server gear and the Bento input gear no longer write the payload of
-  each message to the log at INFO, and no gear writes it at DEBUG. Those logs were
-  shipped to the Mixer and kept there.
+- **Wires have a lane.** A wire says `lane: "hot"` or `lane: "guaranteed"`. A hot wire inside one Rack goes through memory, delivered at most once and in order. Nothing on a hot wire is stored or reaches the bus. A guaranteed wire goes over the bus, which stores each message before the gear is told it was accepted. A wire naming no lane is hot when both gears run on one Rack and guaranteed between Racks. A hot wire between Racks is rejected at import. A card number on a hot wire is never written to the Mixer's disk. An emission that no wire consumes is dropped instead of published to the bus. `rack.lane_queue_size` (1024) and `rack.lane_send_timeout` (5s) bound each hot wire. A graceful stop delivers what is queued.
+- **The Mixer encrypts its message store at rest.** It is on by default, with a key derived from the cluster key or a key file the operator provides (`snake.store_encryption`, `store_cipher`, `store_key_file`, `store_old_key_file`). It covers every message, stream and key-value bucket of the bus. An existing store is converted on the first start with no message lost. A store that was encrypted does not open without its key. `fluxrig keys store-key` prints the derived key for a rotation. The copy of the store directory or a backup no longer shows a message. The Mixer, and a client of the bus, still see clear data. `snake.stream_max_age` (24h) and `snake.stream_max_bytes` (1 GiB) bound the streams of the bus, which had no limit.
+- **A Rack starts without the Mixer.** It keeps its own copy of the last scenario it applied (`base.scenario_file`, `scenario.flux` beside its passport, mode `0600`. Empty keeps no copy). With a Passport and a saved scenario whose wires all stay inside the Rack, it runs the scenario on its own and serves traffic. When the Mixer returns, the Rack joins it without stopping the gears. A client that was connected stays connected. Scenarios that use the bus wait for the bus, whole, saying so in the log. Until the Rack is bound, the control plane carries commands in memory between the gears of the Rack. Once joined, it also carries the Mixer's commands to gears that were already running. A Manager can change the bus under its running gears. A Rack with a passport gives the bus `snake.offline_start_timeout` (3s by default) and then runs offline, instead of waiting out the whole retry schedule (about 37 seconds). `0s` restores the unbounded retry. It probes the bus every `snake.offline_retry_interval` (5s by default) and goes online when the bus answers. `0s` turns the probe off. A Rack without a passport keeps the full `snake.initial_retry_*` schedule.
+- `gears.RegisterExtension` lets a module outside this repository add gears to the gear factory. The engine never imports that module. The Mixer command line moved to `cmd/fluxrig-mixer/mixercmd`. The Robot runner takes a suite directory given as an absolute path. `FLUXRIG_BIN_DIR` points the suites at another set of binaries. The e2e helpers (`test/e2e/utils/e2e_utils.sh`) honor `FLUXRIG_BIN_DIR`. The `io_tcp` server gear and the Bento input gear no longer write the payload of each message to the log at INFO. No gear writes it at DEBUG. At TRACE, card numbers written as digits keep their first six and last four digits. `io_tcp` gains `max_buffered_messages` (default `1000`). It caps outbound messages queued when nothing is connected, or a message names no `conn.id`. The oldest is dropped past the cap, now counted on `flux.gear.messages_dropped`. `api.control_confirm_timeout` (default `2s`) bounds how long a simulator control command waits for a gear acknowledgement.
 
 ### Fixed
-- The spec loader reads `format.layout` of a date or time field (`MMDD`, `hhmmss`,
-  `MMDDhhmmss`, `YYMM`). The reference spec declared them and the loader dropped them,
-  so nothing that generates traffic could write DE 14 as an expiry.
-- Documentation said a Rack keeps processing while the Mixer is unreachable, and
-  that a silent Mixer does not stop traffic. Gears exchange their messages over
-  the bus embedded in the Mixer, wires inside one Rack included, so while the
-  Mixer is away a running Rack stays up and reconnects by itself but what its
-  gears emit fails. The operations, deployment, architecture, security, data,
-  observability and conductor pages, the payment switch tutorial and the README
-  now describe what a Rack does in each case, and list isolated operation as
-  roadmap. The pages also said a Rack embeds NATS JetStream (it connects to the
-  Mixer's), that a scenario that fails to apply rolls back to the previous one
-  (it stops the gears it started), and that every signal a Rack handles goes
-  through a write-ahead log (only its logs do).
-- Decoder gear (`codec_iso8583`) nil-pointer panics on composite fields:
-  nil guards on `GetField()`, `GetSubfields()`, `Bitmap()` and subfields,
-  plus per-subfield panic recovery.
-- A Rack holding a passport no longer waits out the whole bus retry schedule
-  (about 37 seconds) before starting offline. The first connection retry, added
-  for a bus that is not accepting connections yet, applied to every Rack alike.
-  A Rack with a passport now gives the bus `snake.offline_start_timeout` (3s by
-  default) and then runs offline; a Rack without one keeps the full
-  `snake.initial_retry_*` schedule. `0s` restores the unbounded retry.
-- Activating a scenario that deploys to a Rack that is not enrolled and active
-  answers HTTP 409 with the Rack's name, where it answered 500. The scenario
-  stays imported, and activates once the Rack enrolls. Any other activation
-  failure remains a 500.
-- A Rack that started offline now finds the Mixer when it comes back. It probes
-  the bus every `snake.offline_retry_interval` (5s by default) and, once the bus
-  answers, restarts its session and goes online: hello, passport, telemetry and
-  scenario as on any start. Before, it stayed offline until it was restarted by
-  hand. `0s` turns the probe off.
-- `snake.initial_retry_wait`, `snake.offline_start_timeout`, `snake.offline_retry_interval`
-  and `rack.lane_send_timeout` discarded a parse error and silently became zero, where
-  their six sibling settings already failed fast on a typo. `"0s"`, their documented
-  way to disable the bound, still parses without error.
-- **`codec_iso8583`: a panic anywhere in `decode()` after `Unpack` succeeded read
-  as a successful, empty decode.** Only a panic inside `Unpack` itself was turned
-  into an error; the field-extraction loop after it (bitmap iteration, composite
-  subfields) was guarded by a recover that only logged, so the message reached
-  `Process()` looking cleanly decoded, with an empty MTI and no fields.
-- **`coatcheck`: restoring a previously-vaulted field into a message whose nested
-  data had crossed the bus (CBOR-shaped) silently did nothing.** The merge built a
-  normalized copy of the nested map, merged the restored value into that copy, and
-  never wrote the copy back onto the live message.
-- **`iso8583-tool decode` had no panic recovery around `Unpack`**, unlike the gear
-  it mirrors: a malformed payload crashed the process instead of reporting a clean
-  error the way every other failure in the tool already does.
-- A data race on `RegisterEntity`'s read of `autoAdopt`, racing `SetAutoAdopt`.
-- Mixer startup with a pinned scenario logged a false "Failed to activate startup
-  scenario" warning on every normal cold start, since no Rack has enrolled yet at
-  that point by definition. It now logs at Info that the scenario is active and
-  will reach Racks as they enroll; any other activation failure still warns.
-- Deploy targets naming a Rack **group** now get a distinct error
-  ("cannot be matched against active Racks yet") instead of the generic "unknown
-  or inactive target": nothing in the registry lets a live Rack carry labels yet,
-  so a group can never be resolved today, and the old message wrongly implied
-  enrolling a Rack would fix it.
-- The `io_tcp` server gear's outbound message buffer now delivers its whole
-  backlog to a newly-connected client, in the order it was queued, instead of one
-  message per connection with the rest stranded; a write failure partway through
-  requeues what was not sent instead of losing it.
-- `Unsubscribe` on a hot-lane subscription could block forever if the gear's
-  handler never returned, deadlocking every later scenario apply or shutdown on
-  that Rack. It now gives up after a bounded wait and logs, rather than hanging.
-- The hot lane stopped delivering to every subscriber of a subject as soon as one
-  of them failed (a full or stuck queue). A stuck subscriber's failure is still
-  reported, but only after every other subscriber has had its turn.
-- A Rack's initial NATS connection retry ignored a shutdown signal, so a SIGTERM
-  during that retry (NATS down at startup) was not observed until the whole retry
-  schedule elapsed (about 37s by default, longer with a configured
-  `snake.initial_retry_timeout`).
-- `io_tcp` client, `read_responses: false`: a peer that closed or reset the
-  connection was never noticed, so the reconnect logic never ran again until the
-  gear was stopped by hand.
-- Updating an existing JetStream stream never cleared `snake.stream_max_bytes`
-  back to unlimited when set to `0`, unlike `snake.stream_max_age`, which already
-  did.
-
-
+- The `io_tcp` server gear's outbound buffer now delivers its whole backlog to a newly-connected client, in the order it was queued. A write failure partway through requeues what was not sent instead of losing it. The hot lane now delivers to every subscriber even when one subscriber's queue is full or stuck. `Unsubscribe` on a hot-lane subscription gives up after a bounded wait and logs, instead of blocking forever. The `io_tcp` client with `read_responses: false` now notices a peer close or reset and reconnects.
+- Activating a scenario that deploys to a Rack that is not enrolled and active answers HTTP 409 with the Rack's name, where it answered 500. The scenario stays imported, and activates once the Rack enrolls. Any other activation failure remains a 500. Deploy targets naming a Rack **group** now get a distinct error ("cannot be matched against active Racks yet"). Mixer startup with a pinned scenario no longer logs a false "Failed to activate startup scenario" warning on a normal cold start.
+- The spec loader reads `format.layout` of a date or time field (`MMDD`, `hhmmss`, `MMDDhhmmss`, `YYMM`). The `codec_iso8583` decoder nil-pointer panics on composite fields are guarded: nil guards on `GetField()`, `GetSubfields()`, `Bitmap()` and subfields, plus per-subfield panic recovery. A panic anywhere in `decode()` after `Unpack` succeeded is now an error instead of a successful, empty decode. `coatcheck` restoring a vaulted field into a message whose nested data crossed the bus now writes the merged value back onto the live message. `iso8583-tool decode` recovers around `Unpack` and reports a clean error. The data race on `RegisterEntity`'s read of `autoAdopt` is fixed.
 ## [v0.10.0] - 2026-09-07 {#v0100}
 
 The semantic layer stops being documentation: a spec could state its rules and
@@ -1308,26 +367,26 @@ about a spec declaring what it is. Every spec must carry `spec.id` and
 `spec.version`, and every spec must carry a `wire` block saying where its wire
 layer comes from. A spec missing either is refused at boot, with a message naming
 it, never per transaction. Every spec shipped in this repository is already in
-that shape; both entries under **Changed** say what one that is not needs. New
+that shape. Both entries under **Changed** say what one that is not needs. New
 behaviour is off by default: `validation` starts at `off`, so a message accepted
 yesterday is not rejected today because the code was upgraded.
 
 ### Added
 
-- **The spec's rules can be enforced on traffic.** `codec_iso8583` gains `validation`: `off` (default), `warn` or `enforce`. Per-MTI field usage, the conditions that decide whether a rule applies, closed value sets and cross-field `checks` are answered against every message the codec decodes or encodes. A rejection follows `on_error`, exactly as a decode failure does; violations travel on the message as `codec.violations` and are counted on `flux.iso8583.violations` by severity, kind and MTI.
+- **The spec's rules can be enforced on traffic.** `codec_iso8583` gains `validation`: `off` (default), `warn` or `enforce`. Per-MTI field usage, the conditions that decide whether a rule applies, closed value sets and cross-field `checks` are answered against every message the codec decodes or encodes. A rejection follows `on_error`, exactly as a decode failure does. Violations travel on the message as `codec.violations` and are counted on `flux.iso8583.violations` by severity, kind and MTI.
   - The default is `off` deliberately: a message accepted yesterday must not be rejected today because the code was upgraded. `warn` is how you find out whether your spec matches your traffic before enforcing it.
 - **A spec can state when a rule applies, and what a message must satisfy.** Fields carry a per-MTI matrix (`usage`, `when`, `values_ref`) and a spec carries `checks`, written in a total, side-effect-free expression language over the message being validated.
   - A `check` carries a severity: `reject` fails the message, `warn` records it and lets it through, which is what makes a rule deployable to a live fleet before it is enforced on one.
   - An element compares the way its `format.kind` says it does. `amount`, `date`, `time`, `datetime` and the new `numeric` kind compare as numbers on every operator, so a rule can write `field(4) == 1000` rather than the element's own zero padding. Every other kind compares as the characters it carries, which is what a response code needs: `"00"` is not `"0"`. `pan` is deliberately excluded, because a leading zero makes it a different card.
-- **`fluxrig spec doc` renders the protocol reference from the spec.** The Mixer serves it too, at `GET /api/v1/specs/{name}/{tag}/doc`, and every entry in the spec listing carries the path to its own. Markdown for a repository or a docs site, HTML for a page that is read, printed or mailed. The HTML is self-contained: no scripts, stylesheets or fonts are fetched, so it opens offline. `--scope public` omits every field marked `scope: private` and states how many it withheld; `--scope complete` is the internal view. The per-message tables are derived on every render from the rules stored on the fields, so the two cannot drift.
+- **`fluxrig spec doc` renders the protocol reference from the spec.** The Mixer serves it too, at `GET /api/v1/specs/{name}/{tag}/doc`, and every entry in the spec listing carries the path to its own. Markdown for a repository or a docs site, HTML for a page that is read, printed or mailed. The HTML is self-contained: no scripts, stylesheets or fonts are fetched, so it opens offline. `--scope public` omits every field marked `scope: private` and states how many it withheld. `--scope complete` is the internal view. The per-message tables are derived on every render from the rules stored on the fields, so the two cannot drift.
 - **`format.kind: numeric`.** A value that is a number rather than a code (a trace number, a sequence, a count), which had no way to be declared.
-- **A stored spec's versions can be listed.** `fluxrig spec history <name>` and `GET /api/v1/specs/{name}` return every version of one spec, newest first by version rather than by arrival. `fluxrig spec list` and the `/specs` listing now carry when each version was filed, its size, the document's title and which version `latest` reaches; `--json` on both.
+- **A stored spec's versions can be listed.** `fluxrig spec history <name>` and `GET /api/v1/specs/{name}` return every version of one spec, newest first by version rather than by arrival. `fluxrig spec list` and the `/specs` listing now carry when each version was filed, its size, the document's title and which version `latest` reaches. `--json` on both.
 
 ### Changed
 
-- **BREAKING: a spec declares where its wire layer comes from.** Every spec now carries a `wire` block: `source` names a Moov base (`moov:<name>`) or a wire document beside the spec, `fields` states what the dialect changes, and each is valid alone. Specs in the legacy vocabulary (`meta:` with a top-level `fields:` fusing both layers, `llvar_n`-style type tokens) no longer load. Every spec shipped in this repository is already in the new shape; the [SDL reference](https://fluxrig.org/docs/reference/protocol/iso8583) describes what a spec that is not needs.
-- **BREAKING: a spec must declare `spec.id` and `spec.version`.** The schema has required them all along and the loader never read them, so a spec with no version at all loaded clean and its traffic carried a content hash that says which *file* ran and not which *contract*. A spec missing either is now refused at load: at boot, with a message naming the spec, never per transaction. Every spec shipped in this repository already declares both; a spec that does not needs the two fields added before upgrading.
-- **`codec_iso8583` manifest: `on_error` is documented as defaulting to `drop`.** It has always defaulted to `drop`; the manifest said `reject`, so an operator reading the published contract configured for one behaviour and got the other.
+- **BREAKING: a spec declares where its wire layer comes from.** Every spec now carries a `wire` block: `source` names a Moov base (`moov:<name>`) or a wire document beside the spec, `fields` states what the dialect changes, and each is valid alone. Specs in the legacy vocabulary (`meta:` with a top-level `fields:` fusing both layers, `llvar_n`-style type tokens) no longer load. Every spec shipped in this repository is already in the new shape. The [SDL reference](https://fluxrig.org/docs/reference/protocol/iso8583) describes what a spec that is not needs.
+- **BREAKING: a spec must declare `spec.id` and `spec.version`.** The schema has required them all along and the loader never read them, so a spec with no version at all loaded clean and its traffic carried a content hash that says which *file* ran and not which *contract*. A spec missing either is now refused at load: at boot, with a message naming the spec, never per transaction. Every spec shipped in this repository already declares both. A spec that does not needs the two fields added before upgrading.
+- **`codec_iso8583` manifest: `on_error` is documented as defaulting to `drop`.** It has always defaulted to `drop`. The manifest said `reject`, so an operator reading the published contract configured for one behaviour and got the other.
 
 ### Fixed
 
@@ -1338,8 +397,8 @@ yesterday is not rejected today because the code was upgraded.
 
 ### Added
 
-- **`coatcheck`: `key_normalize`.** Key field values are canonicalized before they are joined, so the two sides of an exchange agree on a key even when they render the same value differently. `trim` (default) removes surrounding whitespace; `numeric` also drops leading zeros, for fixed-width fields decoded against specs that declare different widths.
-- **`coatcheck`: `await_store`.** A store can forward the message without waiting for the write. The default stays blocking, which is right when the reply depends on the entry; set it false when the entry only enriches a record and holding a message for a control-plane write costs more than losing one.
+- **`coatcheck`: `key_normalize`.** Key field values are canonicalized before they are joined, so the two sides of an exchange agree on a key even when they render the same value differently. `trim` (default) removes surrounding whitespace. `numeric` also drops leading zeros, for fixed-width fields decoded against specs that declare different widths.
+- **`coatcheck`: `await_store`.** A store can forward the message without waiting for the write. The default stays blocking, which is right when the reply depends on the entry. Set it false when the entry only enriches a record and holding a message for a control-plane write costs more than losing one.
 - **`codec_iso8583`: `iso8583.mti_class`.** A decode now also exposes the leading MTI digits, which a request and its reply share. Correlation keys can be scoped by message class, so an authorization and a reversal reusing a trace number are no longer indistinguishable.
 - **Scenarios can name what a diagram cannot derive.** A Rack's `role` label reaches its description, and two gear labels, `peer` and `peer_played_by`, say who is on the far side of a socket and whether anything is standing in for it.
 - **`iso8583-tool`: `-scheme-move`.** The host simulator can report a request field back in another, so a host receiving a private field can show which value arrived. It reports into a different field deliberately, and pads to the destination's declared width.
@@ -1378,25 +437,17 @@ The EMV release: fluxrig parses BER-TLV composite fields, and carries the tags i
 The payment-switch release: the **Conductor** transaction switch, a manifest system that makes every gear self-describing, and native TLS on the ISO 8583 I/O path.
 
 ### Added
-- **Conductor gear (transaction switch)**: routes each request across a destination tree of strategy nodes (`failover`, `round_robin`, `least_loaded`) whose leaves are output ports, correlates the reply under a ticket, and surfaces timeouts on a dedicated `error` port. Availability sensing binds each local destination to its uplink link-state. Validated end-to-end by the `payment_switch` e2e and the Conductor stress and chaos Robot suites.
-- **Valet correlation engine**: the local-by-default ticket store behind the Conductor's reply matching, with per-ticket TTLs and idempotent redemption.
-- **Cross-Conductor handoff**: a request can exit one Conductor and its reply return through another, routed by an in-band origin stamp, so active/active multi-region topologies need no shared session state.
-- **Named multi-port gear I/O**: gears declare multiple named input/output ports; the Bento gear honors every declared output port and fails loudly on an ambiguous multi-output config.
-- **Gear manifests**: every gear publishes a manifest (identity, ports, config JSON Schema, terminus). The runtime validates a gear's config against its schema at activation, the Mixer API serves the manifest catalog, and `fluxrig gears doc` generates the gear reference documentation from it.
-- **Native TLS / mTLS on `io_iso8583`**, plus connection link-state signals (`conn.up` / `conn.down`) on the control plane that drive Conductor availability sensing.
-- **`fluxrig scenario viz`**: generates an interactive LikeC4 topology model (zones, racks, gears, sockets, the Snake) from a scenario file.
-- **Lean Rack build**: `-tags nobento` compiles a Rack without the Bento gear for minimal-footprint deployments.
+- **Conductor gear (transaction switch)**: routes each request across a destination tree of strategy nodes (`failover`, `round_robin`, `least_loaded`) whose leaves are output ports. It correlates the reply under a ticket. It surfaces timeouts on a dedicated `error` port. Availability sensing binds each local destination to its uplink link-state. The ticket store behind the reply matching is local by default, with per-ticket TTLs and idempotent redemption. A request can exit one Conductor and its reply return through another, routed by an in-band origin stamp. Validated end-to-end by the `payment-switch` e2e and the Conductor stress and chaos Robot suites.
+- **Gear manifests**: every gear publishes a manifest (identity, ports, config JSON Schema, terminus). The runtime validates a gear's config against its schema at activation. The Mixer API serves the manifest catalog. `fluxrig gears doc` generates the gear reference documentation from it.
+- **Named multi-port gear I/O**: gears declare multiple named input/output ports. The Bento gear honors every declared output port and fails loudly on an ambiguous multi-output config. Native TLS / mTLS on `io_iso8583`. Connection link-state signals (`conn.up` / `conn.down`) on the control plane drive Conductor availability sensing.
+- **`fluxrig scenario viz`**: generates an interactive LikeC4 topology model (zones, racks, gears, sockets, the Snake) from a scenario file. `-tags nobento` compiles a Rack without the Bento gear for minimal-footprint deployments.
 
 ### Changed
 - **Port addressing**: port names are dot-free and wires address the fully-qualified `rack.gear.port`, so a wire endpoint is unambiguous across a multi-rack topology.
 
 ### Fixed
-- **Reply-correlation timeout under load**: JetStream deduplication is now keyed per subject, fixing a Conductor timeout where distinct requests collided on the dedup key.
-- **Rack stability**: panics on the gear `emit` path are recovered and nil emits dropped, so a misbehaving source gear can no longer crash the Rack.
-- **Conductor field resolution**: correlation, match, and park fields resolve as dotted paths (e.g. `iso8583.field.11`) consistently.
-- **Loud topology validation**: scenario topology inconsistencies now fail at load instead of surfacing later as runtime errors.
-- **Gear schema completeness**: the `io_tcp` and `bento` config schemas now declare every field the gears actually accept (previously undocumented options such as `io_tcp` delimiter framing and `bento` `log_level`).
-
+- **Reply-correlation timeout under load**: JetStream deduplication is now keyed per subject. Distinct requests no longer collide on the dedup key. Panics on the gear `emit` path are recovered and nil emits dropped. Correlation, match, and park fields resolve as dotted paths (e.g. `iso8583.field.11`) consistently.
+- **Loud topology validation**: scenario topology inconsistencies now fail at load instead of surfacing later as runtime errors. The `io_tcp` and `bento` config schemas declare every field the gears actually accept.
 ## Phase 3: open & flexible logic
 
 | Version | Date | Status | Summary |
@@ -1422,7 +473,7 @@ The payment-switch release: the **Conductor** transaction switch, a manifest sys
 
 ## [v0.6.0] - 2026-06-06 {#v060}
 ### Changed
-- Release metadata only. This tag contains no source changes relative to `v0.5.0`; the Wasm work intended for it was not merged and shipped in `v0.6.1` instead.
+- Release metadata only. This tag contains no source changes relative to `v0.5.0`. The Wasm work intended for it was not merged and shipped in `v0.6.1` instead.
 
 ## [v0.5.0] - 2026-05-07 {#v050}
 ### Changed
@@ -1480,7 +531,7 @@ The payment-switch release: the **Conductor** transaction switch, a manifest sys
 
 ## [v0.3.0] - 2026-01-08 {#v030}
 ### Added
-- **Bento Integration**: Native support for the `warpstreamlabs/bento` ecosystem, enabling the Bento connector ecosystem. The standard binary ships the Pure Logic and Local I/O sets; institutional connectors (Kafka, SQL, AWS) require a custom build.
+- **Bento Integration**: Native support for the `warpstreamlabs/bento` ecosystem, enabling the Bento connector ecosystem. The standard binary ships the Pure Logic and Local I/O sets. Institutional connectors (Kafka, SQL, AWS) require a custom build.
 - **Load Testing Suite**: Integrated `e2e_load` capabilities for stress testing.
 
 ## Phase 2: core runtime
@@ -1507,7 +558,8 @@ The payment-switch release: the **Conductor** transaction switch, a manifest sys
 - **Snake Protocol**: Secure tunneling implementation for Rack-to-Mixer connectivity.
 - **FluxMsg**: Canonical JSON schema for inter-gear communication.
 
-[Unreleased]: https://github.com/jaab-tech/fluxrig/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/jaab-tech/fluxrig/compare/v0.15.1...HEAD
+[v0.15.1]: https://github.com/jaab-tech/fluxrig/releases/tag/v0.15.1
 [v0.15.0]: https://github.com/jaab-tech/fluxrig/releases/tag/v0.15.0
 [v0.14.0]: https://github.com/jaab-tech/fluxrig/releases/tag/v0.14.0
 [v0.13.1]: https://github.com/jaab-tech/fluxrig/releases/tag/v0.13.1

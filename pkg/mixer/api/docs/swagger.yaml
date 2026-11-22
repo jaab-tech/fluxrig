@@ -351,6 +351,11 @@ definitions:
           enrolled Rack.
         example: 1s
         type: string
+      pushTimeout:
+        description: PushTimeout bounds the push of the active scenario that follows
+          an enrollment.
+        example: 10s
+        type: string
     type: object
   config.IngestConfig:
     properties:
