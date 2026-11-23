@@ -320,10 +320,13 @@ clean_dirs() {
     done
 }
 
-# Kill old processes
-kill_old_processes() {
-    pkill -f "bin/fluxrig" || true
-    sleep 1
+E2E_UTILS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Fail when one of this test's ports is taken. Never kill by port or by name:
+# a test stops the processes it started, by PID.
+# Usage: require_free_ports PORT...
+require_free_ports() {
+    bash "${E2E_UTILS_DIR}/require_free_ports.sh" "$@" || fail "A port this test needs is in use (see above)."
 }
 
 # Path Helper

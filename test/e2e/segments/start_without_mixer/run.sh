@@ -89,10 +89,8 @@ gateway_starts() {
     grep -a 'gear started.*gateway' "$RACK_STDOUT" | awk -F'|' '{print $1}' | sort -u | wc -l
 }
 
-# 0. This segment owns 8105/4305/9631 exclusively; clearing them is scoped
-# to those ports, never a blanket process-name kill.
-lsof -ti :${API_PORT} | xargs kill -9 2>/dev/null || true
-lsof -ti :$GATEWAY_PORT | xargs kill -9 2>/dev/null || true
+# 0. The ports of this segment must be free.
+require_free_ports "$API_PORT" "$GATEWAY_PORT"
 
 # 1. Enroll with the Mixer up, apply the scenario, and let the Rack keep its copy
 log_info "--- Phase 1: enroll and apply a scenario ---"

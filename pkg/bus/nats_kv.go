@@ -7,16 +7,31 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
 // natsKV implements the KeyValue interface using NATS JetStream KV.
 type natsKV struct {
-	js jetstream.JetStream
+	js  jetstream.JetStream
+	bus *NatsBus // how a followed bucket survives the loss of its consumer
 }
+
+// The headers and values by which a bucket record says what it is.
+const (
+	kvOperationHeader = "KV-Operation"
+	kvOperationDelete = "DEL"
+	kvOperationPurge  = "PURGE"
+	markerMaxAge      = "MaxAge"
+)
+
+// validKVKey is the key syntax of the NATS client, which checks it only in
+// its own calls. PutWithTTL publishes to the subject of the key itself.
+var validKVKey = regexp.MustCompile(`^[-/_=\.a-zA-Z0-9]+$`)
 
 func (k *natsKV) Put(ctx context.Context, bucket, key string, value []byte) (uint64, error) {
 	return k.PutWithTTL(ctx, bucket, key, value, 0)
@@ -36,28 +51,91 @@ func (k *natsKV) PutWithTTL(ctx context.Context, bucket, key string, value []byt
 		return kv.Put(ctx, key, value)
 	}
 
-	// Create is the only KV operation that carries a per-message TTL
-	// (jetstream.KeyTTL); Put and Update do not. Create succeeds when the key
-	// is absent or holds only a delete marker. A key a scenario re-parks is an
-	// existing live key, so Create returns ErrKeyExists and the value is
-	// updated with Put. The entry then keeps the TTL set when it was first
-	// stored, which is the same order of magnitude as the new one and never
-	// longer than the bucket ceiling.
-	//
-	// Consequence, deliberate and narrow: a re-park whose own TTL differs from
-	// the first park's keeps the ORIGINAL expiry, because Put cannot carry a
-	// new one. The two parks of one key almost always resolve the same TTL
-	// (same gear config, same resolveTTL inputs), so this is an edge case, not
-	// a correctness bug; it would matter only for a scenario that changes
-	// meta.coatcheck.ttl for a key already in flight.
-	rev, err := kv.Create(ctx, key, value, jetstream.KeyTTL(ttl))
-	if err == nil {
-		return rev, nil
+	// Of the client's KV calls only Create carries a TTL, and Create refuses
+	// a live key. A bucket keeps one record per key, so a Put over a live key
+	// replaces the record and its TTL with none. Publishing to the subject of
+	// the key is that same Put, with the TTL.
+	if !validKVKey.MatchString(key) || strings.HasPrefix(key, ".") || strings.HasSuffix(key, ".") {
+		return 0, fmt.Errorf("bus: put %s: %w", bucket, jetstream.ErrInvalidKey)
 	}
-	if errors.Is(err, jetstream.ErrKeyExists) {
-		return kv.Put(ctx, key, value)
+	msg := &nats.Msg{Subject: "$KV." + kv.Bucket() + "." + key, Data: value, Header: nats.Header{}}
+	ack, err := k.js.PublishMsg(ctx, msg, jetstream.WithMsgTTL(wholeSeconds(ttl)))
+	if err != nil {
+		return 0, fmt.Errorf("bus: put %s with a TTL: %w", bucket, err)
 	}
-	return 0, err
+	return ack.Sequence, nil
+}
+
+// wholeSeconds rounds a TTL up to what the server can count: it refuses less
+// than a second and drops any fraction of one.
+func wholeSeconds(ttl time.Duration) time.Duration {
+	whole := ttl.Truncate(time.Second)
+	if whole < ttl {
+		whole += time.Second
+	}
+	return whole
+}
+
+func (k *natsKV) PurgeRevision(ctx context.Context, bucket, key string, revision uint64) error {
+	if k.js == nil {
+		return errors.New("nats bus not connected")
+	}
+	kv, err := k.js.KeyValue(ctx, bucket)
+	if err != nil {
+		return fmt.Errorf("failed to get bucket %s: %w", bucket, err)
+	}
+	if err := kv.Purge(ctx, key, jetstream.LastRevision(revision)); err != nil {
+		return fmt.Errorf("bus: purge revision %d in %s: %w", revision, bucket, err)
+	}
+	return nil
+}
+
+func (k *natsKV) Follow(ctx context.Context, bucket string, handler func(KVRecord)) (Subscription, error) {
+	if k.js == nil || k.bus == nil {
+		return nil, errors.New("nats bus not connected")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("bus: follow %s: %w", bucket, err)
+	}
+	prefix := "$KV." + bucket + "."
+	n := k.bus
+	live := newLiveConsumer(k.js, n.noteRequest, "KV_"+bucket, "flux-kv", jetstream.ConsumerConfig{
+		FilterSubject:     prefix + ">",
+		AckPolicy:         jetstream.AckNonePolicy,
+		InactiveThreshold: n.inactiveThreshold,
+	}, n.retryWait, n.opTimeout, func(msg jetstream.Msg) bool {
+		rec := KVRecord{Key: strings.TrimPrefix(msg.Subject(), prefix), Value: msg.Data(), Op: recordOp(msg.Headers())}
+		if md, err := msg.Metadata(); err == nil {
+			rec.Revision = md.Sequence.Stream
+		}
+		handler(rec)
+		return true
+	})
+	live.maxMissed = n.missedHeartbeats
+	live.keep = n.keepConsumers
+	live.busClosed = n.closed
+	live.replay = true
+	if err := live.start(1); err != nil {
+		return nil, fmt.Errorf("bus: follow %s: %w", bucket, err)
+	}
+	return live, nil
+}
+
+func recordOp(h nats.Header) KVOp {
+	switch h.Get(kvOperationHeader) {
+	case kvOperationDelete:
+		return KVDeleted
+	case kvOperationPurge:
+		return KVPurged
+	}
+	switch h.Get(jetstream.MarkerReasonHeader) {
+	case "":
+		return KVPut
+	case markerMaxAge:
+		return KVExpired
+	default: // removed or purged by an operator
+		return KVPurged
+	}
 }
 
 func (k *natsKV) Get(ctx context.Context, bucket, key string) ([]byte, uint64, error) {

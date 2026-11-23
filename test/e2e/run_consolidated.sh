@@ -102,19 +102,9 @@ SEGMENTS=(
 )
 
 # 12_wasm_polyglot is NOT in SEGMENTS above and never shares a batch with
-# anything: its Robot suite's own setup calls force_cleanup_environment()
-# (test/robot/lib/keywords/process.py), which kills every fluxrig /
-# fluxrig-mixer / iso8583-tool process on the machine by exact name, plus a
-# hardcoded-port sweep (8090, 8583, among others) — the same class of
-# danger as `pkill -f "bin/fluxrig"`, just in the Robot/Python
-# infrastructure rather than bash. Confirmed by running it: two unrelated
-# segments' Mixers in the same batch shut down cleanly (a graceful
-# SIGTERM handled by their own signal handling, not a crash) at the exact
-# moment the wasm suite's setup ran. It needs its own dedicated batch, run
-# after every other segment has finished, not folded into the round-robin
-# above. Fixing force_cleanup_environment() itself (PID/port-scoped
-# instead of name-based) is out of scope here: it's shared by every Robot
-# suite, not owned by this consolidation.
+# anything: its Robot suite uses the suites' ports (8090 among them, which is
+# group_a's) and refuses to start while one of them is taken. It runs after
+# every other segment has finished.
 WASM_ENTRY=""
 if command -v zig >/dev/null 2>&1; then
     WASM_ENTRY="12_wasm_polyglot:$BASE_DIR/12_wasm_polyglot/run.sh"

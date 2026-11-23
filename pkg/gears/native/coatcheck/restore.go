@@ -26,7 +26,7 @@ func (r *RestoreLogic) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*flux
 
 	// 2. Fetch from KV
 	bucket := r.gear.config.Bucket
-	valBytes, _, err := r.gear.ctx.Bus().KV().Get(ctx, bucket, key)
+	valBytes, rev, err := r.gear.ctx.Bus().KV().Get(ctx, bucket, key)
 	if err != nil {
 		// Log error but check on_missing policy
 		return r.handleMissing(ctx, msg, key, err)
@@ -87,18 +87,27 @@ func (r *RestoreLogic) Process(ctx context.Context, msg *fluxmsg.FluxMsg) (*flux
 
 	r.gear.ctx.Logger().Debug("coat restored", "key", key, "restored_keys", fmt.Sprintf("%v", restoredKeys))
 
-	// 5. Cleanup?
-	// Do we delete the key after restore? "Claim Check" implies getting item back.
-	// But in some flows, we might want multiple restores (broadcast)?
-	// The specification doesn't specify "Delete on Restore".
-	// Usually Coat Check is one-time use.
-	// Let's assume one-time use requires an explicit "delete_on_restore" config?
-	// Default: Keep it until TTL (Safer for retries).
+	// 5. Cleanup. By default the entry stays until its TTL, for retries and
+	// for a second restore, and then it times out like one with no reply.
+	if r.gear.config.DeleteOnRestore {
+		go r.remove(context.WithoutCancel(ctx), key, rev)
+	}
 
 	if r.gear.emit != nil {
 		r.gear.emit(msg)
 	}
 	return nil, nil
+}
+
+// remove purges the revision that was restored, off the message's path: the
+// reply does not wait for the round trip. A key parked again since has a
+// newer revision and stays.
+func (r *RestoreLogic) remove(ctx context.Context, key string, revision uint64) {
+	ctx, cancel := context.WithTimeout(ctx, r.gear.config.StoreTimeout)
+	defer cancel()
+	if err := r.gear.ctx.Bus().KV().PurgeRevision(ctx, r.gear.config.Bucket, key, revision); err != nil {
+		r.gear.ctx.Logger().Warn("restored coat not removed", "key", key, "revision", revision, "error", err)
+	}
 }
 
 func (r *RestoreLogic) handleMissing(ctx context.Context, msg *fluxmsg.FluxMsg, key string, reason error) (*fluxmsg.FluxMsg, error) {

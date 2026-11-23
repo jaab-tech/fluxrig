@@ -46,57 +46,40 @@ class ProcessKeywords:
         return comp_home
 
     @keyword
-    def force_cleanup_environment(self):
+    def force_cleanup_environment(self, *suite_ports):
         """
-        Safely kills any lingering fluxrig binaries (mixer/rack) from previous runs.
-        Does NOT use 'pkill -f' to avoid killing the IDE/Agent.
+        Stops the fluxrig processes that this Robot run started and left
+        running, such as those of a suite whose teardown failed, then checks
+        that the suites' shared ports, and those given as arguments, are free.
+
+        Only children of this process are signalled. Never by name or by port
+        alone: the host can be shared, and another run's Mixer has both.
         """
-        targets = ["fluxrig", "fluxrig-mixer", "iso8583-tool"]
-        logger.info(f"Ensuring environment is clean (killing {targets})...")
-        
-        # 1. Kill by name
-        for name in targets:
-            try:
-                pids = [int(p) for p in subprocess.check_output(["pgrep", "-x", name]).decode().split()]
-                if not pids:
-                    continue
-                
-                logger.info(f"Terminating lingering {name} (PIDs: {pids})")
-                for pid in pids:
-                    try:
-                        os.kill(pid, signal.SIGTERM)
-                    except (ProcessLookupError, PermissionError):
-                        # Another tenant's process on a shared host: not ours
-                        # to signal, and the port-based pass below only touches
-                        # what listens on our ports.
-                        continue
+        pids = []
+        for name in ("fluxrig", "fluxrig-mixer", "iso8583-tool"):
+            found = subprocess.run(
+                ["pgrep", "-P", str(os.getpid()), "-x", name], capture_output=True, text=True
+            )
+            pids += [int(p) for p in found.stdout.split()]
 
-                # Wait for processes to exit
-                time.sleep(1.0)
-                
-                # Check if still alive and SIGKILL
+        if pids:
+            logger.info(f"Stopping what this run left running (PIDs: {pids})")
+            for sig in (signal.SIGTERM, signal.SIGKILL):
                 for pid in pids:
                     try:
-                        os.kill(pid, 0) # Check existence
-                        logger.info(f"Hygienic SIGKILL on {name} (PID: {pid})")
-                        os.kill(pid, signal.SIGKILL)
-                    except (ProcessLookupError, PermissionError):
+                        os.kill(pid, sig)
+                    except ProcessLookupError:
                         continue
-            except subprocess.CalledProcessError:
-                pass
+                if sig == signal.SIGTERM:
+                    time.sleep(1.0)
 
-        # 2. Kill by port
-        ports = [54321, 8583, 8090, 8590, 4222]
-        for port in ports:
-            try:
-                pids = [int(p) for p in subprocess.check_output(["lsof", "-ti", f":{port}"]).decode().split()]
-                for pid in pids:
-                    try:
-                        os.kill(pid, signal.SIGKILL)
-                    except (ProcessLookupError, PermissionError):
-                        continue
-            except subprocess.CalledProcessError:
-                pass
+        script = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "e2e", "utils", "require_free_ports.sh"
+        )
+        ports = ["4222", "8090", "8583", "8590", "54321"] + [str(p) for p in suite_ports]
+        check = subprocess.run(["bash", script] + ports, capture_output=True, text=True)
+        if check.returncode != 0:
+            raise AssertionError(check.stderr.strip())
 
     @keyword
     def setup_workspace(self, suite_path: str, output_dir: str = None):

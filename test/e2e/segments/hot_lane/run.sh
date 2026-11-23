@@ -115,9 +115,8 @@ wait_rack_active() {
     done
 }
 
-# 0. This segment owns 8104/4304/9711/9612 exclusively; clearing them is
-# scoped to those ports, never a blanket process-name kill.
-lsof -ti :${API_PORT} | xargs kill -9 2>/dev/null || true
+# 0. The ports of this segment must be free.
+require_free_ports "$API_PORT"
 
 # 1. Mixer and Rack
 "$(bin_dir)/fluxrig" keys gen-cluster -o "$WORK_DIR/mixer/data/cluster.key" > /dev/null

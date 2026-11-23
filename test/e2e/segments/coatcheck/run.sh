@@ -173,8 +173,10 @@ cleanup_all_quiet() {
     [[ -n "$RACK_PID" ]] && kill -9 $RACK_PID 2>/dev/null || true
     [[ -n "$MIXER_PID" ]] && kill -9 $MIXER_PID 2>/dev/null || true
 
-    # Final sweep of ports (quietly)
-    lsof -ti :$MIXER_API_PORT -ti :$SNAKE_PORT -ti :9180 -ti :9000 2>/dev/null | xargs kill -9 2>/dev/null || true
+    # The next case uses the same ports: return once these are gone.
+    for pid in $ECHO_PID $RACK_PID $MIXER_PID; do
+        wait "$pid" 2>/dev/null || true
+    done
     
     # ISOLATION HARDENING: Clean data directories between tests
     if [[ -d "$WORK_DIR" ]]; then
@@ -404,15 +406,8 @@ main() {
     # Setup workspace (creates /tmp/fluxrig/work_coatcheck_* and symlinks to ./work)
     setup_workspace "coatcheck" "$BASE_DIR"
     
-    # Cleanup old processes
-    # Cleanup old processes (Safe Mode)
-    log_info "Cleaning up old processes..."
-    
-    # Kill by port only (this segment's own ports — never by process name:
-    # "pkill fluxrig" matches every fluxrig process on the machine by bare
-    # name, which would kill other segments running concurrently).
-    lsof -ti :$MIXER_API_PORT -ti :$SNAKE_PORT -ti :9180 -ti :9000 2>/dev/null | xargs kill -9 2>/dev/null || true
-    sleep 1 # Allow graceful exit
+    # The ports of this segment must be free.
+    require_free_ports "$MIXER_API_PORT" "$SNAKE_PORT" 9180 9000
 
     # Build if needed
     if [[ ! -f "$ROOT_DIR/bin/fluxrig" ]]; then

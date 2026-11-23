@@ -67,7 +67,7 @@ func TestDaemonLogic_Lifecycle(t *testing.T) {
 	msg.Metadata["test"] = "daemon"
 	valBytes, _ := cbor.Marshal(msg)
 
-	g.daemon.scheduleExpiry("key-1", valBytes, func(m *fluxmsg.FluxMsg) {
+	g.daemon.scheduleExpiry("key-1", valBytes, 1, func(m *fluxmsg.FluxMsg) {
 		emitted <- m
 	})
 
@@ -81,7 +81,7 @@ func TestDaemonLogic_Lifecycle(t *testing.T) {
 	}
 
 	// Cancel Expiry
-	g.daemon.scheduleExpiry("key-2", valBytes, func(m *fluxmsg.FluxMsg) {})
+	g.daemon.scheduleExpiry("key-2", valBytes, 1, func(m *fluxmsg.FluxMsg) {})
 	g.daemon.cancelExpiry("key-2")
 
 	g.daemon.Stop()
@@ -121,7 +121,7 @@ func TestDaemonLogic_TTLOverrideHonoredWithoutIncludeValues(t *testing.T) {
 	valBytes, err := cbor.Marshal(msg)
 	require.NoError(t, err)
 
-	g.daemon.scheduleExpiry("key-override", valBytes, func(m *fluxmsg.FluxMsg) { emitted <- m })
+	g.daemon.scheduleExpiry("key-override", valBytes, 1, func(m *fluxmsg.FluxMsg) { emitted <- m })
 
 	select {
 	case <-emitted:

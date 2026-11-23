@@ -31,6 +31,16 @@ type KeyValue interface {
 	// Delete removes a key.
 	Delete(ctx context.Context, bucket, key string) error
 
+	// PurgeRevision removes a key if revision is still its latest one, and
+	// fails if it is not. Unlike the tombstone of Delete, what it leaves
+	// behind does not turn into a KVExpired record when it ages out.
+	PurgeRevision(ctx context.Context, bucket, key string, revision uint64) error
+
+	// Follow delivers the latest record of every key of a bucket, deletes
+	// and expiries included, and then each new one, in order. It survives
+	// the loss of its consumer.
+	Follow(ctx context.Context, bucket string, handler func(KVRecord)) (Subscription, error)
+
 	// Watch subscribes to updates on a bucket.
 	// Used by the Daemon Gear for "Watch & Schedule".
 	// The keys pattern can be a wildcard (e.g., ">" or "*").
@@ -44,6 +54,30 @@ type KeyValue interface {
 	// Used by the Daemon Gear for "Governance".
 	// storage: "file" or "memory".
 	EnsureBucket(ctx context.Context, bucket string, storage string, replicas int, ttl time.Duration) error
+}
+
+// KVOp says what a KVRecord did to its key.
+type KVOp int
+
+const (
+	// KVPut stored a value.
+	KVPut KVOp = iota
+	// KVDeleted is a tombstone of Delete. When it ages out of the bucket, the
+	// server follows it with a KVExpired that is not an expiry of a value.
+	KVDeleted
+	// KVPurged removed the key, and nothing follows it.
+	KVPurged
+	// KVExpired is the marker the server writes when the last record of a key
+	// ages out, by its own TTL or by the bucket's. It has no value.
+	KVExpired
+)
+
+// KVRecord is one record of a bucket.
+type KVRecord struct {
+	Key      string
+	Value    []byte
+	Revision uint64
+	Op       KVOp
 }
 
 // KVHandler is the callback for Watch updates.

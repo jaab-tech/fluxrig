@@ -15,10 +15,7 @@ set -u
 #
 # Runs on API port 8093 / Snake port 4224 (see
 # the port table in the internal e2e-consolidation design notes).
-# Cleanup here is PID-tracked only, never `pkill -f "bin/fluxrig"` (see the
-# same doc's "Constraint found during implementation" note) — this also
-# means `kill_old_processes` from e2e_utils.sh (itself a `pkill -f
-# "bin/fluxrig"`) is never called here.
+# Cleanup here is PID-tracked only: the segment stops what it started.
 #
 # 03_registry's original script stopped the Mixer twice: once purely to
 # release DuckDB's single-writer lock before reading the registry table
@@ -70,10 +67,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# 0. This segment owns 8093/4224 exclusively; clearing them is scoped to
-# those two ports, never a blanket process-name kill.
-lsof -ti :${API_PORT} | xargs kill -9 2>/dev/null || true
-lsof -ti :${SNAKE_PORT} | xargs kill -9 2>/dev/null || true
+# 0. The ports of this segment must be free.
+require_free_ports "$API_PORT" "$SNAKE_PORT"
 
 # FLUXRIG_E2E_SKIP_BUILD is set by run_consolidated.sh, which builds once
 # before launching every segment in parallel — concurrent `make build`

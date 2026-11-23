@@ -6,7 +6,6 @@ package coatcheck
 import (
 	"context"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
@@ -16,19 +15,32 @@ import (
 	"github.com/jaab-tech/fluxrig/pkg/fluxmsg"
 )
 
+// DaemonLogic sends one timeout event for each entry that it saw parked and
+// that expires.
+//
+// An entry has two clocks: the TTL that the server applies and the timer of
+// the daemon. Whichever ends first is the expiry. The timer runs for the
+// whole TTL from when the daemon saw the entry, so that a clock of the Rack
+// that differs from the server's cannot expire it early. For an entry that
+// was parked before the daemon started, the server's marker comes first.
 type DaemonLogic struct {
 	gear *CoatCheckGear
 	sub  bus.Subscription
 
-	mu     sync.Mutex
-	timers map[string]*KeyTimer
+	mu      sync.Mutex
+	timers  map[string]*KeyTimer
+	stopped bool
 }
 
 const RehydrationTimeout = 5 * time.Second
 
-// KeyTimer wraps the generic timer
+// KeyTimer is what the daemon knows of the latest record of one key.
 type KeyTimer struct {
-	t *time.Timer
+	t     *time.Timer // nil for a deleted key
+	value []byte
+	// noEvent says that a KVExpired for the key is not a timeout to send: the
+	// timer sent it already, or it is the tombstone of a delete ageing out.
+	noEvent bool
 }
 
 func (d *DaemonLogic) Init() error {
@@ -54,32 +66,21 @@ func (d *DaemonLogic) Start(ctx context.Context, emit func(*fluxmsg.FluxMsg)) er
 	log := d.gear.ctx.Logger()
 	bucket := d.gear.config.Bucket
 
-	// 1. Watch Setup via SubscribeRaw (Push-based, Performance optimized)
-	// We subscribe to the underlying NATS KV Subject: $KV.<bucket>.>
-	// Stream Name for KV is KV_<bucket>
-	streamName := fmt.Sprintf("KV_%s", bucket)
-	subject := fmt.Sprintf("$KV.%s.>", bucket)
-	prefix := fmt.Sprintf("$KV.%s.", bucket)
+	d.mu.Lock()
+	d.stopped = false
+	d.mu.Unlock()
 
-	sub, err := d.gear.ctx.Bus().SubscribeRaw(subject, streamName, func(ctx context.Context, subj string, data []byte) {
-		// Extract Key
-		key := strings.TrimPrefix(subj, prefix)
-		// d.gear.ctx.Logger().Info("Daemon Raw Event", "key", key, "len", len(data))
-
-		// Heuristic: Non-empty data = PUT, Empty data = DEL/PURGE
-		// (Safe for CoatCheck because we always store CBOR blobs, never empty bytes)
-		if len(data) > 0 {
-			d.scheduleExpiry(key, data, emit)
-		} else {
-			d.cancelExpiry(key)
-		}
+	// Follow starts with what the bucket holds: a scenario activation
+	// restarts the gears while entries are parked.
+	sub, err := d.gear.ctx.Bus().KV().Follow(ctx, bucket, func(rec bus.KVRecord) {
+		d.observe(rec, emit)
 	})
 	if err != nil {
-		return fmt.Errorf("daemon raw subscribe failed: %w", err)
+		return fmt.Errorf("daemon follow failed: %w", err)
 	}
 
 	d.sub = sub
-	log.Info("daemon watching bucket", "bucket", bucket, "method", "SubscribeRaw")
+	log.Info("daemon watching bucket", "bucket", bucket, "method", "Follow")
 
 	return nil
 }
@@ -91,19 +92,77 @@ func (d *DaemonLogic) Stop() {
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.stopped = true
 	for k, t := range d.timers {
-		t.t.Stop()
+		t.stop()
 		delete(d.timers, k)
 	}
 }
 
-func (d *DaemonLogic) scheduleExpiry(key string, value []byte, emit func(*fluxmsg.FluxMsg)) {
+func (k *KeyTimer) stop() {
+	if k.t != nil {
+		k.t.Stop()
+	}
+}
+
+// observe applies one record of the bucket.
+func (d *DaemonLogic) observe(rec bus.KVRecord, emit func(*fluxmsg.FluxMsg)) {
+	switch rec.Op {
+	case bus.KVPut:
+		d.scheduleExpiry(rec.Key, rec.Value, rec.Revision, emit)
+	case bus.KVPurged:
+		d.cancelExpiry(rec.Key)
+	case bus.KVDeleted:
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		if d.stopped {
+			return
+		}
+		if old, exists := d.timers[rec.Key]; exists {
+			old.stop()
+		}
+		d.timers[rec.Key] = &KeyTimer{noEvent: true}
+	case bus.KVExpired:
+		d.expiredByServer(rec, emit)
+	}
+}
+
+// expiredByServer sends the timeout of an entry that the server removed
+// before the timer fired. The marker of a key that this daemon did not see is
+// not a timeout: that of an entry which expired while no daemon ran is the
+// same as that of a deleted entry whose tombstone aged out.
+func (d *DaemonLogic) expiredByServer(rec bus.KVRecord, emit func(*fluxmsg.FluxMsg)) {
+	d.mu.Lock()
+	known, seen := d.timers[rec.Key]
+	if d.stopped || !seen {
+		d.mu.Unlock()
+		return
+	}
+	known.stop()
+	send, value := !known.noEvent, known.value
+	delete(d.timers, rec.Key)
+	d.mu.Unlock()
+
+	// Off the consumer's goroutine: the purge is a round trip to the bus.
+	go func() {
+		if send {
+			d.handleTimeout(rec.Key, value, rec.Revision, emit)
+			return
+		}
+		d.purge(rec.Key, rec.Revision)
+	}()
+}
+
+func (d *DaemonLogic) scheduleExpiry(key string, value []byte, revision uint64, emit func(*fluxmsg.FluxMsg)) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.stopped {
+		return
+	}
 
 	// If timer exists, stop it (update)
 	if old, exists := d.timers[key]; exists {
-		old.t.Stop()
+		old.stop()
 		delete(d.timers, key)
 	}
 
@@ -123,11 +182,22 @@ func (d *DaemonLogic) scheduleExpiry(key string, value []byte, emit func(*fluxms
 	ttl := d.gear.resolveTTL(&msg, d.gear.config.DefaultTTL, d.gear.config.MaxTTL)
 
 	// Set Timer
-	timer := time.AfterFunc(ttl, func() {
-		d.handleTimeout(key, value, emit)
+	entry := &KeyTimer{value: value}
+	entry.t = time.AfterFunc(ttl, func() {
+		d.mu.Lock()
+		// A timer that already fired cannot be stopped: a newer record of
+		// the key, or the server's marker, may have taken its place.
+		if d.stopped || d.timers[key] != entry {
+			d.mu.Unlock()
+			return
+		}
+		entry.noEvent = true
+		entry.value = nil
+		d.mu.Unlock()
+		d.handleTimeout(key, value, revision, emit)
 	})
 
-	d.timers[key] = &KeyTimer{t: timer}
+	d.timers[key] = entry
 }
 
 func (d *DaemonLogic) cancelExpiry(key string) {
@@ -135,17 +205,14 @@ func (d *DaemonLogic) cancelExpiry(key string) {
 	defer d.mu.Unlock()
 
 	if t, exists := d.timers[key]; exists {
-		t.t.Stop()
+		t.stop()
 		delete(d.timers, key)
 	}
 }
 
-func (d *DaemonLogic) handleTimeout(key string, value []byte, emit func(*fluxmsg.FluxMsg)) {
-	d.mu.Lock()
-	// Clean up timer map
-	delete(d.timers, key)
-	d.mu.Unlock()
-
+// handleTimeout sends the timeout event of one revision of a key and purges
+// that revision.
+func (d *DaemonLogic) handleTimeout(key string, value []byte, revision uint64, emit func(*fluxmsg.FluxMsg)) {
 	log := d.gear.ctx.Logger()
 	log.Info("coat expired", "key", key)
 
@@ -162,7 +229,7 @@ func (d *DaemonLogic) handleTimeout(key string, value []byte, emit func(*fluxmsg
 	event.Metadata["timeout.key"] = key
 	event.Metadata["timeout.bucket"] = d.gear.config.Bucket
 
-	if d.gear.config.IncludeValues {
+	if d.gear.config.IncludeValues && len(value) > 0 {
 		// Attach original as payload or raw?
 		// Trying to unmarshal original
 		var orig fluxmsg.FluxMsg
@@ -177,11 +244,17 @@ func (d *DaemonLogic) handleTimeout(key string, value []byte, emit func(*fluxmsg
 
 	emit(event)
 
-	// 2. Delete from KV ensures it's gone
-	// Wait, if we delete, the Watcher triggers "DEL", which calls cancelExpiry.
-	// Does "DEL" cause loops?
-	// DEL -> cancelExpiry (Stop timer) -> Timer already fired. Safe.
+	// 2. Remove what expired
+	d.purge(key, revision)
+}
 
-	bucket := d.gear.config.Bucket
-	_ = d.gear.ctx.Bus().KV().Delete(context.Background(), bucket, key)
+// purge removes one revision of a key. A key parked again since has a newer
+// one and stays. A purge, not a delete: the server follows the tombstone of a
+// delete with an expiry marker, which would be a second timeout.
+func (d *DaemonLogic) purge(key string, revision uint64) {
+	ctx, cancel := context.WithTimeout(context.Background(), d.gear.config.StoreTimeout)
+	defer cancel()
+	if err := d.gear.ctx.Bus().KV().PurgeRevision(ctx, d.gear.config.Bucket, key, revision); err != nil {
+		d.gear.ctx.Logger().Debug("expired coat not purged", "key", key, "revision", revision, "error", err)
+	}
 }

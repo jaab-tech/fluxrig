@@ -77,6 +77,11 @@ type Config struct {
 	MergeStrategy string        `mapstructure:"merge_strategy"`
 	OnMissing     string        `mapstructure:"on_missing"` // "error", "drop", "forward"
 
+	// DeleteOnRestore makes an entry single use, so that a key which was
+	// restored does not time out. Off by default: a repeated reply, or a
+	// second restore of the key, needs the entry.
+	DeleteOnRestore bool `mapstructure:"delete_on_restore"`
+
 	// Daemon Config
 	Storage       string        `mapstructure:"storage"`
 	Replicas      int           `mapstructure:"replicas"`
@@ -183,6 +188,10 @@ func (g *CoatCheckGear) Init(ctx sdk.GearContext) error {
 		}
 	} else if v, ok := cfg["key_fields"].([]string); ok {
 		g.config.KeyFields = v
+	}
+
+	if v, ok := cfg["delete_on_restore"].(bool); ok {
+		g.config.DeleteOnRestore = v
 	}
 
 	// Parse ValueFields (Partial Storage)

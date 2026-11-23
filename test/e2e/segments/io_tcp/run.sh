@@ -33,11 +33,8 @@ SNAKE_PORT=4306
 
 banner "Simple TCP Gear Regression Test"
 
-# Cleanup — port-scoped only (this segment's own ports)
-log_info "Performing cleanup of ports: $MIXER_API_PORT, $SNAKE_PORT, 9001, 9002"
-lsof -ti :$MIXER_API_PORT -ti :$SNAKE_PORT -ti :9001 -ti :9002 | xargs kill -9 2>/dev/null || true
-pkill -f "mock_server.py" || true
-sleep 1
+# The ports of this segment must be free.
+require_free_ports "$MIXER_API_PORT" "$SNAKE_PORT" 9001 9002
 
 # Initial Configs
 cp "${BASE_DIR}/mixer/fluxrig.toml" "${WORK_DIR}/mixer/fluxrig.toml"

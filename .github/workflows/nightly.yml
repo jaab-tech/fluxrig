@@ -49,7 +49,9 @@ env:
 
 jobs:
   regression:
-    if: github.event_name != 'workflow_dispatch' || inputs.jobs == 'all' || inputs.jobs == 'regression'
+    # Not on the public repository: the self-hosted runner does not serve
+    # public repositories, and the job waited there until it was cancelled.
+    if: github.repository != 'jaab-tech/fluxrig' && (github.event_name != 'workflow_dispatch' || inputs.jobs == 'all' || inputs.jobs == 'regression')
     runs-on: [self-hosted, oci-int]
     steps:
       # No ref: a scheduled run checks out the default branch, which is the

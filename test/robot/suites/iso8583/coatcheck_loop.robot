@@ -74,7 +74,7 @@ Teardown CoatCheck Suite
     # Stop Processes
     Stop Process    rack
     Stop Process    mixer
-    Stop Process    echo_server
+    Stop Echo Server
     Stop All Load Generators
     
     # Allow filesystem sync
