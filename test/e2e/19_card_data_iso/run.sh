@@ -67,7 +67,7 @@ cleanup() {
 trap cleanup EXIT
 
 # 0. Prep
-lsof -ti :9165 -ti :4285 -ti :10101 -ti :10102 2>/dev/null | xargs kill -9 2>/dev/null || true
+require_free_ports 9165 4285 10101 10102
 
 # 1. Mixer, two Racks, one scenario. Only the log level is set, and only to make the
 # run at another level possible: the default is "info".

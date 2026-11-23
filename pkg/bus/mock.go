@@ -163,6 +163,12 @@ func (m *MockKeyValue) Get(ctx context.Context, bucket, key string) ([]byte, uin
 }
 
 func (m *MockKeyValue) Delete(ctx context.Context, bucket, key string) error { return nil }
+func (m *MockKeyValue) PurgeRevision(ctx context.Context, bucket, key string, revision uint64) error {
+	return nil
+}
+func (m *MockKeyValue) Follow(ctx context.Context, bucket string, handler func(KVRecord)) (Subscription, error) {
+	return &MockSubscription{}, nil
+}
 func (m *MockKeyValue) Watch(ctx context.Context, bucket, keys string, handler KVHandler) (Subscription, error) {
 	return &MockSubscription{}, nil
 }

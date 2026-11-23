@@ -45,11 +45,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-log_info "Killing old processes and freeing ports..."
-pkill -f "bin/fluxrig" || true
-sleep 1
-lsof -ti :8099 | xargs kill -9 2>/dev/null || true
-lsof -ti :4299 | xargs kill -9 2>/dev/null || true
+require_free_ports 8099 4299
 
 cd "${ROOT_DIR}"
 mkdir -p "${WORK_DIR}/mixer/logs" "${WORK_DIR}/rack/logs"

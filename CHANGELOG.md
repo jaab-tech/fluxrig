@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 | Version | Date | Status | Summary |
 | :--- | :--- | :--- | :--- |
+| [v0.16.0](#v0160) | 2026-11-23 | Delivered | A Coat Check daemon no longer loses a timeout to the bucket's expiry and takes up what was parked before it started, `delete_on_restore` can make a parked entry single use, the moov modules move, and Go 1.26.11 fixes GO-2026-6859 |
 | [v0.15.1](#v0151) | 2026-11-21 | Delivered | A Rack that enrolls again gets the active scenario from the Mixer, which v0.15.0 dropped, and `enrollment.push_timeout` bounds that push |
 | [v0.15.0](#v0150) | 2026-11-21 | Delivered | Several Mixers share one control plane on an operator-run NATS cluster, with a write lease, shared telemetry and per-Rack permissions. Faster failover detection, batched event and log shipping, and a hardened API and Wasm surface |
 | [v0.14.0](#v0140) | 2026-11-01 | Delivered | A server can greet a client that sent nothing, through durable connection events, a misspelt gear option is refused, a late reply can reach the new connection of its peer, and the Wasm gear refuses an unsigned catalog module and applies its memory limit |
@@ -31,6 +32,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 | [v0.7.1](#v071) | 2026-08-10 | Delivered | ISO 8583 TLV length hardening |
 | [v0.7.0](#v070) | 2026-08-01 | Delivered | Payment switch: Conductor gear, gear manifests, ISO 8583 TLS |
 
+
+## [v0.16.0] - 2026-11-23 {#v0160}
+
+### Added
+
+- **`delete_on_restore` for the Coat Check `restore` mode, off by default.**
+  By default a restored entry stays until its TTL and then sends
+  `flux.event.timeout`, so **that event does not mean that no reply came**.
+  Earlier versions do the same. With the option on, `restore` removes the
+  revision that it restored and the key does not time out, unless the reply
+  comes at the expiry or the removal fails. A repeated reply, or a second
+  restore of the key, then follows `on_missing`. The Rack needs no new NATS
+  permissions.
+
+### Changed
+
+- **`moov-io/iso8583` v0.26.4.** A Track 2 (field 35 of the shipped specs)
+  that ends right after the service code, with no discretionary data, now
+  encodes and decodes if its expiry is a valid year and month. ISO/IEC 7813
+  allows it. Before, the codec refused it with `invalid track data`. With an
+  expiry that is not valid it is still refused, now with
+  `invalid expired time`.
+
+- **`moov-io/rtp20022` v0.12.3 and `moov-io/base` v0.68.2.** The RTP
+  messages, their validation and the masking of the values that break a rule
+  are unchanged. `golang.org/x/net` v0.61.0, `x/crypto` v0.58.0, `x/sync`
+  v0.24.0 and `x/text` v0.43.0 come with them.
+
+### Fixed
+
+- **A Coat Check daemon no longer loses a timeout to the expiry of the
+  bucket.** Since v0.13.0 the
+  server could remove an entry a moment before the daemon's timer fired. The
+  daemon read that as a delete and never sent `flux.event.timeout`, with
+  nothing in the log. The expiry of the server is now the timeout as well,
+  and a daemon sends one event for the expiry of an entry that it saw.
+- **A Coat Check daemon that starts takes up the entries already parked.**
+  It saw only new ones, so an activation, which restarts the gears, lost the
+  timeouts that were pending. An entry that expired while no daemon ran
+  still has no event: the bucket marks it like a deleted entry, so an event
+  for it could be a false timeout. **A scenario that acts on the event gets
+  events that were lost before.**
+- **A Coat Check entry that is parked again keeps a TTL.** The second park
+  stored it with none, so it lived for up to `max_ttl` (default `5m`) when no
+  daemon removed it, whatever its own TTL. It now takes the TTL of the last
+  park. Entries written by an earlier version keep the lifetime they have.
+- **A Coat Check TTL under one second, or with a fraction, works.** A TTL
+  under a second, which the schema accepts, failed the write to the bucket,
+  and with it the message when `await_store` is on. A fraction was dropped.
+  The bucket now rounds a TTL up to whole seconds, and the daemon times out
+  at the exact TTL.
+- **Built with Go 1.26.11.** It fixes GO-2026-6859 in `net/http`: with
+  `MaxBytesReader`, an HTTP/1 handler that reads the request body while it
+  writes the response header can crash the server. `govulncheck` flagged the
+  code because it calls `net/http`, and finds nothing reachable now. The
+  Mixer API handlers that use `MaxBytesReader` read the body before they
+  answer.
 
 ## [v0.15.1] - 2026-11-21 {#v0151}
 
@@ -558,7 +616,8 @@ The payment-switch release: the **Conductor** transaction switch, a manifest sys
 - **Snake Protocol**: Secure tunneling implementation for Rack-to-Mixer connectivity.
 - **FluxMsg**: Canonical JSON schema for inter-gear communication.
 
-[Unreleased]: https://github.com/jaab-tech/fluxrig/compare/v0.15.1...HEAD
+[Unreleased]: https://github.com/jaab-tech/fluxrig/compare/v0.16.0...HEAD
+[v0.16.0]: https://github.com/jaab-tech/fluxrig/releases/tag/v0.16.0
 [v0.15.1]: https://github.com/jaab-tech/fluxrig/releases/tag/v0.15.1
 [v0.15.0]: https://github.com/jaab-tech/fluxrig/releases/tag/v0.15.0
 [v0.14.0]: https://github.com/jaab-tech/fluxrig/releases/tag/v0.14.0

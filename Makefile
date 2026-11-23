@@ -170,7 +170,8 @@ clean: ## Remove local build artifacts (Fast)
 	@echo "Cleaning local artifacts..."
 	rm -rf bin/
 	rm -rf test/test_logs/
-	rm -rf /tmp/fluxrig*
+	@# /tmp/fluxrig is left alone: it holds the runs, and the evidence, of every
+	@# checkout and session on the host.
 	# Clean E2E test artifacts (recursive data/logs)
 	find test/e2e -name "data" -type d -exec rm -rf {} +
 	find test/e2e -name "logs" -type d -exec rm -rf {} +
@@ -239,16 +240,12 @@ test-scenarios: $(VENV) build ## Run Robot Framework Scenarios (Multi-Rack)
 	@mkdir -p test/robot/scenarios
 	$(ROBOT) --outputdir test/robot/scenarios test/robot/scenarios/setup_scenarios.robot
 
-robot-prep: ## Kill lingering Mixer/Rack/NATS/ISO processes (Hardening)
-	@echo "--------------------------------------------------"
-	@echo "Locking down environment for Robot execution..."
-	-@pkill -9 fluxrig 2>/dev/null || true
-	-@pkill -9 fluxrig-mixer 2>/dev/null || true
-	-@pkill -9 iso8583-tool 2>/dev/null || true
-	-@lsof -ti:8080,4222,8583,54321,9120 2>/dev/null | xargs kill -9 2>/dev/null || true
-	@echo "Environment Secured."
-	@echo "--------------------------------------------------"
-	@sleep 1
+# Each Robot target checks the ports its own suite binds, just before it runs:
+# a suite that finds one taken would talk to somebody else's service.
+PORTS_FREE := bash test/e2e/utils/require_free_ports.sh
+
+robot-prep: ## Check that the ports the Robot suites share are free (kills nothing)
+	@$(PORTS_FREE) 4222 8090 8583 8590 54321
 
 help: ## Display this help screen
 	@grep -h -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}'
@@ -321,26 +318,32 @@ test-robot-perf: build-bin iso8583-tool ## Run Robot Performance Suite
 	@./test/robot/run.sh test/robot/suites/iso8583/server_staged_load.robot
 
 test-robot-iso: build-bin iso8583-tool ## Run Robot ISO8583 Suite
+	@$(PORTS_FREE) 4222 8090 8583
 	@echo "Running Robot ISO8583 Suite (Validation)..."
 	@./test/robot/run.sh test/robot/suites/iso8583/server_validation.robot
 
 test-robot-validation-rules: robot-prep build-bin ## Run Robot Spec Validation Suite (what a spec's rules do to real traffic)
+	@$(PORTS_FREE) 4222 8090 8601 8602 8603
 	@echo "Running Spec Validation Rules Suite..."
 	@cd test/robot && ./run.sh suites/iso8583/validation_rules.robot
 
 test-robot-tlv: build-bin iso8583-tool ## Run Robot ISO8583 TLV Fidelity Suite
+	@$(PORTS_FREE) 4222 8090 8583
 	@echo "Running Robot ISO8583 TLV Fidelity Suite..."
 	@./test/robot/run.sh test/robot/suites/iso8583/tlv_fidelity.robot
 
 test-robot-coatcheck: build-bin ## Run Robot Coatcheck Suite
+	@$(PORTS_FREE) 4222 8090 8583 54321
 	@echo "Running Robot Coatcheck Suite..."
 	@./test/robot/run.sh test/robot/suites/iso8583/coatcheck_loop.robot
 
 test-robot-topology: robot-prep build-bin ## Run Robot Topology Suite
+	@$(PORTS_FREE) 4222 8090 9110
 	@echo "Running Topology Test..."
 	@cd test/robot && ./run.sh suites/topology/cross_rack.robot
 
 test-robot-specs: robot-prep build-bin ## Run Robot Spec Suite (the contract a spec states, and the documents derived from it)
+	@$(PORTS_FREE) 4222 4232 4233 8090 8095 8096
 	@echo "Running Spec Suite..."
 	@cd test/robot && ./run.sh suites/specs
 
@@ -360,14 +363,17 @@ test-ha-failover: ## Run the NATS HA chaos testbed (Docker): partitions, loss, w
 	@test/ha/testbed/run.sh
 
 test-robot-telemetry: robot-prep build-bin ## Run Robot Telemetry Suite
+	@$(PORTS_FREE) 4222 8090
 	@echo "Running Telemetry Coverage Test..."
 	@cd test/robot && ./run.sh suites/telemetry/force_log_coverage.robot
 
 test-robot-billpay: robot-prep build-bin iso8583-tool ## Run Robot ISO 8583 to ISO 20022 bridge suite (the tutorial, run as written)
+	@$(PORTS_FREE) 4222 7020 8090 8583
 	@echo "Running the ISO 8583 to ISO 20022 bridge suite..."
 	@cd test/robot && ./run.sh suites/billpay_rtp
 
 test-robot-conn-events: robot-prep build-bin ## Run Robot Connection Events Suite
+	@$(PORTS_FREE) 4222 8090 8888 18891
 	@echo "Running Connection Events Suite..."
 	@cd test/robot && ./run.sh suites/conn_events
 
@@ -399,10 +405,12 @@ robot-publish: ## Pin the latest Robot run into the docs site (usage: make robot
 	fi
 
 test-robot-roaming: robot-prep build-bin ## Run Robot Roaming Enrichment Suite (network signal, with a CAMARA simulator)
+	@$(PORTS_FREE) 4222 8090 8586 18590 19500
 	@echo "Running Roaming Enrichment Suite..."
 	@cd test/robot && ./run.sh suites/roaming/roaming.robot
 
 test-robot-roaming-stress: robot-prep build-bin ## Run Robot Roaming Stress Suite (correlation under load; runs on its own, not in test-robot)
+	@$(PORTS_FREE) 4222 8090 8586 18590 19500
 	@echo "Running Roaming Stress Suite..."
 	@cd test/robot && ./run.sh suites/roaming/stress_load.robot
 

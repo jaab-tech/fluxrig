@@ -37,18 +37,25 @@ mkdir -p "$WORK_DIR" "$RESULTS_DIR"
 # The process that owns this run root, so pruning below never removes a root
 # whose run is still going (several runs can share this machine).
 echo "$$" > "${TEST_ROOT}/.owner"
+# The checkout that made this run root: pruning only removes its own.
+echo "$BASE_DIR" > "${TEST_ROOT}/.checkout"
 # Every suite creates its workspace under this root (lib/keywords/process.py,
 # Setup Workspace): <work>/<suite directory name>, with a suffix when several
 # .robot files share a directory.
 export FLUXRIG_ROBOT_WORK_ROOT="$WORK_DIR"
 
-# Keep the newest run roots and remove the rest. FLUXRIG_ROBOT_KEEP_RUNS sets how
-# many (default 10, this run included); 0 keeps them all. A root whose owner is
-# still alive is kept whatever its age: removing it would delete a run that is
-# still writing its logs.
-KEEP_RUNS="${FLUXRIG_ROBOT_KEEP_RUNS:-10}"
+# Every run root is kept by default: the host can be shared, and a run's logs
+# can be somebody's evidence. FLUXRIG_ROBOT_KEEP_RUNS=N keeps the newest N of
+# this checkout (this run included) and removes the older ones of this checkout
+# only. A root whose owner is still alive is kept whatever its age: removing it
+# would delete a run that is still writing its logs.
+KEEP_RUNS="${FLUXRIG_ROBOT_KEEP_RUNS:-0}"
 if [ "$KEEP_RUNS" -gt 0 ] 2>/dev/null; then
-    ls -1d /tmp/fluxrig/robot_run_* 2>/dev/null | sort -r | tail -n +"$((KEEP_RUNS + 1))" | while read -r old; do
+    ls -1d /tmp/fluxrig/robot_run_* 2>/dev/null | sort -r | while read -r run; do
+        if [ "$(cat "$run/.checkout" 2>/dev/null || true)" = "$BASE_DIR" ]; then
+            echo "$run"
+        fi
+    done | tail -n +"$((KEEP_RUNS + 1))" | while read -r old; do
         [ "$old" = "$TEST_ROOT" ] && continue
         # `|| true`: an older root has no owner file, and under `set -e` a failed
         # read would end this script.

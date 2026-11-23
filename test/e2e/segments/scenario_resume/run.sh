@@ -75,10 +75,8 @@ port_is_listening() {
     lsof -Pi :"$1" -sTCP:LISTEN -t >/dev/null 2>&1
 }
 
-# 0. This segment owns 8103/4303/9611 exclusively; clearing them is scoped
-# to those ports, never a blanket process-name kill.
-lsof -ti :${API_PORT} | xargs kill -9 2>/dev/null || true
-lsof -ti :$GATEWAY_PORT | xargs kill -9 2>/dev/null || true
+# 0. The ports of this segment must be free.
+require_free_ports "$API_PORT" "$GATEWAY_PORT"
 
 # 1. Mixer and Rack, online
 log_info "--- Phase 1: Enroll and apply a scenario ---"

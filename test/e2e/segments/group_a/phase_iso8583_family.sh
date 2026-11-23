@@ -327,7 +327,6 @@ fi
 # Tear down rack-iso-01 and its gears before the next phase reuses port 8583.
 stop_pid "${RACK_PIDS[iso]}"
 unset 'RACK_PIDS[iso]'
-pkill -f "${ISO_FAMILY_DIR}/iso8583_tool.py" 2>/dev/null || true
 wait_for_port_free() {
     local port="$1" timeout="${2:-10}"
     for ((i=1;i<=timeout;i++)); do

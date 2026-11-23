@@ -61,6 +61,9 @@ type liveConsumer struct {
 	handle func(jetstream.Msg) bool
 
 	started time.Time
+	// replay starts from the last message of each subject instead of from
+	// new messages on.
+	replay bool
 
 	mu      sync.Mutex
 	cc      jetstream.ConsumeContext
@@ -97,11 +100,15 @@ func newLiveConsumer(js jetstream.JetStream, note func(string, error), stream, p
 	}
 }
 
-// start creates the first consumer, from new messages on, retrying attempts
-// times, and starts watching it.
+// start creates the first consumer, from new messages on or, with replay,
+// from the last message of each subject, retrying attempts times, and starts
+// watching it.
 func (l *liveConsumer) start(attempts int) error {
 	cfg := l.base
 	cfg.DeliverPolicy = jetstream.DeliverNewPolicy
+	if l.replay {
+		cfg.DeliverPolicy = jetstream.DeliverLastPerSubjectPolicy
+	}
 	var err error
 	for i := 0; i < max(attempts, 1); i++ {
 		if err = l.consume(cfg); err == nil {
@@ -322,6 +329,11 @@ func (l *liveConsumer) resumeConfig() (jetstream.ConsumerConfig, uint64) {
 		}
 	}
 	if l.settled == 0 && len(l.pending) == 0 {
+		if l.replay {
+			// Nothing delivered yet: the replay starts over.
+			cfg.DeliverPolicy = jetstream.DeliverLastPerSubjectPolicy
+			return cfg, 0
+		}
 		// Nothing delivered yet: everything since the subscription began.
 		cfg.DeliverPolicy = jetstream.DeliverByStartTimePolicy
 		started := l.started

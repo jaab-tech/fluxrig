@@ -29,7 +29,7 @@ Start Roaming Platform
     ...                the enrichment under test, the operator endpoint, and the
     ...                issuer's authorizer.
     [Arguments]    ${suite_dir}
-    Force Cleanup Environment
+    Force Cleanup Environment    ${SCHEME_PORT}    ${CAMARA_PORT}    ${AUTHORIZER_PORT}
     ${wd}=    Setup Workspace    ${suite_dir}    output_dir=${OUTPUT_DIR}
     Set Suite Variable    ${WORK_DIR}    ${wd}
     Set Suite Variable    ${SUITE_DIR}    ${suite_dir}
@@ -92,7 +92,9 @@ Restart Authorizer With Delay
     Sleep    2s    reason=reconnect_wait is 1s; give the client a cycle to redial
 
 Stop Roaming Platform
-    Run Keyword And Ignore Error    Stop Conductor Process    authorizer
+    # Every host the suite started: Restart Authorizer With Delay leaves
+    # `authorizer_slow` on the authorizer's port, under its own alias.
+    Run Keyword And Ignore Error    Stop All Conductor Processes
     FOR    ${r}    IN    fluxrig    telco
         Run Keyword And Ignore Error    Stop Process    rack-${r}
     END

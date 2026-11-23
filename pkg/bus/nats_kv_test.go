@@ -265,3 +265,40 @@ func TestNatsKV_KeysOfAnEmptyBucket(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, keys)
 }
+
+// A re-park carries its TTL. Without it the entry lived for the bucket TTL:
+// parked data outlived its ticket by up to max_ttl.
+func TestNatsKV_ReparkKeepsATTL(t *testing.T) {
+	ctx := context.Background()
+	const bucket = "kv_repark_test"
+	kv, _ := newTestKV(t, bucket, 10*time.Minute)
+	for _, v := range []string{"first", "second"} {
+		_, err := kv.PutWithTTL(ctx, bucket, "k", []byte(v), time.Second)
+		require.NoError(t, err)
+	}
+	require.Eventually(t, func() bool {
+		v, _, err := kv.Get(ctx, bucket, "k")
+		return err == nil && v == nil
+	}, 8*time.Second, 100*time.Millisecond, "the re-parked entry lives for the bucket TTL")
+}
+
+// The server counts a TTL in whole seconds and drops the fraction. It is
+// rounded up, so an entry never expires before the TTL that was asked for.
+func TestNatsKV_FractionalTTLIsRoundedUp(t *testing.T) {
+	ctx := context.Background()
+	const bucket = "kv_fraction_test"
+	kv, _ := newTestKV(t, bucket, 10*time.Minute)
+
+	_, err := kv.PutWithTTL(ctx, bucket, "short", []byte("v"), 200*time.Millisecond)
+	require.NoError(t, err, "a TTL under one second is stored")
+
+	_, err = kv.PutWithTTL(ctx, bucket, "k", []byte("v"), 1500*time.Millisecond)
+	require.NoError(t, err)
+	stored := time.Now()
+	for time.Since(stored) < 1400*time.Millisecond {
+		v, _, errGet := kv.Get(ctx, bucket, "k")
+		require.NoError(t, errGet)
+		require.NotNil(t, v, "expired %v after the put, before its TTL of 1.5s", time.Since(stored))
+		time.Sleep(50 * time.Millisecond)
+	}
+}

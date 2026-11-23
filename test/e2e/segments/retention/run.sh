@@ -53,10 +53,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# 0. This segment owns 8112/4311 exclusively; clearing them is scoped to
-# those two ports, never a blanket process-name kill.
-lsof -ti :${API_PORT} | xargs kill -9 2>/dev/null || true
-lsof -ti :${SNAKE_PORT} | xargs kill -9 2>/dev/null || true
+# 0. The ports of this segment must be free.
+require_free_ports "$API_PORT" "$SNAKE_PORT"
 
 if [ -z "${FLUXRIG_E2E_SKIP_BUILD:-}" ]; then
     log_info "Building..."

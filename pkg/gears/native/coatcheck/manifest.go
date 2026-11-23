@@ -35,6 +35,7 @@ func (g *CoatCheckGear) Manifest() sdk.Manifest {
     "default_ttl": { "type": "string", "pattern": "^[0-9]+(s|ms|m|h)$", "default": "1m", "description": "how long a parked entry lives before expiry, e.g. '30s'. The entry is stored with this TTL, so it expires even if the daemon is not running." },
     "max_ttl": { "type": "string", "pattern": "^[0-9]+(s|ms|m|h)$", "default": "5m", "description": "daemon mode: safety cap on any per-message TTL override." },
     "on_missing": { "type": "string", "enum": ["error", "drop", "forward"], "default": "error", "description": "restore mode: what to do when no entry is found (expired/never stored): error, drop, or forward without context. Forwarding a reply with its stripped fields unrestored must be requested by name." },
+    "delete_on_restore": { "type": "boolean", "default": false, "description": "restore mode: remove the entry after it is restored, so it does not time out. A later reply or restore with the same key then follows on_missing. The removal does not hold the reply and is bounded by store_timeout." },
     "merge_strategy": { "type": "string", "description": "restore mode: overwrite replaces existing metadata; any other value preserves it." },
     "storage": { "type": "string", "enum": ["file", "memory"], "description": "bucket backing store: file (durable) or memory." },
     "replicas": { "type": "integer", "description": "daemon mode: KV bucket replica count." },

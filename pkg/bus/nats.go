@@ -978,6 +978,7 @@ func (s *natsSubscription) Unsubscribe() error {
 // KV returns the KeyValue interface for distributed state management.
 func (n *NatsBus) KV() KeyValue {
 	return &natsKV{
-		js: n.js,
+		js:  n.js,
+		bus: n,
 	}
 }

@@ -50,10 +50,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# 0. This segment owns 8102/4302 exclusively; clearing them is scoped to
-# those two ports, never a blanket process-name kill.
-lsof -ti :${API_PORT} | xargs kill -9 2>/dev/null || true
-lsof -ti :${SNAKE_PORT} | xargs kill -9 2>/dev/null || true
+# 0. The ports of this segment must be free.
+require_free_ports "$API_PORT" "$SNAKE_PORT"
 
 log_info "Generating Keys & Certs..."
 "$(bin_dir)/fluxrig" keys gen-cluster -o "${WORK_DIR}/mixer/data/cluster.key" > /dev/null
